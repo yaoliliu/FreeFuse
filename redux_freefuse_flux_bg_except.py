@@ -9,7 +9,6 @@ The Redux embeddings are concatenated with text prompt embeddings to provide
 global visual guidance, while LoRAs handle individual concept appearance.
 """
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '3'
 import torch
 from PIL import Image
 from diffusers.models.transformers.transformer_flux import FluxTransformerBlock, FluxAttention
@@ -409,15 +408,15 @@ def main():
     background_concept = "Traditional Japanese ukiyo-e woodblock style in the style of Hokusai"
     
     # Generation settings
-    seed = 42
+    seed = 77
     height = 1024
     width = 1024
     guidance_scale = 7
-    true_cfg_scale = 1
-    output_prefix = "redux_freefuse"
+    true_cfg_scale = 0
+    output_prefix = "flux_redux"
     
     # Model quantization
-    quantization = True
+    quantization = False
     
     # ========== Setup Pipelines ==========
     print("Setting up pipelines...")
@@ -573,7 +572,7 @@ def main():
         height=height, 
         width=width, 
         generator=generator, 
-        debug_save_path='debug_direct_extract',
+        # debug_save_path='debug_direct_extract',
         joint_attention_kwargs={
             'freefuse_token_pos_maps': freefuse_token_pos_maps,
             'concept_token_texts': concept_token_texts,

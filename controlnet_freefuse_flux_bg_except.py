@@ -6,7 +6,6 @@ position maps, avoiding the token symmetry problem caused by separate encoding.
 It also supports ControlNet for structural conditioning.
 """
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '3'
 import torch
 from diffusers.models.transformers.transformer_flux import FluxTransformerBlock, FluxAttention
 from diffusers.models.transformers.transformer_flux import FluxTransformer2DModel as orgFluxTransformer2DModel
@@ -303,7 +302,7 @@ def main():
             "https://huggingface.co/city96/FLUX.1-dev-gguf/blob/main/flux1-dev-Q5_0.gguf"
         )
         
-        # 使用 bitsandbytes 8-bit 量化加载 T5 (真正节省显存)
+        # 使用 bitsandbytes 8-bit 量化加载 T5 
         # 8-bit quantization: ~10GB VRAM savings vs full precision T5-XXL
         # bnb_config = BitsAndBytesConfig(load_in_8bit=True)
         
@@ -352,9 +351,9 @@ def main():
 
     # Load LoRA weights
 
-    pipe.load_lora_weights("loras/shalnark_flux.safetensors", adapter_name="shalnark")
-    pipe.load_lora_weights("loras/ran_mori.safetensors", adapter_name="ran")
-    pipe.set_adapters(["shalnark", "ran"], [0.7, 0.7])
+    pipe.load_lora_weights("loras/daiyu_lin_flux.safetensors", adapter_name="daiyu")
+    pipe.load_lora_weights("loras/harry_potter_flux.safetensors", adapter_name="harry")
+    pipe.set_adapters(["daiyu", "harry"], [0.9, 0.9])
 
 
     current_processors = pipe.transformer.attn_processors
@@ -391,13 +390,14 @@ def main():
     # Define concept map - this maps each LoRA adapter to its concept text
     # The concept text should appear in the prompt
     concept_map = {
-        "shalnark": "shalnark, an anime boy with blonde bob haircut and turquoise eyes, wearing purple and teal futuristic uniform, determined expression, digital anime art style",
-        "ran": "RanMōri, anime_style, a young animated woman with long dark hair, featuring a distinctive point at the top, wearing a pink dress with a white floral pattern and a white-collared shirt underneath",
+        "daiyu": "daiyu_lin, a young East Asian photorealistic style woman in traditional Chinese hanfu dress, elaborate black updo hairstyle adorned with delicate white floral hairpins and ornaments, dangling red tassel earrings, soft pink and red color palette, gentle smile with knowing expression",
+        "harry": "harry potter, an European photorealistic style teenage wizard boy with messy black hair, round wire-frame glasses, and bright green eyes, wearing a white shirt, burgundy and gold striped tie, and dark robes"
     }
+
 
     # Build prompt containing all concepts
     clip_prompt = "A picture of two distinct characters"
-    t5_prompt = "A picture of two characters with snow falling in the background: shalnark, an anime boy with blonde bob haircut and turquoise eyes, wearing purple and teal futuristic uniform, determined expression, digital anime art style is performing a traditional Chinese salute and RanMōri, anime_style, a young animated woman with long dark hair, featuring a distinctive point at the top, wearing a pink dress with a white floral pattern and a white-collared shirt underneath is making a V sign."
+    t5_prompt = "A picture of two characters with snow falling in the background: daiyu_lin, a young East Asian photorealistic style woman in traditional Chinese hanfu dress, elaborate black updo hairstyle adorned with delicate white floral hairpins and ornaments, dangling red tassel earrings, soft pink and red color palette, gentle smile with knowing expression is performing a traditional Chinese salute and harry potter, an European photorealistic style teenage wizard boy with messy black hair, round wire-frame glasses, and bright green eyes, wearing a white shirt, burgundy and gold striped tie, and dark robes is making a V sign."
     negtive_prompt = ""
 
     pooled_prompt_embeds, prompt_embeds, pooled_negative_prompt_embeds, negative_prompt_embeds = prepare_prompt_embeds(pipe, clip_prompt,t5_prompt, negative_prompt=negtive_prompt)
@@ -446,7 +446,7 @@ def main():
         height=1024, 
         width=1024, 
         generator=generator, 
-        debug_save_path='debug_direct_extract',
+        # debug_save_path='debug_direct_extract',
         joint_attention_kwargs={
             'freefuse_token_pos_maps': freefuse_token_pos_maps,
             'concept_token_texts': concept_token_texts,
@@ -454,7 +454,7 @@ def main():
             'eos_token_index': eos_token_index,  # Option 1: EOS-based background
             'background_token_positions': background_token_positions,  # Option 2: user-defined background
         },
-        guidance_scale=1.6,
+        guidance_scale=3,
         true_cfg_scale=0,
         # ControlNet parameters
         control_image=control_image,

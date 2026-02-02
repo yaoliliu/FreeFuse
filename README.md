@@ -12,7 +12,8 @@
 
 ## 📌 TODO
 
-- [x] Release inference code
+- [x] Release basic inference code
+- [x] Release inference code for controlnet, ipadapter and redux
 - [ ] Supports ComfyUI
 
 ## 📖 Abstract
@@ -58,6 +59,10 @@ This paper proposes **FreeFuse**, a training-free framework for multi-subject te
 You just need clone this repo and use [uv](https://docs.astral.sh/uv/) to install dependencies.
 
 ``` shell
+apt-get update && apt-get install -y git-lfs && git lfs install
+git clone https://github.com/yaoliliu/FreeFuse.git
+git lfs pull
+
 uv venv
 source .venv/bin/activate
 uv sync
@@ -75,6 +80,21 @@ with background identification and style LoRA
 
 ``` shell
 python main_freefuse_flux_bg_except.py
+```
+
+with redux
+``` shell
+python redux_freefuse_flux_bg_except.py
+```
+
+with ipadapter
+``` shell
+python ipadapter_freefuse_flux_bg_except.py
+```
+
+with controlnet
+``` shell
+python controlnet_freefuse_flux_bg_except.py
 ```
 
 *If you running out of your vram, you can set the quantization variable in the script to 'True' to enable quantization, which will reduce the vram usage.*

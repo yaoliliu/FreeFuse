@@ -603,403 +603,36 @@ class FreeFuseFluxDirectExtractAttnBaisPipeline(
         
         return attention_bias
 
-    def balanced_argmax(self, logits, target_count=None, max_iter=20, lr=0.1):
-        """
-        step: 每次惩罚的步长。由于 logits 经过高斯化，数值通常在 -3 到 3 之间，
-        0.05 是一个比较安全的步长。
-        """
-        B, C, N = logits.shape
-        target = N / C
-        bias = torch.zeros(B, C, 1, device=logits.device)
-        
-        for _ in range(max_iter):
-            # 计算当前的分配
-            indices = torch.argmax(logits - bias, dim=1)
-            
-            # 快速统计每个 batch 的 count (使用 one_hot)
-            counts = torch.nn.functional.one_hot(indices, num_classes=C).sum(dim=1).float() # [B, C]
-            
-            diff = counts - target
-            
-            # 如果所有 batch 的误差都在可接受范围内，提前退出
-            if diff.abs().max() < 10:
-                break
-                
-            # 关键修改：使用 sign(diff) 而不是 diff 本身
-            # 这样避免了某些极端不平衡导致 bias 爆炸
-            bias += torch.sign(diff).unsqueeze(2) * lr
-            
-        return torch.argmax(logits - bias, dim=1)
-
-
-    def balanced_spatial_argmax(self, logits, h, w, target_count=None, max_iter=50, lr=0.5, spatial_weight=0.2):
-        """
-        带有空间凝聚力约束的平衡 Argmax。
-        
-        Args:
-            logits: [B, C, N] 输入张量
-            h: int, 空间高度
-            w: int, 空间宽度 (必须满足 h * w == N)
-            target_count: 每个类别的目标像素数 (默认为 N / C)
-            max_iter: 最大迭代次数
-            lr: 平衡约束的学习率 (控制数量平衡的力度)
-            spatial_weight: 空间约束的权重 (控制“抱团”的力度)
-        """
-        B, C, N = logits.shape
-        
-        # 1. 维度检查，防止 reshape 报错
-        if h * w != N:
-            raise ValueError(f"Input spatial dimensions ({h}x{w}={h*w}) do not match tensor length ({N}).")
-        
-        # 默认目标是均匀分布
-        if target_count is None:
-            target_count = N / C
-        
-        # 全局平衡偏置 (用于控制数量)
-        bias = torch.zeros(B, C, 1, device=logits.device)
-        
-        # 2. 构建邻域卷积核 (3x3)
-        # 作用：计算周围 8 个邻居的平均投票情况
-        # 形状: [Out_C, In_C/groups, k, k] -> [C, 1, 3, 3]
-        neighbor_kernel = torch.ones(C, 1, 3, 3, device=logits.device)
-        neighbor_kernel[:, :, 1, 1] = 0  # 挖空中心，不把自己的当前状态算作“邻居建议”，避免自激
-        neighbor_kernel = neighbor_kernel / 8.0  # 归一化，使其变为概率/强度
-        
-        current_logits = logits.clone()
-
-        for i in range(max_iter):
-            # --- A. 基础选择 ---
-            # 减去 bias 进行当前的硬分配
-            indices = torch.argmax(current_logits - bias, dim=1) # [B, N]
-            
-            # 转换为 One-hot 形式以便进行空间计算和数量统计
-            one_hot = F.one_hot(indices, num_classes=C).float() # [B, N, C]
-            
-            # --- B. 数量平衡更新 (Balance Step) ---
-            # [B, N, C] -> [B, C]
-            counts = one_hot.sum(dim=1) 
-            diff = counts - target_count
-            
-            # 提前退出机制
-            if diff.abs().max() < (N * 0.005): # 容差设为总像素的 0.5% 左右比较合理
-                break
-                
-            # 更新 bias (惩罚数量过多的类)
-            bias += torch.sign(diff).unsqueeze(2) * lr
-            
-            # --- C. 空间凝聚计算 (Spatial Step) ---
-            if spatial_weight > 0:
-                # Reshape 为 2D 图片格式: [B, N, C] -> [B, C, H, W]
-                one_hot_img = one_hot.permute(0, 2, 1).view(B, C, h, w)
-                
-                # 深度卷积 (groups=C)：每个通道独立计算自己的邻居情况
-                # padding=1 保持尺寸不变
-                neighbor_votes = F.conv2d(one_hot_img, neighbor_kernel, padding=1, groups=C)
-                
-                # 展平回 [B, C, N]
-                neighbor_votes = neighbor_votes.view(B, C, N)
-            else:
-                neighbor_votes = 0
-
-            # --- D. 混合 Logits 更新 ---
-            # 核心公式：原始置信度 - 数量惩罚 + 邻居奖励
-            # 邻居奖励：如果周围邻居大多是角色A，那么 neighbor_votes 中角色A的通道值就大，
-            # 从而给该位置的角色A加上额外的 Logits，促使孤立点被同化。
-            current_logits = logits - bias + (neighbor_votes * spatial_weight)
-            
-        return torch.argmax(current_logits, dim=1)
-
-    def balanced_gravity_argmax(self, logits, h, w, target_count=None, max_iter=50, lr=0.2, 
-                            gravity_weight=0.2, spatial_weight=0.1):
-        """
-        结合了【数量平衡】+【局部平滑】+【全局引力】的 Mask 生成算法。
-        
-        Args:
-            gravity_weight: 引力强度。越大，Mask 越倾向于聚集成一个球；越小，允许 Mask 长得越长/越散。
-        """
-        B, C, N = logits.shape
-        device = logits.device
-        
-        # 1. 准备坐标网格 (用于计算距离)
-        # y_grid, x_grid: [B, 1, H, W] -> flatten to [B, 1, N]
-        y_range = torch.arange(h, dtype=torch.float32, device=device)
-        x_range = torch.arange(w, dtype=torch.float32, device=device)
-        grid_y, grid_x = torch.meshgrid(y_range, x_range, indexing='ij')
-        
-        # 归一化坐标到 [-1, 1] 之间，防止数值过大导致 logit 爆炸
-        grid_y = (grid_y / (h - 1)) * 2 - 1
-        grid_x = (grid_x / (w - 1)) * 2 - 1
-        
-        flat_y = grid_y.reshape(1, 1, N).expand(B, 1, N) # [B, 1, N]
-        flat_x = grid_x.reshape(1, 1, N).expand(B, 1, N) # [B, 1, N]
-        
-        if target_count is None:
-            target_count = N / C
-        
-        bias = torch.zeros(B, C, 1, device=device)
-        
-        # 局部平滑核 (同上一版)
-        neighbor_kernel = torch.ones(C, 1, 3, 3, device=device) / 8.0
-        neighbor_kernel[:, :, 1, 1] = 0
-        
-        # 初始化 logits
-        current_logits = logits.clone()
-
-        for i in range(max_iter):
-            # --- 1. 基础分配 ---
-            indices = torch.argmax(current_logits - bias, dim=1)
-            one_hot = F.one_hot(indices, num_classes=C).float().permute(0, 2, 1) # [B, C, N]
-            
-            # --- 2. 计算每个类别的重心 (Centroid) ---
-            # 质量 mass: [B, C, 1]
-            mass = one_hot.sum(dim=2, keepdim=True) + 1e-6 # 防止除零
-            
-            # 重心 center: [B, C, 1]
-            center_y = (one_hot * flat_y).sum(dim=2, keepdim=True) / mass
-            center_x = (one_hot * flat_x).sum(dim=2, keepdim=True) / mass
-            
-            # --- 3. 计算每个像素到各自重心的距离场 (Distance Field) ---
-            # dist_sq: [B, C, N]
-            # (y - cy)^2 + (x - cx)^2
-            dist_sq = (flat_y - center_y)**2 + (flat_x - center_x)**2
-            
-            # --- 4. 数量平衡更新 (Balance) ---
-            counts = mass.squeeze(2) # [B, C]
-            diff = counts - target_count
-            if diff.abs().max() < (N * 0.005): break
-            bias += torch.sign(diff).unsqueeze(2) * lr
-            
-            # --- 5. 局部平滑 (Spatial Voting) ---
-            # 仅当 spatial_weight > 0 时计算
-            if spatial_weight > 0:
-                one_hot_img = one_hot.view(B, C, h, w)
-                neighbor_votes = F.conv2d(one_hot_img, neighbor_kernel, padding=1, groups=C).view(B, C, N)
-            else:
-                neighbor_votes = 0
-
-            # --- 6. 核心更新：Logits + 局部奖励 - 全局距离惩罚 ---
-            # 距离越远，惩罚越大 (负号)
-            current_logits = logits - bias + \
-                            (neighbor_votes * spatial_weight) - \
-                            (dist_sq * gravity_weight)
-
-        return torch.argmax(current_logits, dim=1)
-
-    def stabilized_balanced_argmax(self, logits, h, w, target_count=None, max_iter=50, 
-                               lr=0.01,           # 注意：因为改为比例控制，lr 要调小，建议 0.001~0.05
-                               gravity_weight=3.0, 
-                               spatial_weight=0.5,
-                               temperature=1.0,   # Softmax 温度，越小越接近 Argmax
-                               momentum=0.5):     # 动量因子
-        """
-        稳定版的 Mask 生成算法。
-        核心改进：
-        1. 使用 Softmax 概率计算重心，实现亚像素级平滑移动。
-        2. 使用 diff * lr 代替 sign(diff)，实现比例控制，减少震荡。
-        3. 引入动量，防止 Mask 剧烈跳变。
-        """
-        B, C, N = logits.shape
-        device = logits.device
-        
-        # --- 1. 坐标网格预计算 ---
-        y_range = torch.linspace(-1, 1, steps=h, device=device)
-        x_range = torch.linspace(-1, 1, steps=w, device=device)
-        grid_y, grid_x = torch.meshgrid(y_range, x_range, indexing='ij')
-        flat_y = grid_y.reshape(1, 1, N) # [1, 1, N]
-        flat_x = grid_x.reshape(1, 1, N) # [1, 1, N]
-        
-        if target_count is None:
-            target_count = N / C
-        
-        # 状态变量初始化
-        bias = torch.zeros(B, C, 1, device=device)
-        running_probs = F.softmax(logits, dim=1) # 动量：记录平滑后的概率分布
-        
-        # 空间核
-        neighbor_kernel = torch.ones(C, 1, 3, 3, device=device) / 8.0
-        neighbor_kernel[:, :, 1, 1] = 0
-        
-        # 初始 Logits
-        current_logits = logits.clone()
-
-        for i in range(max_iter):
-            # --- A. 软分配 (Soft Assignment) ---
-            # 使用 current_logits 计算当前的概率分布
-            # 这一步是核心：用概率代替硬索引
-            probs = F.softmax((current_logits - bias) / temperature, dim=1)
-            
-            # --- B. 动量平滑 (Momentum Smoothing) ---
-            # 现在的状态 = (1-m) * 新状态 + m * 旧状态
-            # 这能极大抑制"闪烁"
-            running_probs = (1 - momentum) * probs + momentum * running_probs
-            
-            # 接下来的计算全部基于平滑后的 running_probs
-            
-            # --- C. 计算 软重心 (Soft Centroid) ---
-            # 质量不再是 0/1 的 count，而是概率和
-            mass = running_probs.sum(dim=2, keepdim=True) + 1e-6
-            
-            center_y = (running_probs * flat_y).sum(dim=2, keepdim=True) / mass
-            center_x = (running_probs * flat_x).sum(dim=2, keepdim=True) / mass
-            
-            # --- D. 距离场惩罚 ---
-            dist_sq = (flat_y - center_y)**2 + (flat_x - center_x)**2
-            
-            # --- E. 比例 Bias 更新 (Proportional Control) ---
-            # 使用 mass (概率和) 作为当前的 count 估计
-            current_counts = mass.squeeze(2)
-            diff = current_counts - target_count
-            
-            # 动态学习率：随着迭代次数增加，学习率衰减，强迫收敛
-            cur_lr = lr * (0.95 ** i) 
-            
-            # 【关键】去掉 sign，使用比例误差，且不做硬截断，允许微调
-            bias += diff.unsqueeze(2) * cur_lr
-            
-            # --- F. 软空间投票 (Soft Spatial Voting) ---
-            if spatial_weight > 0:
-                probs_img = running_probs.view(B, C, h, w)
-                neighbor_votes = F.conv2d(probs_img, neighbor_kernel, padding=1, groups=C).view(B, C, N)
-            else:
-                neighbor_votes = 0
-                
-            # --- G. 更新 Logits ---
-            # 注意：这里我们只更新由于惩罚项带来的变化，保留原始 logits 的特征
-            current_logits = logits - bias + \
-                            (neighbor_votes * spatial_weight) - \
-                            (dist_sq * gravity_weight)
-
-        # 最后一步才做硬分配
-        return torch.argmax(current_logits, dim=1)
-    
-    
-    def stabilized_balanced_argmax_v2(self, logits, h, w, target_count=None, max_iter=50, 
+    def stabilized_balanced_argmax(self, logits, h, w, target_count=None, max_iter=15, 
                                   lr=0.01,           
-                                  gravity_weight=4.0, 
-                                  spatial_weight=0.5,
-                                  temperature=1.0,
-                                  momentum=0.5,
-                                  # === 新增参数 ===
-                                  centroid_margin=0.15, # 重心限制在图像内部 90% 的区域内 (0.0 ~ 0.5)
-                                  border_penalty= 1.0  # 边界像素的惩罚力度
-                                  ):
-        B, C, N = logits.shape
-        device = logits.device
-        
-        # 1. 坐标网格 [-1, 1]
-        y_range = torch.linspace(-1, 1, steps=h, device=device)
-        x_range = torch.linspace(-1, 1, steps=w, device=device)
-        grid_y, grid_x = torch.meshgrid(y_range, x_range, indexing='ij')
-        flat_y = grid_y.reshape(1, 1, N) 
-        flat_x = grid_x.reshape(1, 1, N) 
-        
-        # 2. 预计算边界掩码 (Border Mask)
-        # 找出最外圈的像素 (归一化坐标接近 -1 或 1 的)
-        # 这里定义边界为最外层的 2 个像素左右
-        pixel_h, pixel_w = 2.0/h, 2.0/w
-        is_border = (flat_y.abs() > (1 - pixel_h*1.5)) | (flat_x.abs() > (1 - pixel_w*1.5))
-        border_mask = is_border.float() # [1, 1, N]
-        
-        if target_count is None:
-            target_count = N / C
-        
-        bias = torch.zeros(B, C, 1, device=device)
-        running_probs = F.softmax(logits, dim=1) 
-        
-        # 空间核
-        neighbor_kernel = torch.ones(C, 1, 3, 3, device=device) / 8.0
-        neighbor_kernel[:, :, 1, 1] = 0
-        
-        current_logits = logits.clone()
-
-        for i in range(max_iter):
-            # A. 软分配
-            probs = F.softmax((current_logits - bias) / temperature, dim=1)
-            running_probs = (1 - momentum) * probs + momentum * running_probs
-            
-            # B. 计算软重心
-            mass = running_probs.sum(dim=2, keepdim=True) + 1e-6
-            center_y = (running_probs * flat_y).sum(dim=2, keepdim=True) / mass
-            center_x = (running_probs * flat_x).sum(dim=2, keepdim=True) / mass
-            
-            # === NEW 1: 重心钳制 (Centroid Clamping) ===
-            # 强迫重心待在 "安全区" 内
-            # 如果 centroid_margin = 0.1，重心坐标被限制在 [-0.9, 0.9]
-            if centroid_margin > 0:
-                limit = 1.0 - centroid_margin
-                center_y = torch.clamp(center_y, -limit, limit)
-                center_x = torch.clamp(center_x, -limit, limit)
-            
-            # C. 距离场计算 (使用被钳制过的重心)
-            # 如果 Mask 贴在墙上，它的自然重心在墙边，但这里的 center 被强行移到了内部
-            # 于是距离场会判定 "墙边的像素离中心远"，从而产生向内的拉力
-            dist_sq = (flat_y - center_y)**2 + (flat_x - center_x)**2
-            
-            # D. 比例 Bias 更新
-            current_counts = mass.squeeze(2)
-            diff = current_counts - target_count
-            cur_lr = lr * (0.95 ** i) 
-            bias += diff.unsqueeze(2) * cur_lr
-            
-            # E. 空间投票
-            if spatial_weight > 0:
-                probs_img = running_probs.view(B, C, h, w)
-                neighbor_votes = F.conv2d(probs_img, neighbor_kernel, padding=1, groups=C).view(B, C, N)
-            else:
-                neighbor_votes = 0
-                
-            # === NEW 2: 边界惩罚 (Border Penalty) ===
-            # current_logits -= 边界惩罚
-            # 只有在边界上的像素会被扣分
-            border_term = border_mask * border_penalty
-                
-            current_logits = logits - bias + \
-                            (neighbor_votes * spatial_weight) - \
-                            (dist_sq * gravity_weight) - \
-                            border_term # 减去边界分
-
-        return torch.argmax(current_logits, dim=1)
-    
-    # 1024*1024 50 0.01 3.0 0.5 1.0 0.5
-    # 2048*1024 50 0.01 3.0 0.5 1.0 0.5
-    def stabilized_balanced_argmax_v3(self, logits, h, w, target_count=None, max_iter=50, 
-                                  lr=0.01,           
-                                  gravity_weight=4.0, 
-                                  spatial_weight=0.5,
-                                  temperature=1.0,
-                                  momentum=0.5,
+                                  gravity_weight=0.00004, 
+                                  spatial_weight=0.00004,
+                                  momentum=0.2,
                                   centroid_margin=0.0,
-                                  border_penalty=2.0,
-                                  # === 新增参数 ===
-                                  anisotropy=1.3, # 各向异性控制：>1 压扁横向，<1 压扁纵向
-                                  debug=False     # 是否打印调试信息
+                                  border_penalty=0.0,
+                                  anisotropy=1.1,
+                                  debug=False
                                   ):
         B, C, N = logits.shape
         device = logits.device
         
-        # === 1. 物理空间坐标修正 (核心修改) ===
-        # 找出长边，将其归一化到 [-1, 1]
-        # 短边则按比例缩小范围
+        # === 1. 物理空间坐标 ===
         max_dim = max(h, w)
-        scale_h = (h / max_dim)
-        scale_w = (w / max_dim)
+        # scale_h = (h / max_dim)
+        # scale_w = (w / max_dim)
         
-        # 比如 2048x1024: y_range=[-0.5, 0.5], x_range=[-1.0, 1.0]
-        # 这样 x 方向边缘的距离惩罚(1.0^2=1) 自然就比 y 方向边缘(0.5^2=0.25) 大
-        # 从而抑制了 Mask 在长边方向的过度扩张
+        scale_h = 1
+        scale_w = 1
+        
         y_range = torch.linspace(-scale_h, scale_h, steps=h, device=device)
         x_range = torch.linspace(-scale_w, scale_w, steps=w, device=device)
-        
-        # 如果用户想手动改变引力场的形状（各向异性）
-        # anisotropy > 1.0: 增加横向引力，让 mask 变得更瘦
         x_range = x_range * anisotropy 
         
         grid_y, grid_x = torch.meshgrid(y_range, x_range, indexing='ij')
         flat_y = grid_y.reshape(1, 1, N) 
         flat_x = grid_x.reshape(1, 1, N)
         
-        # 边界 Mask 判定也需要适配比例
-        # 定义边界为最外层的 2 个像素
+        # 边界 Mask
         pixel_size = 2.0 / max_dim 
         is_border = (flat_y.abs() > (scale_h - pixel_size * 1.5)) | \
                     (flat_x.abs() > (scale_w - pixel_size * 1.5))
@@ -1009,54 +642,96 @@ class FreeFuseFluxDirectExtractAttnBaisPipeline(
             target_count = N / C
         
         bias = torch.zeros(B, C, 1, device=device)
-        running_probs = F.softmax(logits, dim=1) 
+        
+        # === 核心：线性归一化函数 ===
+        def linear_normalize(x, dim=1):
+            """将 tensor 沿指定维度线性归一化到 [0, 1]"""
+            x_min = x.min(dim=dim, keepdim=True)[0]
+            x_max = x.max(dim=dim, keepdim=True)[0]
+            return (x - x_min) / (x_max - x_min + 1e-8)
+        
+        # 初始化 running_probs 使用线性归一化
+        running_probs = linear_normalize(logits, dim=1)
+        
+        # 计算 logit 尺度用于自适应 lr
+        logit_range = (logits.max() - logits.min()).item()
+        logit_scale = max(logit_range, 1e-4)
+        effective_lr = lr * logit_scale
+        max_bias = logit_scale * 10.0
+        
+        if debug:
+            print(f"\n[ArgmaxV4 Debug] Start. B={B}, C={C}, N={N}, Target={target_count:.1f}")
+            print(f"Logits range: min={logits.min().item():.5f}, max={logits.max().item():.5f}")
+            print(f"Logit scale: {logit_scale:.6f}, Effective LR: {effective_lr:.6f}")
         
         # 空间卷积核
-        neighbor_kernel = torch.ones(C, 1, 3, 3, device=device) / 8.0
+        neighbor_kernel = torch.ones(C, 1, 3, 3, device=device, dtype=logits.dtype) / 8.0
         neighbor_kernel[:, :, 1, 1] = 0
         
         current_logits = logits.clone()
 
         for i in range(max_iter):
-            # A. 软分配
-            probs = F.softmax((current_logits - bias) / temperature, dim=1)
+            # A. 线性归一化（代替 softmax）
+            probs = linear_normalize(current_logits - bias, dim=1)
+            
+            # B. 动量平滑
             running_probs = (1 - momentum) * probs + momentum * running_probs
             
-            # B. 计算软重心
+            # C. 计算软重心
             mass = running_probs.sum(dim=2, keepdim=True) + 1e-6
             center_y = (running_probs * flat_y).sum(dim=2, keepdim=True) / mass
             center_x = (running_probs * flat_x).sum(dim=2, keepdim=True) / mass
             
-            # 重心钳制 (适配不同比例的边界)
+            # 重心钳制
             if centroid_margin > 0:
                 limit_y = scale_h * (1.0 - centroid_margin)
                 limit_x = scale_w * (1.0 - centroid_margin)
                 center_y = torch.clamp(center_y, -limit_y, limit_y)
                 center_x = torch.clamp(center_x, -limit_x, limit_x)
             
-            # C. 物理一致的距离场
-            # 在宽图模式下，X 轴坐标范围大，距离产生的惩罚值自然就大
-            # 这自动实现了 "宽方向引力更强" 的效果
+            # D. 距离场
             dist_sq = (flat_y - center_y)**2 + (flat_x - center_x)**2
             
-            # D. 比例 Bias 更新
-            current_counts = mass.squeeze(2)
-            diff = current_counts - target_count
-            cur_lr = lr * (0.95 ** i) 
-            bias += diff.unsqueeze(2) * cur_lr
+            # E. Bias 更新（基于硬分配的数量统计）
+            # 使用硬分配来统计实际数量，用于更准确的平衡
+            hard_indices = torch.argmax(current_logits - bias, dim=1)
+            hard_counts = F.one_hot(hard_indices, num_classes=C).float().sum(dim=1)  # [B, C]
             
-            # E. 空间投票
+            diff = hard_counts - target_count
+            cur_lr = effective_lr * (0.95 ** i)
+            bias += torch.sign(diff).unsqueeze(2) * cur_lr
+            bias = torch.clamp(bias, -max_bias, max_bias)
+            
+            # F. 空间投票
             if spatial_weight > 0:
                 probs_img = running_probs.view(B, C, h, w)
-                neighbor_votes = F.conv2d(probs_img, neighbor_kernel, padding=1, groups=C).view(B, C, N)
+                probs_img_f32 = probs_img.float()
+                kernel_f32 = neighbor_kernel.float()
+                neighbor_votes = F.conv2d(probs_img_f32, kernel_f32, padding=1, groups=C)
+                neighbor_votes = neighbor_votes.to(logits.dtype).view(B, C, N)
             else:
-                neighbor_votes = 0
+                neighbor_votes = torch.zeros_like(logits)
                 
+            gravity_term = dist_sq * gravity_weight
+            border_term = border_mask * border_penalty
+            
             current_logits = logits - bias + \
                             (neighbor_votes * spatial_weight) - \
-                            (dist_sq * gravity_weight) - \
-                            (border_mask * border_penalty)
+                            gravity_term - \
+                            border_term
+                            
+            if debug and (i == 0 or i == max_iter - 1 or i % 10 == 0):
+                hard_counts_list = hard_counts[0].int().tolist()
+                print(f"Iter {i:02d}: Counts={hard_counts_list}")
+                print(f"  Bias range: {bias.min().item():.5f} ~ {bias.max().item():.5f}")
+                print(f"  Gravity Mean: {gravity_term.mean().item():.3f}, Max: {gravity_term.max().item():.3f}")
+                print(f"  Spatial Mean: {(neighbor_votes * spatial_weight).mean().item():.3f}")
 
+        if debug:
+            final_assignment = torch.argmax(current_logits, dim=1)[0]
+            final_counts = final_assignment.bincount(minlength=C).tolist()
+            print(f"[Argmax Debug] Final Counts: {final_counts}\n")
+            
         return torch.argmax(current_logits, dim=1)
 
     def morphological_clean_mask(self, mask, h, w, opening_kernel_size=3, closing_kernel_size=3):
@@ -1162,8 +837,8 @@ class FreeFuseFluxDirectExtractAttnBaisPipeline(
         debug_save_path: Optional[str] = None,
         # Attention bias params
         use_attention_bias: bool = True,
-        attention_bias_scale: float = 0.0,
-        attention_bias_positive_scale: float = 0.0,
+        attention_bias_scale: float = 3.0,
+        attention_bias_positive_scale: float = 1.0,
         attention_bias_bidirectional: bool = True,
         attention_bias_positive: bool = True,
         attention_bias_blocks: Optional[List[str]] = None,
@@ -1577,7 +1252,7 @@ class FreeFuseFluxDirectExtractAttnBaisPipeline(
                 
                 # No background channel - just use balanced argmax directly
                 enable_debug = False
-                max_indices = self.stabilized_balanced_argmax_v3(
+                max_indices = self.stabilized_balanced_argmax(
                     sim_map_squeezed, 
                     height // 16, width // 16,
                     debug=enable_debug
@@ -1658,7 +1333,7 @@ class FreeFuseFluxDirectExtractAttnBaisPipeline(
             
             # Now use balanced argmax on original sim_map for concept assignment
             enable_debug = False
-            max_indices = self.stabilized_balanced_argmax_v3(
+            max_indices = self.stabilized_balanced_argmax(
                 sim_map_squeezed, 
                 height // 16, width // 16,
                 debug=enable_debug

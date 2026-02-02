@@ -270,13 +270,13 @@ def get_prompt_token_texts(pipe, prompt, max_sequence_length=512):
 
 def main():
     # Load pipeline
-    quantization=True
+    quantization=False
     if quantization:
         ckpt_path = (
             "https://huggingface.co/city96/FLUX.1-dev-gguf/blob/main/flux1-dev-Q5_0.gguf"
         )
         
-        # 使用 bitsandbytes 8-bit 量化加载 T5 (真正节省显存)
+        # 使用 bitsandbytes 8-bit 量化加载 T5
         # 8-bit quantization: ~10GB VRAM savings vs full precision T5-XXL
         # bnb_config = BitsAndBytesConfig(load_in_8bit=True)
         
@@ -407,7 +407,7 @@ def main():
         height=1024, 
         width=1024, 
         generator=generator, 
-        debug_save_path='debug_direct_extract',
+        # debug_save_path='debug_direct_extract',
         joint_attention_kwargs={
             'freefuse_token_pos_maps': freefuse_token_pos_maps,
             'concept_token_texts': concept_token_texts,

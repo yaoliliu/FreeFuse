@@ -251,7 +251,7 @@ def main():
         freefuse_token_pos_maps=freefuse_token_pos_maps,
         num_mask_collect_steps=num_mask_collect_steps,
         use_freefuse=True,
-        debug_dir=output_dir+"/debug",  # Save mask visualizations
+        # debug_dir=output_dir+"/debug",  # Save mask visualizations
         cross_attention_kwargs=cross_attention_kwargs,
     ).images[0]
     

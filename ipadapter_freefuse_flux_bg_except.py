@@ -9,7 +9,6 @@ The IP-Adapter injects visual features from reference images into the attention 
 while LoRAs handle individual concept appearance.
 """
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '3'
 import torch
 from PIL import Image
 from typing import List, Union
@@ -366,15 +365,15 @@ def main():
     # background_concept = "an orange and white tabby cat sitting upright, featuring large expressive eyes, prominent pointed ears, white chest and paws, distinctive tabby markings on its face and body, and long whiskers"
     
     # Generation settings
-    seed = 42
+    seed = 77
     height = 1024
     width = 1024
     guidance_scale = 7
     true_cfg_scale = 0
-    output_prefix = "ipadapter_freefuse"
+    output_prefix = "flux_ipadapter"
     
     # Model quantization
-    quantization = True
+    quantization = False
     
     # ========== Setup Pipelines ==========
     print("Setting up pipelines...")
@@ -514,7 +513,7 @@ def main():
         height=height, 
         width=width, 
         generator=generator, 
-        debug_save_path='debug_direct_extract',
+        # debug_save_path='debug_direct_extract',
         joint_attention_kwargs={
             'freefuse_token_pos_maps': freefuse_token_pos_maps,
             'concept_token_texts': concept_token_texts,
