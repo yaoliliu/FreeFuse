@@ -22,14 +22,14 @@ This paper proposes **FreeFuse**, a training-free framework for multi-subject te
 
 ## 🎨 Results
 
-### Results on Flux
+### Results on Flux.dev
 
 <p align="center">
   <img src="assets/flux_res.png" alt="Flux Results" width="100%">
 </p>
 
 <p align="center">
-  <em>Qualitative results on Flux. FreeFuse achieves superior identity preservation and compositional fidelity.</em>
+  <em>Qualitative results on Flux.dev. FreeFuse achieves superior identity preservation and compositional fidelity.</em>
 </p>
 
 ### Results on SDXL
