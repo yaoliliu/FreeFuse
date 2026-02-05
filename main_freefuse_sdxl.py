@@ -32,6 +32,9 @@ from src.tuner.freefuse_lora_layer import FreeFuseLinear
 
 
 # Processor type selection
+# Default temperature differs by model type:
+# - SDXL: 1000.0 (smaller hidden_states magnitude)
+# - Flux: 4000.0 (larger hidden_states magnitude)
 PROCESSOR_TYPES = {
     "freefuse": {
         "class": FreeFuseSDXLAttnProcessor,

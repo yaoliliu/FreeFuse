@@ -241,8 +241,9 @@ When enabled, constructs soft attention bias to guide cross-attention:
         latent_h, latent_w = latent_size
         
         if model_type == "flux":
-            # For Flux, image sequence length is packed: (H/2) * (W/2)
-            img_seq_len = (latent_h // 2) * (latent_w // 2)
+            # For Flux, masks from generate_masks are ALREADY in packed space (H/16, W/16)
+            # So img_seq_len is simply latent_h * latent_w (no additional packing needed)
+            img_seq_len = latent_h * latent_w
             
             # Estimate txt_seq_len from token_pos_maps
             txt_seq_len = 512  # Default for T5
@@ -252,6 +253,7 @@ When enabled, constructs soft attention bias to guide cross-attention:
                     txt_seq_len = max(txt_seq_len, max_pos + 10)
             
             # Flatten masks to (B, img_seq_len)
+            # Masks are ALREADY in packed resolution, just flatten them
             lora_masks_flat = {}
             for name, mask in mask_dict.items():
                 if name.startswith("_"):
@@ -259,11 +261,10 @@ When enabled, constructs soft attention bias to guide cross-attention:
                 # Ensure mask is (H, W)
                 if mask.dim() == 3:
                     mask = mask[0]
-                # Pack like Flux does: (H, W) -> (H/2, W/2, 4) -> (H*W/4,)
-                h, w = mask.shape
-                mask_packed = mask.view(h // 2, 2, w // 2, 2).permute(0, 2, 1, 3)
-                mask_packed = mask_packed.reshape(-1)  # Average the 4 values or take max
-                lora_masks_flat[name] = mask_packed.unsqueeze(0)  # Add batch dim
+                # Masks are already in packed space (H/16, W/16), just flatten
+                # No need to re-pack them!
+                mask_flat = mask.reshape(-1)
+                lora_masks_flat[name] = mask_flat.unsqueeze(0)  # Add batch dim
             
             # Apply attention bias patches with dynamic bias construction
             # Bias will be built at runtime based on actual txt/img sequence lengths
@@ -300,18 +301,30 @@ When enabled, constructs soft attention bias to guide cross-attention:
         mask_dict: Dict[str, torch.Tensor],
         latent: Optional[Dict],
     ) -> Optional[Tuple[int, int]]:
-        """Determine latent size from masks or latent input."""
-        # Try from latent input
-        if latent is not None and "samples" in latent:
-            samples = latent["samples"]
-            return (samples.shape[2], samples.shape[3])
+        """Determine latent size from masks or latent input.
         
-        # Try from mask dimensions
+        IMPORTANT: For Flux models, the masks are in packed space (H/16 x W/16),
+        not the original latent space (H/8 x W/8). We should prioritize the mask
+        dimensions as they represent the actual spatial resolution of the masks.
+        
+        Returns:
+            Tuple of (height, width) representing the spatial dimensions of the masks
+        """
+        # Priority 1: Use mask dimensions (most accurate for Flux packed space)
+        # This is crucial because masks from generate_masks are already in the correct
+        # packed resolution that matches the Flux attention sequence length
         for mask in mask_dict.values():
             if mask.dim() == 2:
                 return (mask.shape[0], mask.shape[1])
             elif mask.dim() == 3:
                 return (mask.shape[1], mask.shape[2])
+        
+        # Fallback: Try from latent input (may need adjustment for Flux)
+        if latent is not None and "samples" in latent:
+            samples = latent["samples"]
+            # Note: For Flux, this is the unpacked latent size (H/8, W/8)
+            # The caller should be aware that this may differ from packed mask size
+            return (samples.shape[2], samples.shape[3])
         
         return None
     

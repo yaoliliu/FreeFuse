@@ -47,7 +47,7 @@ class FreeFuseSDXLAttnProcessor:
     which captures pure feature similarity without positional bias.
     """
     
-    def __init__(self, top_k_ratio: float = 0.1, temperature: float = 4000.0):
+    def __init__(self, top_k_ratio: float = 0.1, temperature: float = 1000.0):
         if not hasattr(F, "scaled_dot_product_attention"):
             raise ImportError(
                 "FreeFuseCrossAttnSelfConceptSDXLAttnProcessor requires PyTorch 2.0."
