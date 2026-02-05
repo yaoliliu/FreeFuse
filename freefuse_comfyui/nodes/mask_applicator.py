@@ -4,8 +4,12 @@ FreeFuse Mask Applicator Node
 Applies Phase 1 masks to LoRA-loaded model for Phase 2 generation.
 This is the bridge between Phase 1 (mask collection) and Phase 2 (generation).
 
-Uses Plan A: FreeFuseBypassForwardHook to intercept LoRA outputs and apply
-spatial masks at the h(x) output level.
+The masks are applied to the bypass LoRA hooks created by FreeFuseLoRALoader.
+Each adapter's h(x) output is multiplied by its corresponding spatial mask.
+
+NEW in v2: Attention Bias Support
+- Constructs soft attention bias to guide text-image cross-attention
+- Supports both Flux (joint attention) and SDXL (cross-attention)
 """
 
 import torch
@@ -17,9 +21,17 @@ import comfy.model_patcher
 import comfy.weight_adapter
 from comfy.weight_adapter.base import WeightAdapterBase, WeightAdapterTrainBase
 
-from ..freefuse_core.freefuse_bypass import (
-    FreeFuseBypassForwardHook,
-    FreeFuseBypassInjectionManager,
+from ..freefuse_core.bypass_lora_loader import (
+    OffsetBypassInjectionManager,
+    MultiAdapterBypassForwardHook,
+)
+from ..freefuse_core.attention_bias import (
+    construct_attention_bias,
+    construct_attention_bias_sdxl,
+    AttentionBiasConfig,
+)
+from ..freefuse_core.attention_bias_patch import (
+    apply_attention_bias_patches,
 )
 
 
@@ -33,6 +45,11 @@ class FreeFuseMaskApplicator:
     - FreeFuse data with adapter info
     
     And outputs a model with masked LoRA application.
+    
+    NEW: Attention Bias Support
+    - When enabled, constructs soft attention bias matrix
+    - Guides text-image attention to respect spatial masks
+    - Supports both Flux and SDXL architectures
     """
     
     @classmethod
@@ -51,6 +68,31 @@ class FreeFuseMaskApplicator:
                 "latent": ("LATENT", {
                     "tooltip": "Optional latent for size reference"
                 }),
+                # Attention Bias parameters
+                "enable_attention_bias": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Apply attention bias to guide text-image attention based on masks"
+                }),
+                "bias_scale": ("FLOAT", {
+                    "default": 5.0, "min": 0.0, "max": 20.0, "step": 0.5,
+                    "tooltip": "Strength of negative bias (suppress cross-LoRA attention)"
+                }),
+                "positive_bias_scale": ("FLOAT", {
+                    "default": 1.0, "min": 0.0, "max": 10.0, "step": 0.1,
+                    "tooltip": "Strength of positive bias (enhance same-LoRA attention)"
+                }),
+                "bidirectional": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Apply bias for both image→text and text→image directions (Flux only)"
+                }),
+                "use_positive_bias": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Add positive bias for same-LoRA pairs in addition to negative bias"
+                }),
+                "bias_blocks": (["all", "double_stream_only", "single_stream_only", "last_half_double", "none"], {
+                    "default": "double_stream_only",
+                    "tooltip": "Which transformer blocks to apply attention bias"
+                }),
             }
         }
     
@@ -62,7 +104,13 @@ class FreeFuseMaskApplicator:
     DESCRIPTION = """Apply Phase 1 masks to LoRAs for Phase 2 generation.
     
 Connect this between your LoRA loaders and KSampler.
-The masks from FreeFusePhase1Sampler control where each LoRA affects the image."""
+The masks from FreeFusePhase1Sampler control where each LoRA affects the image.
+
+NEW: Attention Bias
+When enabled, constructs soft attention bias to guide cross-attention:
+- Negative bias: Suppress image regions attending to wrong LoRA's text
+- Positive bias: Encourage image regions attending to correct LoRA's text
+- Bidirectional: Also guide text tokens to their spatial regions"""
     
     def apply_masks(
         self,
@@ -71,6 +119,13 @@ The masks from FreeFusePhase1Sampler control where each LoRA affects the image."
         freefuse_data,
         enable_token_masking=True,
         latent=None,
+        # Attention bias parameters
+        enable_attention_bias=True,
+        bias_scale=5.0,
+        positive_bias_scale=1.0,
+        bidirectional=True,
+        use_positive_bias=True,
+        bias_blocks="double_stream_only",
     ):
         # Extract data
         mask_dict = masks.get("masks", {})
@@ -93,6 +148,10 @@ The masks from FreeFusePhase1Sampler control where each LoRA affects the image."
         
         # Clone the model
         model_clone = model.clone()
+        
+        # Detect model type
+        model_type = self._detect_model_type(model_clone)
+        print(f"[FreeFuse] Detected model type: {model_type}")
         
         # Get adapter name to mask mapping
         adapter_mask_map = {}
@@ -121,7 +180,120 @@ The masks from FreeFusePhase1Sampler control where each LoRA affects the image."
         print(f"[FreeFuse] Applied masks to {len(adapter_mask_map)} adapters")
         print(f"[FreeFuse] Latent size: {latent_size}")
         
+        # Apply attention bias if enabled
+        if enable_attention_bias and bias_blocks != "none":
+            self._apply_attention_bias(
+                model_clone,
+                mask_dict,
+                token_pos_maps,
+                latent_size,
+                model_type,
+                bias_scale=bias_scale,
+                positive_bias_scale=positive_bias_scale,
+                bidirectional=bidirectional,
+                use_positive_bias=use_positive_bias,
+                bias_blocks=bias_blocks,
+            )
+        
         return (model_clone,)
+    
+    def _detect_model_type(self, model_patcher) -> str:
+        """Detect whether model is Flux or SDXL."""
+        model = model_patcher.model
+        model_class_name = model.__class__.__name__.lower()
+        
+        if "flux" in model_class_name:
+            return "flux"
+        
+        # Check for Flux model structure
+        if hasattr(model, 'diffusion_model'):
+            dm = model.diffusion_model
+            if hasattr(dm, 'double_blocks') and hasattr(dm, 'single_blocks'):
+                return "flux"
+        
+        return "sdxl"
+    
+    def _apply_attention_bias(
+        self,
+        model_patcher,
+        mask_dict: Dict[str, torch.Tensor],
+        token_pos_maps: Dict[str, List[List[int]]],
+        latent_size: Tuple[int, int],
+        model_type: str,
+        bias_scale: float,
+        positive_bias_scale: float,
+        bidirectional: bool,
+        use_positive_bias: bool,
+        bias_blocks: str,
+    ):
+        """Apply attention bias patches to the model."""
+        # Create config
+        config = AttentionBiasConfig(
+            enabled=True,
+            bias_scale=bias_scale,
+            positive_bias_scale=positive_bias_scale,
+            bidirectional=bidirectional,
+            use_positive_bias=use_positive_bias,
+            apply_to_blocks=bias_blocks if bias_blocks != "all" else None,
+        )
+        
+        # Get sequence lengths
+        latent_h, latent_w = latent_size
+        
+        if model_type == "flux":
+            # For Flux, image sequence length is packed: (H/2) * (W/2)
+            img_seq_len = (latent_h // 2) * (latent_w // 2)
+            
+            # Estimate txt_seq_len from token_pos_maps
+            txt_seq_len = 512  # Default for T5
+            for positions_list in token_pos_maps.values():
+                if positions_list and positions_list[0]:
+                    max_pos = max(positions_list[0])
+                    txt_seq_len = max(txt_seq_len, max_pos + 10)
+            
+            # Flatten masks to (B, img_seq_len)
+            lora_masks_flat = {}
+            for name, mask in mask_dict.items():
+                if name.startswith("_"):
+                    continue
+                # Ensure mask is (H, W)
+                if mask.dim() == 3:
+                    mask = mask[0]
+                # Pack like Flux does: (H, W) -> (H/2, W/2, 4) -> (H*W/4,)
+                h, w = mask.shape
+                mask_packed = mask.view(h // 2, 2, w // 2, 2).permute(0, 2, 1, 3)
+                mask_packed = mask_packed.reshape(-1)  # Average the 4 values or take max
+                lora_masks_flat[name] = mask_packed.unsqueeze(0)  # Add batch dim
+            
+            # Apply attention bias patches with dynamic bias construction
+            # Bias will be built at runtime based on actual txt/img sequence lengths
+            apply_attention_bias_patches(
+                model_patcher=model_patcher,
+                attention_bias=None,  # Not used - bias built dynamically
+                config=config,
+                txt_seq_len=txt_seq_len,  # Estimate - actual determined at runtime
+                model_type="flux",
+                lora_masks=lora_masks_flat,
+                token_pos_maps=token_pos_maps,
+            )
+            print(f"[FreeFuse] Applied attention bias for Flux "
+                  f"(bias_scale={bias_scale}, positive_scale={positive_bias_scale}, "
+                  f"bidirectional={bidirectional}, blocks={bias_blocks})")
+        
+        else:  # SDXL
+            # For SDXL, use the direct SDXL bias patches
+            apply_attention_bias_patches(
+                model_patcher=model_patcher,
+                attention_bias=None,  # SDXL computes per-layer
+                config=config,
+                txt_seq_len=77,  # CLIP
+                model_type="sdxl",
+                lora_masks=mask_dict,
+                token_pos_maps=token_pos_maps,
+                latent_size=latent_size,
+            )
+            print(f"[FreeFuse] Applied attention bias for SDXL "
+                  f"(bias_scale={bias_scale}, positive_scale={positive_bias_scale})")
     
     def _get_latent_size(
         self,
@@ -152,130 +324,85 @@ The masks from FreeFusePhase1Sampler control where each LoRA affects the image."
     ):
         """Apply masks to model's LoRA layers using FreeFuse bypass hooks.
         
-        This uses Plan A: Create FreeFuseBypassForwardHook instances that wrap
-        each LoRA layer and apply spatial masks to h(x) output before adding
-        to base output.
+        The masks are applied by setting them on the OffsetBypassInjectionManagers
+        stored in model_options by load_bypass_lora_for_models_fixed().
         
         Formula: output = g(f(x) + mask * h(x))
         """
-        # Create the FreeFuse bypass injection manager
-        manager = FreeFuseBypassInjectionManager()
-        
         # Collect all masks
         masks = {}
         for name, data in adapter_mask_map.items():
             masks[name] = data["mask"]
         
-        # Get existing patches from the model
-        patches = getattr(model_patcher, 'patches', {})
-        hooks = getattr(model_patcher, 'hook_patches', {})
+        # Get transformer_options
+        transformer_options = model_patcher.model_options.get("transformer_options", {})
         
-        logging.info(f"[FreeFuse] Model has {len(patches)} patches, {len(hooks)} hooks")
+        # Get txt_len from freefuse_data or use default
+        # For Flux: txt_len is typically CLIP (77) + T5 (~256 max) 
+        # In practice, the actual length depends on the prompt
+        freefuse_data = transformer_options.get("freefuse_data", {})
+        txt_len = freefuse_data.get("txt_len", 512)  # Default for Flux CLIP+T5
         
-        # Find LoRA adapters and register them with FreeFuse manager
-        adapter_found = False
+        # Look for multiple bypass managers (one per LoRA)
+        managers_list = transformer_options.get("freefuse_bypass_managers", [])
         
-        for key, patch_list in patches.items():
-            for patch in patch_list:
-                # patch format: (strength, adapter, ...) or other formats
-                if not isinstance(patch, tuple) or len(patch) < 2:
-                    continue
-                
-                strength = patch[0] if isinstance(patch[0], (int, float)) else 1.0
-                adapter_data = patch[1]
-                
-                # Check if this is a bypass adapter
-                if isinstance(adapter_data, (WeightAdapterBase, WeightAdapterTrainBase)):
-                    # Determine which concept/adapter this belongs to
-                    adapter_name = self._find_adapter_name_for_key(
-                        key, adapter_mask_map, model_patcher
-                    )
-                    
-                    if adapter_name and adapter_name in masks:
-                        manager.add_adapter(
-                            key,
-                            adapter_data,
-                            strength=float(strength),
-                            adapter_name=adapter_name,
-                        )
-                        adapter_found = True
-                        logging.debug(f"[FreeFuse] Registered adapter: {key} -> {adapter_name}")
+        hooks_updated = 0
+        if managers_list:
+            for manager_info in managers_list:
+                manager = manager_info.get("manager")
+                if manager is not None and isinstance(manager, OffsetBypassInjectionManager):
+                    manager.set_masks(masks, latent_size, txt_len)
+                    hooks_updated += manager.get_hook_count()
+            
+            if hooks_updated > 0:
+                logging.info(f"[FreeFuse] Applied masks via {len(managers_list)} bypass managers ({hooks_updated} hooks), txt_len={txt_len}")
+                return
         
-        if not adapter_found:
-            logging.warning("[FreeFuse] No bypass adapters found in model patches")
-            logging.info("[FreeFuse] Falling back to model_options mask storage")
-            self._fallback_mask_storage(model_patcher, masks, latent_size, token_pos_maps)
+        # Fallback: Single manager
+        manager = transformer_options.get("freefuse_bypass_manager")
+        if manager is not None and isinstance(manager, OffsetBypassInjectionManager):
+            manager.set_masks(masks, latent_size, txt_len)
+            logging.info(f"[FreeFuse] Applied masks via single bypass manager ({manager.get_hook_count()} hooks), txt_len={txt_len}")
             return
+        
+        # Fallback: Look for hooks in model traversal
+        hooks_found = self._find_hooks_in_model(model_patcher, masks, latent_size, txt_len)
+        if hooks_found > 0:
+            logging.info(f"[FreeFuse] Applied masks to {hooks_found} hooks via model traversal")
+            return
+        
+        # Last resort: store masks for wrapper-based application
+        logging.warning("[FreeFuse] No bypass hooks found, using wrapper fallback")
+        self._fallback_mask_storage(model_patcher, masks, latent_size, token_pos_maps)
+    
+    def _find_hooks_in_model(
+        self,
+        model_patcher: comfy.model_patcher.ModelPatcher,
+        masks: Dict[str, torch.Tensor],
+        latent_size: Tuple[int, int],
+        txt_len: int = 512,
+    ) -> int:
+        """Find MultiAdapterBypassForwardHook instances in the model and set masks."""
+        hooks_found = 0
         
         # Get the diffusion model
         diffusion_model = self._get_diffusion_model(model_patcher)
         if diffusion_model is None:
-            logging.error("[FreeFuse] Could not get diffusion model")
-            return
+            return 0
         
-        # Create injections
-        injections = manager.create_injections(diffusion_model)
+        # Traverse all modules looking for our hooks
+        for name, module in diffusion_model.named_modules():
+            # Check if this module's forward has been replaced by our hook
+            forward = getattr(module, 'forward', None)
+            if forward is not None:
+                # Check if it's a bound method from MultiAdapterBypassForwardHook
+                if hasattr(forward, '__self__'):
+                    hook_self = forward.__self__
+                    if isinstance(hook_self, MultiAdapterBypassForwardHook):
+                        hook_self.set_masks(masks, latent_size, txt_len)
+                        hooks_found += 1
         
-        # Apply masks to the manager
-        manager.set_masks(masks, latent_size)
-        
-        # Apply token position masking if enabled
-        if token_pos_maps:
-            manager.set_token_positions(token_pos_maps)
-        
-        # Determine txt_len for Flux models
-        txt_len = self._get_txt_len(model_patcher)
-        if txt_len:
-            manager.set_txt_len(txt_len)
-        
-        # Register injections with the model patcher
-        model_patcher.set_injections("freefuse_bypass", injections)
-        
-        # Store manager in model_options for access during generation
-        if "transformer_options" not in model_patcher.model_options:
-            model_patcher.model_options["transformer_options"] = {}
-        
-        model_patcher.model_options["transformer_options"]["freefuse_bypass_manager"] = manager
-        model_patcher.model_options["transformer_options"]["freefuse_masks"] = masks
-        model_patcher.model_options["transformer_options"]["freefuse_latent_size"] = latent_size
-        
-        logging.info(f"[FreeFuse] Successfully applied masks via bypass hooks")
-        logging.info(f"[FreeFuse] Registered {len(manager.hooks)} FreeFuse hooks")
-    
-    def _find_adapter_name_for_key(
-        self,
-        key: str,
-        adapter_mask_map: Dict[str, Dict],
-        model_patcher: comfy.model_patcher.ModelPatcher,
-    ) -> Optional[str]:
-        """Find which adapter/concept a weight key belongs to.
-        
-        This matches weight keys to adapter names by checking the freefuse_data
-        stored in model_options, or by inferring from the adapter_mask_map.
-        """
-        # Check if freefuse_data has adapter_keys mapping
-        transformer_options = model_patcher.model_options.get("transformer_options", {})
-        freefuse_data = transformer_options.get("freefuse_data", {})
-        adapter_keys = freefuse_data.get("adapter_keys", {})
-        
-        # Search in adapter_keys
-        for adapter_name, keys in adapter_keys.items():
-            if key in keys:
-                return adapter_name
-        
-        # Check if there's an adapter_key_to_name mapping
-        key_to_name = freefuse_data.get("adapter_key_to_name", {})
-        if key in key_to_name:
-            return key_to_name[key]
-        
-        # If only one adapter in mask_map, use it
-        adapter_names = list(adapter_mask_map.keys())
-        if len(adapter_names) == 1:
-            return adapter_names[0]
-        
-        # Can't determine - return None
-        logging.debug(f"[FreeFuse] Could not determine adapter for key: {key}")
-        return None
+        return hooks_found
     
     def _get_diffusion_model(
         self,

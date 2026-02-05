@@ -1,49 +1,102 @@
 {
-    "last_node_id": 16,
+    "last_node_id": 17,
     "last_link_id": 26,
     "nodes": [
+        {
+            "id": 17,
+            "type": "MarkdownNote",
+            "pos": [-500, 50],
+            "size": [480, 550],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [],
+            "outputs": [],
+            "title": "Model Download Guide",
+            "properties": {},
+            "widgets_values": [
+                "# FreeFuse Flux Simple - Model Guide\n\n## Required Models (FP8 Quantized)\n\n**text_encoders**\n\n- [clip_l.safetensors](https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors)\n- [t5xxl_fp8_e4m3fn.safetensors](https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp8_e4m3fn.safetensors)\n\n**diffusion_models**\n\n- [flux1-dev-fp8.safetensors](https://huggingface.co/Comfy-Org/flux1-dev/resolve/main/flux1-dev-fp8.safetensors)\n\n**vae**\n\n- [ae.safetensors](https://huggingface.co/Comfy-Org/Lumina_Image_2.0_Repackaged/resolve/main/split_files/vae/ae.safetensors)\n\n## Model Storage Location\n\n```\n📂 ComfyUI/\n├── 📂 models/\n│   ├── 📂 text_encoders/\n│   │      ├── clip_l.safetensors\n│   │      └── t5xxl_fp8_e4m3fn.safetensors\n│   ├── 📂 diffusion_models/\n│   │      └── flux1-dev-fp8.safetensors\n│   └── 📂 vae/\n│          └── ae.safetensors\n```\n\n## Notes\n\n- FP8 quantized models use ~50% less VRAM than FP16\n- Requires ~12GB VRAM for 1024x1024 generation"
+            ],
+            "color": "#432",
+            "bgcolor": "#000"
+        },
         {
             "id": 1,
             "type": "UNETLoader",
             "pos": [50, 50],
             "size": [315, 82],
             "flags": {},
-            "order": 0,
+            "order": 1,
             "mode": 0,
             "outputs": [
                 {"name": "MODEL", "type": "MODEL", "links": [1]}
             ],
-            "properties": {"Node name for S&R": "UNETLoader"},
-            "widgets_values": ["flux1-dev.safetensors", "default"],
-            "title": "Load Flux UNET"
+            "properties": {
+                "Node name for S&R": "UNETLoader",
+                "cnr_id": "comfy-core",
+                "models": [
+                    {
+                        "name": "flux1-dev-fp8.safetensors",
+                        "url": "https://huggingface.co/Comfy-Org/flux1-dev/resolve/main/flux1-dev-fp8.safetensors",
+                        "directory": "diffusion_models"
+                    }
+                ]
+            },
+            "widgets_values": ["flux1-dev-fp8.safetensors", "fp8_e4m3fn"],
+            "title": "Load Flux UNET (FP8)"
         },
         {
             "id": 2,
             "type": "DualCLIPLoader",
             "pos": [50, 180],
-            "size": [315, 106],
-            "flags": {},
-            "order": 1,
-            "mode": 0,
-            "outputs": [
-                {"name": "CLIP", "type": "CLIP", "links": [2]}
-            ],
-            "properties": {"Node name for S&R": "DualCLIPLoader"},
-            "widgets_values": ["clip_l.safetensors", "t5xxl_fp16.safetensors", "flux"],
-            "title": "Load CLIP + T5"
-        },
-        {
-            "id": 3,
-            "type": "VAELoader",
-            "pos": [50, 330],
-            "size": [315, 58],
+            "size": [315, 130],
             "flags": {},
             "order": 2,
             "mode": 0,
             "outputs": [
+                {"name": "CLIP", "type": "CLIP", "links": [2]}
+            ],
+            "properties": {
+                "Node name for S&R": "DualCLIPLoader",
+                "cnr_id": "comfy-core",
+                "models": [
+                    {
+                        "name": "clip_l.safetensors",
+                        "url": "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors",
+                        "directory": "text_encoders"
+                    },
+                    {
+                        "name": "t5xxl_fp8_e4m3fn.safetensors",
+                        "url": "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp8_e4m3fn.safetensors",
+                        "directory": "text_encoders"
+                    }
+                ]
+            },
+            "widgets_values": ["clip_l.safetensors", "t5xxl_fp8_e4m3fn.safetensors", "flux", "default"],
+            "title": "Load CLIP + T5 (FP8)"
+        },
+        {
+            "id": 3,
+            "type": "VAELoader",
+            "pos": [50, 360],
+            "size": [315, 58],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "outputs": [
                 {"name": "VAE", "type": "VAE", "links": [20]}
             ],
-            "properties": {"Node name for S&R": "VAELoader"},
+            "properties": {
+                "Node name for S&R": "VAELoader",
+                "cnr_id": "comfy-core",
+                "models": [
+                    {
+                        "name": "ae.safetensors",
+                        "url": "https://huggingface.co/Comfy-Org/Lumina_Image_2.0_Repackaged/resolve/main/split_files/vae/ae.safetensors",
+                        "directory": "vae"
+                    }
+                ]
+            },
             "widgets_values": ["ae.safetensors"],
             "title": "Load Flux VAE"
         },
@@ -342,9 +395,33 @@
         "ds": {"scale": 0.75, "offset": [0, 0]},
         "info": {
             "name": "FreeFuse Flux Simple",
-            "description": "Simplified Flux workflow using FreeFuseConceptMapSimple. Uses UNETLoader + DualCLIPLoader (CLIP + T5) + VAELoader. FluxGuidance replaces CFG.",
-            "version": "2.0",
-            "notes": "Flux uses guidance embedding, not CFG. Set KSampler CFG=1.0, use FluxGuidance for guidance scale."
+            "description": "Simplified Flux workflow using FreeFuseConceptMapSimple. Uses UNETLoader + DualCLIPLoader (CLIP + T5 FP8) + VAELoader. FluxGuidance replaces CFG.",
+            "version": "2.1",
+            "notes": "Flux uses guidance embedding, not CFG. Set KSampler CFG=1.0, use FluxGuidance for guidance scale. Uses FP8 quantized models for reduced VRAM.",
+            "models": {
+                "text_encoders": [
+                    {
+                        "name": "clip_l.safetensors",
+                        "url": "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors"
+                    },
+                    {
+                        "name": "t5xxl_fp8_e4m3fn.safetensors",
+                        "url": "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp8_e4m3fn.safetensors"
+                    }
+                ],
+                "diffusion_models": [
+                    {
+                        "name": "flux1-dev-fp8.safetensors",
+                        "url": "https://huggingface.co/Comfy-Org/flux1-dev/resolve/main/flux1-dev-fp8.safetensors"
+                    }
+                ],
+                "vae": [
+                    {
+                        "name": "ae.safetensors",
+                        "url": "https://huggingface.co/Comfy-Org/Lumina_Image_2.0_Repackaged/resolve/main/split_files/vae/ae.safetensors"
+                    }
+                ]
+            }
         }
     },
     "version": 0.4

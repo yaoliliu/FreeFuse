@@ -56,6 +56,31 @@ from .freefuse_bypass import (
     create_freefuse_bypass_from_model,
 )
 
+# Fixed bypass LoRA loader for Flux fused QKV weights
+from .bypass_lora_loader import (
+    OffsetBypassForwardHook,
+    MultiAdapterBypassForwardHook,
+    OffsetBypassInjectionManager,
+    load_bypass_lora_for_models_fixed,
+)
+
+# Attention bias mechanism
+from .attention_bias import (
+    construct_attention_bias,
+    construct_attention_bias_sdxl,
+    apply_attention_bias_to_weights,
+    get_attention_bias_for_layer,
+    AttentionBiasConfig,
+)
+
+# Attention bias patches for injection
+from .attention_bias_patch import (
+    FreeFuseFluxBiasBlockReplace,
+    FreeFuseFluxBiasSingleBlockReplace,
+    FreeFuseSDXLBiasAttnReplace,
+    apply_attention_bias_patches,
+)
+
 __all__ = [
     # Attention
     "FreeFuseAttentionCollector",
@@ -94,5 +119,20 @@ __all__ = [
     "FreeFuseBypassForwardHook",
     "FreeFuseBypassInjectionManager",
     "create_freefuse_bypass_from_model",
+    # Fixed bypass LoRA loader for Flux
+    "OffsetBypassForwardHook",
+    "MultiAdapterBypassForwardHook",
+    "OffsetBypassInjectionManager",
+    "load_bypass_lora_for_models_fixed",
+    # Attention bias
+    "construct_attention_bias",
+    "construct_attention_bias_sdxl",
+    "apply_attention_bias_to_weights",
+    "get_attention_bias_for_layer",
+    "AttentionBiasConfig",
+    "FreeFuseFluxBiasBlockReplace",
+    "FreeFuseFluxBiasSingleBlockReplace",
+    "FreeFuseSDXLBiasAttnReplace",
+    "apply_attention_bias_patches",
 ]
 

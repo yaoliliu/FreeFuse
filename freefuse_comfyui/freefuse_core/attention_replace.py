@@ -50,7 +50,7 @@ class FreeFuseState:
         self.masks: Dict[str, torch.Tensor] = {}
         
         # Settings
-        self.top_k_ratio: float = 0.3
+        self.top_k_ratio: float = 0.1
         self.temperature: float = 4000.0
         self.include_background: bool = True
         
@@ -126,8 +126,15 @@ class FreeFuseFluxBlockReplace:
             
             original_block = extra_args["original_block"]
             
-            # Get current step from transformer_options or state
+            # Get current step from transformer_options
+            # ComfyUI passes sigmas through transformer_options
             current_step = transformer_options.get("sigmas_index", state.current_step)
+            
+            # DEBUG: Log to understand the call pattern
+            if block_index == state.collect_block:
+                logging.info(f"[FreeFuse] block_replace: block={block_index}, "
+                            f"current_step={current_step}, collect_step={state.collect_step}, "
+                            f"phase={state.phase}, state.current_step={state.current_step}")
             
             # Check if we should collect at this block
             should_collect = state.is_collect_step(current_step, block_index)
@@ -244,7 +251,7 @@ def compute_flux_similarity_maps_with_qkv(
     token_pos_maps: Dict[str, List[List[int]]],
     background_positions: Optional[List[int]] = None,
     top_k_ratio: float = 0.3,
-    temperature: float = 4000.0,
+    temperature: float = 1000.0,
     num_heads: int = 24,
 ) -> Dict[str, torch.Tensor]:
     """
@@ -469,38 +476,79 @@ class FreeFuseFluxAttentionReplace:
 
 class FreeFuseSDXLAttnReplace:
     """
-    Replace patch for SDXL cross-attention (attn2).
+    Replace patch for SDXL cross-attention (attn2) with SelfConcept method.
     
     In SDXL, cross-attention has:
     - q: image features projected
     - k, v: text features projected
     
-    We can use set_model_attn2_replace to intercept these.
+    This implementation uses:
+    1. attn1_output_patch: Cache self-attention output (hidden_states)
+    2. attn2_replace: Use cached hidden_states for SelfConcept similarity computation
+    
+    The SelfConcept method:
+    1. Use cross-attention to select top-k image tokens for each concept
+    2. Use hidden_states inner product to compute final similarity maps
     
     Usage:
         replacer = FreeFuseSDXLAttnReplace(state)
-        for block_name in ["input", "middle", "output"]:
-            for block_num in range(...):
-                model.set_model_attn2_replace(
-                    replacer.create_attn_replace(),
-                    block_name,
-                    block_num
-                )
+        replacer.apply_to_model(model)
     """
     
-    def __init__(self, state: FreeFuseState, collect_blocks: List[Tuple[str, int]] = None):
+    def __init__(self, state: FreeFuseState, collect_blocks: List[Tuple] = None):
         self.state = state
-        # Default: collect from mid-depth blocks
+        # Default: collect from output block 0, transformer_block 3
+        # This corresponds to diffusers' up_blocks.0.attentions.0.transformer_blocks.3.attn2
+        # Format: (block_name, block_num, transformer_index)
         self.collect_blocks = collect_blocks or [
-            ("middle", 0),
-            ("output", 3),
-            ("output", 4),
-            ("output", 5),
+            ("output", 0, 3),  # up_blocks.0.attentions.0.transformer_blocks.3.attn2
         ]
+        # Cache for self-attention hidden states, keyed by block
+        self._attn1_cache: Dict[str, torch.Tensor] = {}
         
-    def create_attn_replace(self, block_name: str, block_num: int) -> Callable:
+    def apply_to_model(self, model):
+        """Apply both attn1_output_patch and attn2_replace patches to the model."""
+        # Add attn1_output_patch to cache self-attention outputs
+        model.set_model_attn1_output_patch(self._create_attn1_output_patch())
+        
+        # Add attn2_replace patches for the collect blocks
+        for block_spec in self.collect_blocks:
+            if len(block_spec) == 3:
+                block_name, block_num, transformer_index = block_spec
+            else:
+                block_name, block_num = block_spec
+                transformer_index = None
+            
+            model.set_model_attn2_replace(
+                self.create_attn_replace(block_name, block_num, transformer_index),
+                block_name,
+                block_num,
+                transformer_index,
+            )
+            logging.info(f"[FreeFuse] Set attn2_replace for ({block_name}, {block_num}, {transformer_index})")
+    
+    def _create_attn1_output_patch(self) -> Callable:
+        """Create patch to cache self-attention output."""
+        def attn1_output_patch(n: torch.Tensor, extra_options: Dict) -> torch.Tensor:
+            """Cache self-attention output for SelfConcept computation."""
+            block = extra_options.get("block", ("unknown", 0))
+            if len(block) >= 3:
+                block_key = f"{block[0]}_{block[1]}_{block[2]}"
+            else:
+                block_key = f"{block[0]}_{block[1]}"
+            self._attn1_cache[block_key] = n.clone()
+            return n
+        return attn1_output_patch
+        
+    def create_attn_replace(self, block_name: str, block_num: int, transformer_index: int = None) -> Callable:
         """Create an attn2 replace function for a specific block."""
         state = self.state
+        
+        # Build the block key for matching
+        if transformer_index is not None:
+            target_block = (block_name, block_num, transformer_index)
+        else:
+            target_block = (block_name, block_num)
         
         def attn2_replace(
             q: torch.Tensor,
@@ -511,8 +559,12 @@ class FreeFuseSDXLAttnReplace:
             """
             Replace function for attn2 (cross-attention).
             
+            Uses CrossAttn + SelfConcept method from FreeFuse SDXL:
+            1. CrossAttn: Use cross-attention weights to select top-k image tokens
+            2. SelfConcept: Use hidden_states inner product for final similarity
+            
             Args:
-                q: Query from image features, shape (B*heads, img_seq_len, head_dim) or similar
+                q: Query from image features (B, seq_len, n_heads*dim_head)
                 k: Key from text features
                 v: Value from text features
                 extra_options: Contains block info, n_heads, dim_head, etc.
@@ -525,42 +577,65 @@ class FreeFuseSDXLAttnReplace:
             current_step = extra_options.get("sigmas_index", state.current_step)
             
             # Check if this is a block we want to collect from
+            # The block info in extra_options matches what we registered
             should_collect = (
                 state.phase == "collect" and
-                current_step == state.collect_step and
-                (block_name, block_num) in self.collect_blocks
+                current_step == state.collect_step
             )
             
             # Compute standard attention
-            # q, k, v are already projected
             scale = dim_head ** -0.5
             
             # Reshape for attention if needed
             if q.dim() == 3:
-                # (B*heads, seq_len, dim) -> (B, heads, seq_len, dim)
-                batch_heads = q.shape[0]
-                batch_size = batch_heads // n_heads
-                q = q.view(batch_size, n_heads, -1, dim_head)
-                k = k.view(batch_size, n_heads, -1, dim_head)
-                v = v.view(batch_size, n_heads, -1, dim_head)
+                # ComfyUI passes q,k,v as (B, seq_len, n_heads*dim_head)
+                # Reshape to (B, n_heads, seq_len, dim_head)
+                batch_size = q.shape[0]
+                img_seq_len = q.shape[1]
+                q_4d = q.view(batch_size, img_seq_len, n_heads, dim_head).transpose(1, 2)
+                k_4d = k.view(batch_size, -1, n_heads, dim_head).transpose(1, 2)
+                v_4d = v.view(batch_size, -1, n_heads, dim_head).transpose(1, 2)
+            else:
+                batch_size = q.shape[0]
+                img_seq_len = q.shape[2]
+                q_4d, k_4d, v_4d = q, k, v
             
             # Compute attention weights
-            attn_weights = torch.matmul(q, k.transpose(-1, -2)) * scale
+            attn_weights = torch.matmul(q_4d, k_4d.transpose(-1, -2)) * scale
             attn_weights = F.softmax(attn_weights, dim=-1)
             
             # Compute attention output
-            out = torch.matmul(attn_weights, v)
+            out_4d = torch.matmul(attn_weights, v_4d)
             
-            # Reshape back if needed
-            if out.dim() == 4:
-                out = out.transpose(1, 2).reshape(batch_size, -1, n_heads * dim_head)
+            # Reshape back to (B, seq_len, n_heads*dim_head)
+            out = out_4d.transpose(1, 2).reshape(batch_size, -1, n_heads * dim_head)
             
             if should_collect and state.token_pos_maps:
-                # Extract concept similarity maps
-                sim_maps = self._extract_sdxl_similarity_maps(
+                # Try to get cached hidden_states from attn1_output_patch
+                block = extra_options.get("block", (block_name, block_num))
+                if len(block) >= 3:
+                    block_key = f"{block[0]}_{block[1]}_{block[2]}"
+                else:
+                    block_key = f"{block[0]}_{block[1]}"
+                cached_hidden_states = self._attn1_cache.get(block_key)
+                
+                if cached_hidden_states is not None:
+                    # Use cached self-attention output for SelfConcept
+                    hidden_for_sim = cached_hidden_states
+                    logging.info(f"[FreeFuse] Using cached attn1 hidden_states for {block_key}")
+                else:
+                    # Fallback: use cross-attention output
+                    hidden_for_sim = out
+                    logging.info(f"[FreeFuse] No cached attn1, using cross-attn output for {block_key}")
+                
+                # Get cond_or_uncond from extra_options for proper CFG batch handling
+                cond_or_uncond = extra_options.get("cond_or_uncond", None)
+                
+                # Extract concept similarity maps using SelfConcept method
+                sim_maps = self._extract_sdxl_similarity_maps_self_concept(
                     attn_weights=attn_weights,
-                    q=q,
-                    k=k,
+                    hidden_states=hidden_for_sim,
+                    cond_or_uncond=cond_or_uncond,
                 )
                 state.similarity_maps.update(sim_maps)
                 
@@ -570,20 +645,74 @@ class FreeFuseSDXLAttnReplace:
         
         return attn2_replace
     
-    def _extract_sdxl_similarity_maps(
+    def _extract_sdxl_similarity_maps_self_concept(
         self,
         attn_weights: torch.Tensor,
-        q: torch.Tensor,
-        k: torch.Tensor,
+        hidden_states: torch.Tensor,
+        cond_or_uncond: Optional[List[int]] = None,
     ) -> Dict[str, torch.Tensor]:
-        """Extract similarity maps from SDXL cross-attention."""
+        """
+        Extract similarity maps using CrossAttn + SelfConcept method.
+        
+        This matches the FreeFuseSDXLAttnProcessor implementation:
+        1. Use cross-attention weights to select top-k image tokens for each concept
+        2. Use hidden_states inner product (SelfConcept) to compute final similarity
+        
+        IMPORTANT: With CFG (classifier-free guidance), the batch structure depends on
+        cond_or_uncond list from ComfyUI's transformer_options:
+        - cond_or_uncond[i] = 0 means batch[i] is cond (positive prompt with concept tokens)
+        - cond_or_uncond[i] = 1 means batch[i] is uncond (negative prompt, no meaningful concepts)
+        
+        We MUST use only cond batches (where cond_or_uncond[i] == 0) for similarity computation.
+        This supports arbitrary batch sizes, not just B=2.
+        
+        Args:
+            attn_weights: Cross-attention weights (B, heads, img_seq_len, txt_seq_len)
+            hidden_states: Attention output (B, img_seq_len, C)
+            cond_or_uncond: List indicating which batch indices are cond (0) or uncond (1)
+        
+        Returns:
+            Dict mapping concept name to similarity map (1, img_seq_len, 1)
+        """
         state = self.state
         concept_sim_maps = {}
         
-        # attn_weights: (B, heads, img_seq_len, txt_seq_len)
         B, heads, img_len, txt_len = attn_weights.shape
         
-        # Collect all cross-attention scores for competitive exclusion
+        # Extract only cond batches using cond_or_uncond info from ComfyUI
+        # cond_or_uncond[i] == 0 means cond (positive prompt), == 1 means uncond (negative)
+        if cond_or_uncond is not None and len(cond_or_uncond) > 0:
+            # Find indices of cond batches (where value == 0)
+            # Batch structure: if cond_or_uncond = [1, 0], then B items per condition
+            # Total batch = B_total, items_per_cond = B_total // len(cond_or_uncond)
+            items_per_cond = B // len(cond_or_uncond)
+            
+            cond_indices = []
+            for i, c in enumerate(cond_or_uncond):
+                if c == 0:  # cond batch
+                    start_idx = i * items_per_cond
+                    end_idx = (i + 1) * items_per_cond
+                    cond_indices.extend(range(start_idx, end_idx))
+            
+            if cond_indices:
+                cond_indices_tensor = torch.tensor(cond_indices, device=attn_weights.device, dtype=torch.long)
+                attn_weights = attn_weights[cond_indices_tensor]  # (n_cond, heads, img_len, txt_len)
+                hidden_states = hidden_states[cond_indices_tensor]  # (n_cond, img_len, C)
+                B = len(cond_indices)
+                logging.info(f"[SelfConcept] CFG detected via cond_or_uncond={cond_or_uncond}, "
+                           f"using {B} cond batches at indices {cond_indices}")
+            else:
+                logging.warning(f"[SelfConcept] cond_or_uncond={cond_or_uncond} has no cond (0) entries, using all")
+        elif B >= 2:
+            # Fallback: assume [uncond, cond] structure when cond_or_uncond not available
+            # Take only the second half (cond batches)
+            half_B = B // 2
+            attn_weights = attn_weights[half_B:]  # (half_B, heads, img_len, txt_len)
+            hidden_states = hidden_states[half_B:]  # (half_B, img_len, C)
+            B = attn_weights.shape[0]
+            logging.info(f"[SelfConcept] CFG fallback: B>=2, using second half as cond, new B={B}")
+        
+        # Collect all cross-attention scores for contrastive selection
         all_cross_attn_scores = {}
         
         for lora_name, positions_list in state.token_pos_maps.items():
@@ -596,23 +725,40 @@ class FreeFuseSDXLAttnReplace:
             
             pos_tensor = torch.tensor(pos, device=attn_weights.device, dtype=torch.long)
             concept_attn = attn_weights[:, :, :, pos_tensor]  # (B, heads, img_len, concept_len)
-            cross_attn_scores = concept_attn.mean(dim=-1).mean(dim=1)  # (B, img_len)
+            # Mean over heads and concept tokens -> (B, img_len)
+            cross_attn_scores = concept_attn.mean(dim=-1).mean(dim=1)
             all_cross_attn_scores[lora_name] = cross_attn_scores
         
-        # Compute similarity maps with competitive exclusion
+        # Compute contrastive scores and final sim maps using SelfConcept
         for lora_name in all_cross_attn_scores.keys():
+            # Contrastive score: enhance current concept, subtract others
             cross_attn_scores = all_cross_attn_scores[lora_name] * len(all_cross_attn_scores)
             for other_name, other_scores in all_cross_attn_scores.items():
                 if other_name != lora_name:
                     cross_attn_scores = cross_attn_scores - other_scores
             
-            # Top-k selection
-            k_select = max(1, int(img_len * state.top_k_ratio))
-            _, top_k_indices = torch.topk(cross_attn_scores, k_select, dim=-1)
+            # Select top-k image tokens based on cross-attention scores
+            k = max(1, int(img_len * state.top_k_ratio))
+            _, top_k_indices = torch.topk(cross_attn_scores, k, dim=-1)  # (B, k)
             
-            # For SDXL, we use cross-attention scores directly as similarity
-            # (could be improved with hidden state caching like in freefuse_sdxl_attn_processor.py)
-            concept_sim_map = F.softmax(cross_attn_scores / state.temperature, dim=-1)
+            # SelfConcept: Use hidden_states inner product
+            # Extract core image tokens
+            top_k_indices_expanded = top_k_indices.unsqueeze(-1).expand(-1, -1, hidden_states.shape[-1])
+            core_tokens = torch.gather(hidden_states, dim=1, index=top_k_indices_expanded)  # (B, k, C)
+            
+            # Compute self-modal similarity: core tokens @ all tokens
+            self_modal_sim = torch.bmm(core_tokens, hidden_states.transpose(-1, -2))  # (B, k, img_len)
+            
+            # Average over core tokens
+            concept_sim_map = self_modal_sim.mean(dim=1)  # (B, img_len)
+            
+            logging.info(f"[SelfConcept] {lora_name}: hidden_states shape={hidden_states.shape}, "
+                        f"self_modal_sim range=[{self_modal_sim.min():.2f}, {self_modal_sim.max():.2f}], "
+                        f"mean={concept_sim_map.mean():.2f}")
+            
+            # Apply softmax with temperature
+            concept_sim_map = F.softmax(concept_sim_map / state.temperature, dim=-1)
+            
             concept_sim_maps[lora_name] = concept_sim_map.unsqueeze(-1)  # (B, img_len, 1)
         
         # Handle background
@@ -624,6 +770,8 @@ class FreeFuseSDXLAttnReplace:
                     pos_tensor = torch.tensor(bg_pos, device=attn_weights.device, dtype=torch.long)
                     bg_attn = attn_weights[:, :, :, pos_tensor]
                     bg_scores = bg_attn.mean(dim=-1).mean(dim=1)
+                    
+                    # Use cross-attention based similarity for background (no SelfConcept)
                     bg_sim_map = F.softmax(bg_scores / state.temperature, dim=-1)
                     concept_sim_maps[bg_key] = bg_sim_map.unsqueeze(-1)
                 break
@@ -637,7 +785,7 @@ def compute_flux_similarity_maps_from_outputs(
     token_pos_maps: Dict[str, List[List[int]]],
     background_positions: Optional[List[int]] = None,
     top_k_ratio: float = 0.3,
-    temperature: float = 4000.0,
+    temperature: float = 1000.0,
 ) -> Dict[str, torch.Tensor]:
     """
     Compute similarity maps for Flux using the FreeFuse algorithm.
@@ -813,15 +961,11 @@ def apply_freefuse_replace_patches(
             logging.error(f"[FreeFuse] Cannot find double_blocks[{block_index}] in diffusion model")
         
     else:
-        # For SDXL, use attn2 replace on key blocks
+        # For SDXL, use attn1_output_patch + attn2 replace with SelfConcept method
         replacer = FreeFuseSDXLAttnReplace(state)
+        replacer.apply_to_model(model)
         
-        # Set replace patches for collection blocks
-        for block_name, block_num in replacer.collect_blocks:
-            attn_replace = replacer.create_attn_replace(block_name, block_num)
-            model.set_model_attn2_replace(attn_replace, block_name, block_num)
-        
-        logging.info(f"[FreeFuse] Set attn2 replace for {len(replacer.collect_blocks)} blocks")
+        logging.info(f"[FreeFuse] Set attn1_output_patch + attn2 replace for blocks: {replacer.collect_blocks}")
 
 
 # Utility exports

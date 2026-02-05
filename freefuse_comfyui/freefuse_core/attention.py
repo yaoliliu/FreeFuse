@@ -189,7 +189,7 @@ def compute_flux_similarity_maps(
     txt_hidden_states: torch.Tensor,
     token_pos_maps: Dict[str, List[List[int]]],
     top_k_ratio: float = 0.3,
-    temperature: float = 4000.0,
+    temperature: float = 1000.0,
 ) -> Dict[str, torch.Tensor]:
     """
     Compute similarity maps for Flux model using the FreeFuse algorithm.
@@ -330,7 +330,7 @@ def compute_sdxl_similarity_maps(
     hidden_states: torch.Tensor,
     token_pos_maps: Dict[str, List[List[int]]],
     top_k_ratio: float = 0.3,
-    temperature: float = 4000.0,
+    temperature: float = 1000.0,
 ) -> Dict[str, torch.Tensor]:
     """
     Compute similarity maps for SDXL model.

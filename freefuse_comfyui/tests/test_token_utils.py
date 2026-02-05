@@ -43,7 +43,7 @@ def test_t5_tokenizer():
     print(f"Concepts: {concepts}")
     
     # Import our function
-    from comfyui.freefuse_core.token_utils import find_concept_positions_t5
+    from freefuse_comfyui.freefuse_core.token_utils import find_concept_positions_t5
     
     # Find positions
     pos_maps = find_concept_positions_t5(
@@ -101,7 +101,7 @@ def test_clip_tokenizer():
     print(f"Concepts: {concepts}")
     
     # Import our function
-    from comfyui.freefuse_core.token_utils import find_concept_positions_clip
+    from freefuse_comfyui.freefuse_core.token_utils import find_concept_positions_clip
     
     # Find positions
     pos_maps = find_concept_positions_clip(
@@ -155,7 +155,7 @@ def test_multiple_prompts():
     print(f"\nPrompts: {prompts}")
     print(f"Concepts: {concepts}")
     
-    from comfyui.freefuse_core.token_utils import find_concept_positions_clip
+    from freefuse_comfyui.freefuse_core.token_utils import find_concept_positions_clip
     
     pos_maps = find_concept_positions_clip(
         tokenizer=tokenizer,
@@ -188,7 +188,7 @@ def test_edge_cases():
     
     tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
     
-    from comfyui.freefuse_core.token_utils import find_concept_positions_clip
+    from freefuse_comfyui.freefuse_core.token_utils import find_concept_positions_clip
     
     # Test 1: Concept not in prompt
     print("\n1. Concept not in prompt:")

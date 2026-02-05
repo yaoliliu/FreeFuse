@@ -1,11 +1,15 @@
 """
-FreeFuse LoRA Loader - uses ComfyUI's bypass mode
+FreeFuse LoRA Loader - uses fixed bypass mode for Flux support
 
-This loader uses ComfyUI's internal load_bypass_lora_for_models() to keep
+This loader uses FreeFuse's fixed load_bypass_lora_for_models_fixed() to keep
 LoRA weights separate (not merged), enabling FreeFuse spatial masking.
+
+The fixed version correctly handles Flux's fused QKV weights (tuple keys)
+which ComfyUI's original implementation doesn't support properly.
 
 Key features:
 - Loads LoRA in bypass mode (not merged into base weights)
+- Correctly handles Flux fused QKV weights with offset
 - Tracks adapter information for mask application
 - Supports chaining multiple LoRAs
 """
@@ -16,6 +20,9 @@ import comfy.utils
 import comfy.sd
 import comfy.lora
 import comfy.lora_convert
+
+# Use our fixed bypass loader instead of ComfyUI's buggy version
+from ..freefuse_core.bypass_lora_loader import load_bypass_lora_for_models_fixed
 
 
 class FreeFuseLoRALoader:
@@ -93,10 +100,10 @@ Example workflow:
             lora = comfy.utils.load_torch_file(lora_path, safe_load=True)
             self.loaded_lora = (lora_path, lora)
         
-        # Use ComfyUI's bypass mode - LoRA not merged into weights
-        # This enables per-forward mask application
-        model_lora, clip_lora = comfy.sd.load_bypass_lora_for_models(
-            model, clip, lora, strength_model, strength_clip
+        # Use FreeFuse's fixed bypass mode - correctly handles Flux fused QKV weights
+        # Original ComfyUI's load_bypass_lora_for_models() doesn't support tuple keys
+        model_lora, clip_lora = load_bypass_lora_for_models_fixed(
+            model, clip, lora, strength_model, strength_clip, adapter_name=adapter_name
         )
         
         # Build/extend freefuse_data

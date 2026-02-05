@@ -1,21 +1,49 @@
 {
-    "last_node_id": 18,
+    "last_node_id": 19,
     "last_link_id": 28,
     "nodes": [
+        {
+            "id": 19,
+            "type": "MarkdownNote",
+            "pos": [-500, 50],
+            "size": [480, 400],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [],
+            "outputs": [],
+            "title": "Model Download Guide",
+            "properties": {},
+            "widgets_values": [
+                "# FreeFuse SDXL Workflow - Model Guide\n\n## Required Models\n\n**checkpoints**\n\n- [sd_xl_base_1.0.safetensors](https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors)\n\n## Model Storage Location\n\n```\n📂 ComfyUI/\n├── 📂 models/\n│   └── 📂 checkpoints/\n│          └── sd_xl_base_1.0.safetensors\n```\n\n## Notes\n\n- SDXL Base requires ~6.5GB VRAM\n- Optimal resolution: 1024x1024\n- CFG Scale: 7.0 recommended\n- Steps: 30 for best quality"
+            ],
+            "color": "#432",
+            "bgcolor": "#000"
+        },
         {
             "id": 1,
             "type": "CheckpointLoaderSimple",
             "pos": [50, 100],
             "size": [315, 98],
             "flags": {},
-            "order": 0,
+            "order": 1,
             "mode": 0,
             "outputs": [
                 {"name": "MODEL", "type": "MODEL", "links": [1]},
                 {"name": "CLIP", "type": "CLIP", "links": [2]},
                 {"name": "VAE", "type": "VAE", "links": [25]}
             ],
-            "properties": {"Node name for S&R": "CheckpointLoaderSimple"},
+            "properties": {
+                "Node name for S&R": "CheckpointLoaderSimple",
+                "cnr_id": "comfy-core",
+                "models": [
+                    {
+                        "name": "sd_xl_base_1.0.safetensors",
+                        "url": "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors",
+                        "directory": "checkpoints"
+                    }
+                ]
+            },
             "widgets_values": ["sd_xl_base_1.0.safetensors"],
             "title": "Load SDXL Base"
         },
@@ -382,8 +410,16 @@
             "name": "FreeFuse SDXL Complete Workflow",
             "description": "Two-phase FreeFuse workflow for SDXL model with two character LoRAs",
             "author": "FreeFuse Team",
-            "version": "1.0",
-            "notes": "SDXL uses different CFG scale (7.0) and more steps (30) compared to Flux"
+            "version": "1.1",
+            "notes": "SDXL uses different CFG scale (7.0) and more steps (30) compared to Flux",
+            "models": {
+                "checkpoints": [
+                    {
+                        "name": "sd_xl_base_1.0.safetensors",
+                        "url": "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors"
+                    }
+                ]
+            }
         }
     },
     "version": 0.4

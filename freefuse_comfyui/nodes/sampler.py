@@ -22,6 +22,11 @@ from ..freefuse_core.attention_replace import (
 from ..freefuse_core.mask_utils import generate_masks
 
 
+class EarlyStopException(Exception):
+    """Exception to signal early termination of sampling after mask collection."""
+    pass
+
+
 class FreeFusePhase1Sampler:
     """
     Phase 1: Collect similarity maps and generate spatial masks.
@@ -42,7 +47,10 @@ class FreeFusePhase1Sampler:
                 "latent": ("LATENT",),
                 "freefuse_data": ("FREEFUSE_DATA",),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
-                "steps": ("INT", {"default": 5, "min": 1, "max": 20}),
+                "steps": ("INT", {"default": 28, "min": 1, "max": 150, 
+                    "tooltip": "Total steps for sigma schedule (should match Phase 2)"}),
+                "collect_step": ("INT", {"default": 5, "min": 1, "max": 20,
+                    "tooltip": "Step at which to collect attention and stop Phase 1"}),
                 "cfg": ("FLOAT", {"default": 3.5, "min": 0.0, "max": 20.0, "step": 0.1}),
                 "sampler_name": (comfy.samplers.KSampler.SAMPLERS,),
                 "scheduler": (comfy.samplers.KSampler.SCHEDULERS,),
@@ -62,11 +70,14 @@ class FreeFusePhase1Sampler:
     
     DESCRIPTION = """Phase 1 of FreeFuse: collect attention and generate masks.
     
+Uses full sigma schedule (e.g., 28 steps) but stops early after collecting
+attention at collect_step. This ensures correct noise levels while saving time.
+
 After this node, connect the model output to a standard KSampler
-for Phase 2 generation with the same seed."""
+for Phase 2 generation with the same seed and steps."""
     
     def collect_masks(self, model, conditioning, neg_conditioning, latent, 
-                      freefuse_data, seed, steps, cfg, sampler_name, scheduler,
+                      freefuse_data, seed, steps, collect_step, cfg, sampler_name, scheduler,
                       collect_block=18):
         
         concepts = freefuse_data.get("concepts", {})
@@ -99,14 +110,15 @@ for Phase 2 generation with the same seed."""
         # Set up FreeFuse state with the new system
         freefuse_state = FreeFuseState()
         freefuse_state.phase = "collect"
-        freefuse_state.collect_step = steps - 1  # Collect on last step
+        # Collect at the specified step (0-indexed internally)
+        freefuse_state.collect_step = collect_step - 1  # Convert to 0-indexed
         freefuse_state.collect_block = collect_block
         freefuse_state.token_pos_maps = token_pos_maps
         freefuse_state.include_background = include_background
         
         # Copy settings from freefuse_data
         freefuse_state.top_k_ratio = settings.get("top_k_ratio", 0.3)
-        freefuse_state.temperature = settings.get("temperature", 4000.0)
+        freefuse_state.temperature = settings.get("temperature", 1000.0)
         
         # Detect model type and apply replace patches
         model_type = "auto"
@@ -126,7 +138,7 @@ for Phase 2 generation with the same seed."""
         latent_h, latent_w = latent_image.shape[2], latent_image.shape[3]
         img_h, img_w = latent_h * 8, latent_w * 8
         
-        print(f"[FreeFuse] Phase 1: {steps} steps, collecting at block {collect_block}")
+        print(f"[FreeFuse] Phase 1: {steps} total steps, collecting at step {collect_step}, block {collect_block}")
         print(f"[FreeFuse] Concepts: {list(concepts.keys())}")
         print(f"[FreeFuse] Token positions: {token_pos_maps}")
         print(f"[FreeFuse] Model type: {model_type}")
@@ -134,11 +146,16 @@ for Phase 2 generation with the same seed."""
         # Create noise for Phase 1
         noise = comfy.sample.prepare_noise(latent_image, seed, None)
         
-        # Configure step callback to update current step in state
+        # Configure step callback to update current step and enable early stopping
         def step_callback(step, x0, x, total_steps):
             freefuse_state.current_step = step
+            # Check if we've collected similarity maps and can stop early
+            if freefuse_state.similarity_maps and step > freefuse_state.collect_step:
+                print(f"[FreeFuse] Early stopping at step {step + 1} (collected at step {collect_step})")
+                raise EarlyStopException("Similarity maps collected, stopping early")
         
-        # Run Phase 1 sampling
+        # Run Phase 1 sampling (may terminate early via EarlyStopException)
+        early_stopped = False
         try:
             samples = comfy.sample.sample(
                 model_clone,
@@ -159,6 +176,10 @@ for Phase 2 generation with the same seed."""
                 callback=step_callback,
                 seed=seed,
             )
+        except EarlyStopException as e:
+            # Expected early termination - similarity maps already collected
+            early_stopped = True
+            print(f"[FreeFuse] Phase 1 completed early: {e}")
         except Exception as e:
             print(f"[FreeFuse] Phase 1 sampling error: {e}")
             import traceback
@@ -171,18 +192,32 @@ for Phase 2 generation with the same seed."""
         # Get similarity maps directly from freefuse_state
         similarity_maps = freefuse_state.similarity_maps
         
-        # Convert similarity maps to spatial format if needed
-        processed_sim_maps = self._process_similarity_maps(
-            similarity_maps, 
-            (latent_h, latent_w)
-        )
+        # Debug: Show raw similarity maps
+        print(f"[FreeFuse] Raw similarity maps: {list(similarity_maps.keys())}")
+        for name, sim_map in similarity_maps.items():
+            if sim_map is not None:
+                print(f"   {name}: shape={sim_map.shape}, min={sim_map.min():.6f}, max={sim_map.max():.6f}, mean={sim_map.mean():.6f}")
         
-        # Generate masks from similarity maps
-        if processed_sim_maps:
+        # Debug: Show raw similarity maps
+        print(f"[FreeFuse] Raw similarity maps: {list(similarity_maps.keys())}")
+        for name, sim_map in similarity_maps.items():
+            if sim_map is not None:
+                print(f"   {name}: shape={sim_map.shape}, min={sim_map.min():.6f}, max={sim_map.max():.6f}, mean={sim_map.mean():.6f}")
+        
+        # Generate masks directly from raw similarity maps
+        # The new generate_masks can handle (B, N, 1) format and includes:
+        # - stabilized_balanced_argmax from diffusers
+        # - morphological cleaning
+        # - proper background handling
+        if similarity_maps:
             masks = generate_masks(
-                processed_sim_maps, 
-                include_background=include_background,
-                method="balanced"
+                similarity_maps, 
+                include_background=False,
+                method="stabilized",  # Use the sophisticated algorithm from diffusers
+                bg_scale=0.95,  # Same as diffusers default
+                use_morphological_cleaning=False,
+                debug=True,  # Enable debug output
+                max_iter=5,  # Test with iterations
             )
         else:
             # Fallback: create uniform masks
@@ -207,11 +242,14 @@ for Phase 2 generation with the same seed."""
         model_clone.model_options["freefuse_state"] = freefuse_state
         
         print(f"[FreeFuse] Phase 1 complete. Generated {len(masks)} masks.")
-        print(f"[FreeFuse] Similarity map keys: {list(similarity_maps.keys())}")
+        print(f"[FreeFuse] Mask keys: {list(masks.keys())}")
+        for name, mask in masks.items():
+            coverage = mask.sum() / mask.numel() * 100
+            print(f"   {name}: coverage={coverage:.1f}%")
         
         return (
             model_clone, 
-            {"masks": masks, "similarity_maps": processed_sim_maps}, 
+            {"masks": masks, "similarity_maps": similarity_maps}, 
             preview
         )
     
