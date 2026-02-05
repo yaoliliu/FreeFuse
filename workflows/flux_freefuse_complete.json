@@ -1,0 +1,505 @@
+{
+    "last_node_id": 21,
+    "last_link_id": 32,
+    "nodes": [
+        {
+            "id": 19,
+            "type": "MarkdownNote",
+            "pos": [-500, 50],
+            "size": [480, 550],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [],
+            "outputs": [],
+            "title": "Model Download Guide",
+            "properties": {},
+            "widgets_values": [
+                "# FreeFuse Flux Workflow - Model Guide\n\n## Required Models (FP8 Quantized)\n\n**text_encoders**\n\n- [clip_l.safetensors](https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors)\n- [t5xxl_fp8_e4m3fn.safetensors](https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp8_e4m3fn.safetensors)\n\n**diffusion_models**\n\n- [flux1-dev-fp8.safetensors](https://huggingface.co/Comfy-Org/flux1-dev/resolve/main/flux1-dev-fp8.safetensors)\n\n**vae**\n\n- [ae.safetensors](https://huggingface.co/Comfy-Org/Lumina_Image_2.0_Repackaged/resolve/main/split_files/vae/ae.safetensors)\n\n## Model Storage Location\n\n```\n📂 ComfyUI/\n├── 📂 models/\n│   ├── 📂 text_encoders/\n│   │      ├── clip_l.safetensors\n│   │      └── t5xxl_fp8_e4m3fn.safetensors\n│   ├── 📂 diffusion_models/\n│   │      └── flux1-dev-fp8.safetensors\n│   └── 📂 vae/\n│          └── ae.safetensors\n```\n\n## Notes\n\n- FP8 quantized models use ~50% less VRAM than FP16\n- Requires ~12GB VRAM for 1024x1024 generation\n- For full precision, replace with FP16 versions"
+            ],
+            "color": "#432",
+            "bgcolor": "#000"
+        },
+        {
+            "id": 1,
+            "type": "UNETLoader",
+            "pos": [50, 100],
+            "size": [315, 82],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "outputs": [
+                {"name": "MODEL", "type": "MODEL", "links": [1]}
+            ],
+            "properties": {
+                "Node name for S&R": "UNETLoader",
+                "cnr_id": "comfy-core",
+                "models": [
+                    {
+                        "name": "flux1-dev-fp8.safetensors",
+                        "url": "https://huggingface.co/Comfy-Org/flux1-dev/resolve/main/flux1-dev-fp8.safetensors",
+                        "directory": "diffusion_models"
+                    }
+                ]
+            },
+            "widgets_values": ["flux1-dev-fp8.safetensors", "fp8_e4m3fn"],
+            "title": "Load Flux UNET (FP8 Quantized)"
+        },
+        {
+            "id": 2,
+            "type": "DualCLIPLoader",
+            "pos": [50, 230],
+            "size": [315, 130],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "outputs": [
+                {"name": "CLIP", "type": "CLIP", "links": [2]}
+            ],
+            "properties": {
+                "Node name for S&R": "DualCLIPLoader",
+                "cnr_id": "comfy-core",
+                "models": [
+                    {
+                        "name": "clip_l.safetensors",
+                        "url": "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors",
+                        "directory": "text_encoders"
+                    },
+                    {
+                        "name": "t5xxl_fp8_e4m3fn.safetensors",
+                        "url": "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp8_e4m3fn.safetensors",
+                        "directory": "text_encoders"
+                    }
+                ]
+            },
+            "widgets_values": ["clip_l.safetensors", "t5xxl_fp8_e4m3fn.safetensors", "flux", "default"],
+            "title": "Load CLIP + T5 (FP8 Quantized)"
+        },
+        {
+            "id": 3,
+            "type": "VAELoader",
+            "pos": [50, 410],
+            "size": [315, 58],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "outputs": [
+                {"name": "VAE", "type": "VAE", "links": [30]}
+            ],
+            "properties": {
+                "Node name for S&R": "VAELoader",
+                "cnr_id": "comfy-core",
+                "models": [
+                    {
+                        "name": "ae.safetensors",
+                        "url": "https://huggingface.co/Comfy-Org/Lumina_Image_2.0_Repackaged/resolve/main/split_files/vae/ae.safetensors",
+                        "directory": "vae"
+                    }
+                ]
+            },
+            "widgets_values": ["ae.safetensors"],
+            "title": "Load Flux VAE"
+        },
+        {
+            "id": 4,
+            "type": "FreeFuseLoRALoader",
+            "pos": [400, 50],
+            "size": [315, 170],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputs": [
+                {"name": "model", "type": "MODEL", "link": 1},
+                {"name": "clip", "type": "CLIP", "link": 2},
+                {"name": "freefuse_data", "type": "FREEFUSE_DATA", "link": null}
+            ],
+            "outputs": [
+                {"name": "model", "type": "MODEL", "links": [3]},
+                {"name": "clip", "type": "CLIP", "links": [4]},
+                {"name": "freefuse_data", "type": "FREEFUSE_DATA", "links": [5]}
+            ],
+            "properties": {"Node name for S&R": "FreeFuseLoRALoader"},
+            "widgets_values": [
+                "harry_potter_flux.safetensors",
+                "harry",
+                1.0,
+                1.0
+            ],
+            "title": "LoRA 1: Harry Potter"
+        },
+        {
+            "id": 5,
+            "type": "FreeFuseLoRALoader",
+            "pos": [400, 280],
+            "size": [315, 170],
+            "flags": {},
+            "order": 4,
+            "mode": 0,
+            "inputs": [
+                {"name": "model", "type": "MODEL", "link": 3},
+                {"name": "clip", "type": "CLIP", "link": 4},
+                {"name": "freefuse_data", "type": "FREEFUSE_DATA", "link": 5}
+            ],
+            "outputs": [
+                {"name": "model", "type": "MODEL", "links": [6]},
+                {"name": "clip", "type": "CLIP", "links": [7, 8]},
+                {"name": "freefuse_data", "type": "FREEFUSE_DATA", "links": [10]}
+            ],
+            "properties": {"Node name for S&R": "FreeFuseLoRALoader"},
+            "widgets_values": [
+                "daiyu_lin_flux.safetensors",
+                "daiyu",
+                1.0,
+                1.0
+            ],
+            "title": "LoRA 2: Daiyu Lin"
+        },
+        {
+            "id": 6,
+            "type": "FreeFuseConceptMap",
+            "pos": [750, 50],
+            "size": [350, 280],
+            "flags": {},
+            "order": 5,
+            "mode": 0,
+            "inputs": [
+                {"name": "freefuse_data", "type": "FREEFUSE_DATA", "link": 10}
+            ],
+            "outputs": [
+                {"name": "freefuse_data", "type": "FREEFUSE_DATA", "links": [11]}
+            ],
+            "properties": {"Node name for S&R": "FreeFuseConceptMap"},
+            "widgets_values": [
+                "harry",
+                "an European man wearing Hogwarts uniform",
+                "daiyu",
+                "an Asian woman wearing Chinese traditional clothing",
+                "",
+                "",
+                "",
+                "",
+                true,
+                ""
+            ],
+            "title": "Concept Mapping"
+        },
+        {
+            "id": 8,
+            "type": "FreeFuseTokenPositions",
+            "pos": [1150, 50],
+            "size": [315, 180],
+            "flags": {},
+            "order": 6,
+            "mode": 0,
+            "inputs": [
+                {"name": "clip", "type": "CLIP", "link": 7},
+                {"name": "freefuse_data", "type": "FREEFUSE_DATA", "link": 11}
+            ],
+            "outputs": [
+                {"name": "freefuse_data", "type": "FREEFUSE_DATA", "links": [14]}
+            ],
+            "properties": {"Node name for S&R": "FreeFuseTokenPositions"},
+            "widgets_values": [
+                "Realistic photography, an European man wearing Hogwarts uniform hugging an Asian woman wearing Chinese traditional clothing warmly, both faces close together, autumn leaves blurred in the background, high quality, detailed",
+                true,
+                true
+            ],
+            "title": "Compute Token Positions (T5)"
+        },
+        {
+            "id": 9,
+            "type": "CLIPTextEncode",
+            "pos": [1150, 280],
+            "size": [315, 120],
+            "flags": {},
+            "order": 7,
+            "mode": 0,
+            "inputs": [
+                {"name": "clip", "type": "CLIP", "link": 8}
+            ],
+            "outputs": [
+                {"name": "CONDITIONING", "type": "CONDITIONING", "links": [15]}
+            ],
+            "properties": {"Node name for S&R": "CLIPTextEncode"},
+            "widgets_values": [
+                "Realistic photography, an European man wearing Hogwarts uniform hugging an Asian woman wearing Chinese traditional clothing warmly, both faces close together, autumn leaves blurred in the background, high quality, detailed"
+            ],
+            "title": "Positive Conditioning"
+        },
+        {
+            "id": 10,
+            "type": "EmptySD3LatentImage",
+            "pos": [1150, 380],
+            "size": [315, 106],
+            "flags": {},
+            "order": 9,
+            "mode": 0,
+            "outputs": [
+                {"name": "LATENT", "type": "LATENT", "links": [17, 22]}
+            ],
+            "properties": {"Node name for S&R": "EmptySD3LatentImage"},
+            "widgets_values": [1024, 1024, 1],
+            "title": "Latent Image (1024x1024)"
+        },
+        {
+            "id": 11,
+            "type": "FluxGuidance",
+            "pos": [1500, 230],
+            "size": [250, 58],
+            "flags": {},
+            "order": 10,
+            "mode": 0,
+            "inputs": [
+                {"name": "conditioning", "type": "CONDITIONING", "link": 15}
+            ],
+            "outputs": [
+                {"name": "CONDITIONING", "type": "CONDITIONING", "links": [16, 28]}
+            ],
+            "properties": {"Node name for S&R": "FluxGuidance"},
+            "widgets_values": [3.5],
+            "title": "Flux Guidance (CFG=3.5)"
+        },
+        {
+            "id": 12,
+            "type": "FreeFusePhase1Sampler",
+            "pos": [1500, 340],
+            "size": [350, 280],
+            "flags": {},
+            "order": 11,
+            "mode": 0,
+            "inputs": [
+                {"name": "model", "type": "MODEL", "link": 6},
+                {"name": "conditioning", "type": "CONDITIONING", "link": 16},
+                {"name": "neg_conditioning", "type": "CONDITIONING", "link": null},
+                {"name": "latent", "type": "LATENT", "link": 17},
+                {"name": "freefuse_data", "type": "FREEFUSE_DATA", "link": 14}
+            ],
+            "outputs": [
+                {"name": "model", "type": "MODEL", "links": [18]},
+                {"name": "masks", "type": "FREEFUSE_MASKS", "links": [19, 20]},
+                {"name": "mask_preview", "type": "IMAGE", "links": [21]}
+            ],
+            "properties": {"Node name for S&R": "FreeFusePhase1Sampler"},
+            "widgets_values": [
+                42,
+                5,
+                1.0,
+                "euler",
+                "simple",
+                18
+            ],
+            "title": "Phase 1: Collect Masks"
+        },
+        {
+            "id": 13,
+            "type": "PreviewImage",
+            "pos": [1900, 340],
+            "size": [300, 250],
+            "flags": {},
+            "order": 12,
+            "mode": 0,
+            "inputs": [
+                {"name": "images", "type": "IMAGE", "link": 21}
+            ],
+            "properties": {"Node name for S&R": "PreviewImage"},
+            "title": "Mask Preview (Phase 1)"
+        },
+        {
+            "id": 14,
+            "type": "FreeFuseMaskApplicator",
+            "pos": [1500, 670],
+            "size": [350, 150],
+            "flags": {},
+            "order": 13,
+            "mode": 0,
+            "inputs": [
+                {"name": "model", "type": "MODEL", "link": 18},
+                {"name": "masks", "type": "FREEFUSE_MASKS", "link": 19},
+                {"name": "freefuse_data", "type": "FREEFUSE_DATA", "link": 14},
+                {"name": "latent", "type": "LATENT", "link": 22}
+            ],
+            "outputs": [
+                {"name": "model", "type": "MODEL", "links": [23]}
+            ],
+            "properties": {"Node name for S&R": "FreeFuseMaskApplicator"},
+            "widgets_values": [true],
+            "title": "Apply Masks to LoRAs"
+        },
+        {
+            "id": 15,
+            "type": "FreeFuseMaskPreview",
+            "pos": [1900, 640],
+            "size": [300, 200],
+            "flags": {},
+            "order": 14,
+            "mode": 0,
+            "inputs": [
+                {"name": "masks", "type": "FREEFUSE_MASKS", "link": 20}
+            ],
+            "outputs": [
+                {"name": "combined_preview", "type": "IMAGE", "links": []},
+                {"name": "individual_masks", "type": "IMAGE", "links": []}
+            ],
+            "properties": {"Node name for S&R": "FreeFuseMaskPreview"},
+            "title": "Detailed Mask Preview"
+        },
+        {
+            "id": 16,
+            "type": "KSampler",
+            "pos": [1500, 870],
+            "size": [350, 320],
+            "flags": {},
+            "order": 15,
+            "mode": 0,
+            "inputs": [
+                {"name": "model", "type": "MODEL", "link": 23},
+                {"name": "positive", "type": "CONDITIONING", "link": 28},
+                {"name": "negative", "type": "CONDITIONING", "link": null},
+                {"name": "latent_image", "type": "LATENT", "link": 17}
+            ],
+            "outputs": [
+                {"name": "LATENT", "type": "LATENT", "links": [24]}
+            ],
+            "properties": {"Node name for S&R": "KSampler"},
+            "widgets_values": [
+                42,
+                "fixed",
+                28,
+                1.0,
+                "euler",
+                "simple",
+                1.0
+            ],
+            "title": "Phase 2: Full Generation"
+        },
+        {
+            "id": 17,
+            "type": "VAEDecode",
+            "pos": [1900, 900],
+            "size": [200, 50],
+            "flags": {},
+            "order": 16,
+            "mode": 0,
+            "inputs": [
+                {"name": "samples", "type": "LATENT", "link": 24},
+                {"name": "vae", "type": "VAE", "link": 30}
+            ],
+            "outputs": [
+                {"name": "IMAGE", "type": "IMAGE", "links": [26]}
+            ],
+            "properties": {"Node name for S&R": "VAEDecode"}
+        },
+        {
+            "id": 18,
+            "type": "SaveImage",
+            "pos": [2150, 800],
+            "size": [400, 400],
+            "flags": {},
+            "order": 17,
+            "mode": 0,
+            "inputs": [
+                {"name": "images", "type": "IMAGE", "link": 26}
+            ],
+            "properties": {"Node name for S&R": "SaveImage"},
+            "widgets_values": ["FreeFuse/flux_output"],
+            "title": "Final Output"
+        }
+    ],
+    "links": [
+        [1, 1, 0, 4, 0, "MODEL"],
+        [2, 2, 0, 4, 1, "CLIP"],
+        [3, 4, 0, 5, 0, "MODEL"],
+        [4, 4, 1, 5, 1, "CLIP"],
+        [5, 4, 2, 5, 2, "FREEFUSE_DATA"],
+        [6, 5, 0, 12, 0, "MODEL"],
+        [7, 5, 1, 8, 0, "CLIP"],
+        [8, 5, 1, 9, 0, "CLIP"],
+        [10, 5, 2, 6, 0, "FREEFUSE_DATA"],
+        [11, 6, 0, 8, 1, "FREEFUSE_DATA"],
+        [14, 8, 0, 12, 4, "FREEFUSE_DATA"],
+        [15, 9, 0, 11, 0, "CONDITIONING"],
+        [16, 11, 0, 12, 1, "CONDITIONING"],
+        [17, 10, 0, 12, 3, "LATENT"],
+        [18, 12, 0, 14, 0, "MODEL"],
+        [19, 12, 1, 14, 1, "FREEFUSE_MASKS"],
+        [20, 12, 1, 15, 0, "FREEFUSE_MASKS"],
+        [21, 12, 2, 13, 0, "IMAGE"],
+        [22, 10, 0, 14, 3, "LATENT"],
+        [23, 14, 0, 16, 0, "MODEL"],
+        [24, 16, 0, 17, 0, "LATENT"],
+        [26, 17, 0, 18, 0, "IMAGE"],
+        [28, 11, 0, 16, 1, "CONDITIONING"],
+        [30, 3, 0, 17, 1, "VAE"]
+    ],
+    "groups": [
+        {
+            "title": "1. Load Flux Model (UNET + CLIP + T5 + VAE)",
+            "bounding": [30, 30, 350, 430],
+            "color": "#3f789e"
+        },
+        {
+            "title": "2. Load LoRAs (Bypass Mode)",
+            "bounding": [380, 30, 350, 430],
+            "color": "#2E8B57"
+        },
+        {
+            "title": "3. Concept Mapping & Prompt",
+            "bounding": [730, 30, 400, 500],
+            "color": "#88A825"
+        },
+        {
+            "title": "4. Token Positions & Conditioning",
+            "bounding": [1130, 30, 400, 250],
+            "color": "#DAA520"
+        },
+        {
+            "title": "5. Phase 1: Mask Collection (5 steps)",
+            "bounding": [1480, 200, 750, 430],
+            "color": "#A8442A"
+        },
+        {
+            "title": "6. Phase 2: Generation with Masks (28 steps)",
+            "bounding": [1480, 650, 750, 600],
+            "color": "#7B3F9E"
+        }
+    ],
+    "config": {},
+    "extra": {
+        "ds": {
+            "scale": 0.6,
+            "offset": [0, 0]
+        },
+        "info": {
+            "name": "FreeFuse Flux Complete Workflow",
+            "description": "Two-phase FreeFuse workflow for Flux model with two character LoRAs. Uses DualCLIPLoader for CLIP+T5 (FP8 quantized), UNETLoader for Flux transformer (FP8 quantized), and FluxGuidance for CFG control.",
+            "author": "FreeFuse Team",
+            "version": "2.1",
+            "notes": "Flux uses guidance embedding instead of CFG, so negative prompt is not used. Set KSampler CFG to 1.0 and use FluxGuidance node for guidance scale. This workflow uses FP8 quantized models for reduced VRAM usage.",
+            "models": {
+                "text_encoders": [
+                    {
+                        "name": "clip_l.safetensors",
+                        "url": "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors"
+                    },
+                    {
+                        "name": "t5xxl_fp8_e4m3fn.safetensors",
+                        "url": "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp8_e4m3fn.safetensors"
+                    }
+                ],
+                "diffusion_models": [
+                    {
+                        "name": "flux1-dev-fp8.safetensors",
+                        "url": "https://huggingface.co/Comfy-Org/flux1-dev/resolve/main/flux1-dev-fp8.safetensors"
+                    }
+                ],
+                "vae": [
+                    {
+                        "name": "ae.safetensors",
+                        "url": "https://huggingface.co/Comfy-Org/Lumina_Image_2.0_Repackaged/resolve/main/split_files/vae/ae.safetensors"
+                    }
+                ]
+            }
+        }
+    },
+    "version": 0.4
+}

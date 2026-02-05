@@ -1,0 +1,426 @@
+{
+    "last_node_id": 19,
+    "last_link_id": 28,
+    "nodes": [
+        {
+            "id": 19,
+            "type": "MarkdownNote",
+            "pos": [-500, 50],
+            "size": [480, 400],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [],
+            "outputs": [],
+            "title": "Model Download Guide",
+            "properties": {},
+            "widgets_values": [
+                "# FreeFuse SDXL Workflow - Model Guide\n\n## Required Models\n\n**checkpoints**\n\n- [sd_xl_base_1.0.safetensors](https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors)\n\n## Model Storage Location\n\n```\n📂 ComfyUI/\n├── 📂 models/\n│   └── 📂 checkpoints/\n│          └── sd_xl_base_1.0.safetensors\n```\n\n## Notes\n\n- SDXL Base requires ~6.5GB VRAM\n- Optimal resolution: 1024x1024\n- CFG Scale: 7.0 recommended\n- Steps: 30 for best quality"
+            ],
+            "color": "#432",
+            "bgcolor": "#000"
+        },
+        {
+            "id": 1,
+            "type": "CheckpointLoaderSimple",
+            "pos": [50, 100],
+            "size": [315, 98],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "outputs": [
+                {"name": "MODEL", "type": "MODEL", "links": [1]},
+                {"name": "CLIP", "type": "CLIP", "links": [2]},
+                {"name": "VAE", "type": "VAE", "links": [25]}
+            ],
+            "properties": {
+                "Node name for S&R": "CheckpointLoaderSimple",
+                "cnr_id": "comfy-core",
+                "models": [
+                    {
+                        "name": "sd_xl_base_1.0.safetensors",
+                        "url": "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors",
+                        "directory": "checkpoints"
+                    }
+                ]
+            },
+            "widgets_values": ["sd_xl_base_1.0.safetensors"],
+            "title": "Load SDXL Base"
+        },
+        {
+            "id": 2,
+            "type": "FreeFuseLoRALoader",
+            "pos": [400, 50],
+            "size": [315, 170],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputs": [
+                {"name": "model", "type": "MODEL", "link": 1},
+                {"name": "clip", "type": "CLIP", "link": 2},
+                {"name": "freefuse_data", "type": "FREEFUSE_DATA", "link": null}
+            ],
+            "outputs": [
+                {"name": "model", "type": "MODEL", "links": [3]},
+                {"name": "clip", "type": "CLIP", "links": [4]},
+                {"name": "freefuse_data", "type": "FREEFUSE_DATA", "links": [5]}
+            ],
+            "properties": {"Node name for S&R": "FreeFuseLoRALoader"},
+            "widgets_values": [
+                "harry_potter_xl.safetensors",
+                "harry",
+                1.0,
+                1.0
+            ],
+            "title": "LoRA 1: Harry Potter (XL)"
+        },
+        {
+            "id": 3,
+            "type": "FreeFuseLoRALoader",
+            "pos": [400, 280],
+            "size": [315, 170],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [
+                {"name": "model", "type": "MODEL", "link": 3},
+                {"name": "clip", "type": "CLIP", "link": 4},
+                {"name": "freefuse_data", "type": "FREEFUSE_DATA", "link": 5}
+            ],
+            "outputs": [
+                {"name": "model", "type": "MODEL", "links": [6]},
+                {"name": "clip", "type": "CLIP", "links": [7, 8, 9]},
+                {"name": "freefuse_data", "type": "FREEFUSE_DATA", "links": [10]}
+            ],
+            "properties": {"Node name for S&R": "FreeFuseLoRALoader"},
+            "widgets_values": [
+                "daiyu_lin_xl.safetensors",
+                "daiyu",
+                1.0,
+                1.0
+            ],
+            "title": "LoRA 2: Daiyu Lin (XL)"
+        },
+        {
+            "id": 4,
+            "type": "FreeFuseConceptMap",
+            "pos": [750, 50],
+            "size": [350, 280],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputs": [
+                {"name": "freefuse_data", "type": "FREEFUSE_DATA", "link": 10}
+            ],
+            "outputs": [
+                {"name": "freefuse_data", "type": "FREEFUSE_DATA", "links": [11]}
+            ],
+            "properties": {"Node name for S&R": "FreeFuseConceptMap"},
+            "widgets_values": [
+                "harry",
+                "an European man wearing Hogwarts uniform",
+                "daiyu",
+                "an Asian woman wearing Chinese traditional clothing",
+                "",
+                "",
+                "",
+                "",
+                true,
+                ""
+            ],
+            "title": "Concept Mapping"
+        },
+        {
+            "id": 6,
+            "type": "FreeFuseTokenPositions",
+            "pos": [1150, 50],
+            "size": [315, 180],
+            "flags": {},
+            "order": 4,
+            "mode": 0,
+            "inputs": [
+                {"name": "clip", "type": "CLIP", "link": 7},
+                {"name": "freefuse_data", "type": "FREEFUSE_DATA", "link": 11}
+            ],
+            "outputs": [
+                {"name": "freefuse_data", "type": "FREEFUSE_DATA", "links": [14]}
+            ],
+            "properties": {"Node name for S&R": "FreeFuseTokenPositions"},
+            "widgets_values": [
+                "Realistic photography, an European man wearing Hogwarts uniform hugging an Asian woman wearing Chinese traditional clothing warmly, both faces close together, autumn leaves blurred in the background, high quality, detailed",
+                true,
+                true
+            ],
+            "title": "Compute Token Positions (CLIP)"
+        },
+        {
+            "id": 7,
+            "type": "CLIPTextEncode",
+            "pos": [1150, 280],
+            "size": [315, 120],
+            "flags": {},
+            "order": 5,
+            "mode": 0,
+            "inputs": [
+                {"name": "clip", "type": "CLIP", "link": 8}
+            ],
+            "outputs": [
+                {"name": "CONDITIONING", "type": "CONDITIONING", "links": [15]}
+            ],
+            "properties": {"Node name for S&R": "CLIPTextEncode"},
+            "widgets_values": [
+                "Realistic photography, an European man wearing Hogwarts uniform hugging an Asian woman wearing Chinese traditional clothing warmly, both faces close together, autumn leaves blurred in the background, high quality, detailed"
+            ],
+            "title": "Positive Prompt"
+        },
+        {
+            "id": 8,
+            "type": "CLIPTextEncode",
+            "pos": [1150, 380],
+            "size": [315, 100],
+            "flags": {},
+            "order": 7,
+            "mode": 0,
+            "inputs": [
+                {"name": "clip", "type": "CLIP", "link": 9}
+            ],
+            "outputs": [
+                {"name": "CONDITIONING", "type": "CONDITIONING", "links": [16]}
+            ],
+            "properties": {"Node name for S&R": "CLIPTextEncode"},
+            "widgets_values": ["blurry, low quality, bad anatomy, deformed, ugly, watermark, text"],
+            "title": "Negative Prompt"
+        },
+        {
+            "id": 9,
+            "type": "EmptyLatentImage",
+            "pos": [1150, 530],
+            "size": [315, 106],
+            "flags": {},
+            "order": 8,
+            "mode": 0,
+            "outputs": [
+                {"name": "LATENT", "type": "LATENT", "links": [17, 22]}
+            ],
+            "properties": {"Node name for S&R": "EmptyLatentImage"},
+            "widgets_values": [1024, 1024, 1],
+            "title": "Latent Image (1024x1024)"
+        },
+        {
+            "id": 10,
+            "type": "FreeFusePhase1Sampler",
+            "pos": [1550, 50],
+            "size": [350, 300],
+            "flags": {},
+            "order": 9,
+            "mode": 0,
+            "inputs": [
+                {"name": "model", "type": "MODEL", "link": 6},
+                {"name": "conditioning", "type": "CONDITIONING", "link": 15},
+                {"name": "neg_conditioning", "type": "CONDITIONING", "link": 16},
+                {"name": "latent", "type": "LATENT", "link": 17},
+                {"name": "freefuse_data", "type": "FREEFUSE_DATA", "link": 14}
+            ],
+            "outputs": [
+                {"name": "model", "type": "MODEL", "links": [18]},
+                {"name": "masks", "type": "FREEFUSE_MASKS", "links": [19, 20]},
+                {"name": "mask_preview", "type": "IMAGE", "links": [21]}
+            ],
+            "properties": {"Node name for S&R": "FreeFusePhase1Sampler"},
+            "widgets_values": [
+                42,
+                10,
+                7.0,
+                "euler",
+                "normal",
+                0
+            ],
+            "title": "Phase 1: Collect Masks (SDXL)"
+        },
+        {
+            "id": 11,
+            "type": "PreviewImage",
+            "pos": [1950, 50],
+            "size": [300, 250],
+            "flags": {},
+            "order": 10,
+            "mode": 0,
+            "inputs": [
+                {"name": "images", "type": "IMAGE", "link": 21}
+            ],
+            "properties": {"Node name for S&R": "PreviewImage"},
+            "title": "Mask Preview (Phase 1)"
+        },
+        {
+            "id": 12,
+            "type": "FreeFuseMaskApplicator",
+            "pos": [1550, 400],
+            "size": [350, 150],
+            "flags": {},
+            "order": 11,
+            "mode": 0,
+            "inputs": [
+                {"name": "model", "type": "MODEL", "link": 18},
+                {"name": "masks", "type": "FREEFUSE_MASKS", "link": 19},
+                {"name": "freefuse_data", "type": "FREEFUSE_DATA", "link": 14},
+                {"name": "latent", "type": "LATENT", "link": 22}
+            ],
+            "outputs": [
+                {"name": "model", "type": "MODEL", "links": [23]}
+            ],
+            "properties": {"Node name for S&R": "FreeFuseMaskApplicator"},
+            "widgets_values": [true],
+            "title": "Apply Masks to LoRAs"
+        },
+        {
+            "id": 13,
+            "type": "FreeFuseMaskPreview",
+            "pos": [1950, 350],
+            "size": [300, 200],
+            "flags": {},
+            "order": 12,
+            "mode": 0,
+            "inputs": [
+                {"name": "masks", "type": "FREEFUSE_MASKS", "link": 20}
+            ],
+            "outputs": [
+                {"name": "combined_preview", "type": "IMAGE", "links": []},
+                {"name": "individual_masks", "type": "IMAGE", "links": []}
+            ],
+            "properties": {"Node name for S&R": "FreeFuseMaskPreview"},
+            "title": "Detailed Mask Preview"
+        },
+        {
+            "id": 14,
+            "type": "KSampler",
+            "pos": [1550, 600],
+            "size": [350, 350],
+            "flags": {},
+            "order": 13,
+            "mode": 0,
+            "inputs": [
+                {"name": "model", "type": "MODEL", "link": 23},
+                {"name": "positive", "type": "CONDITIONING", "link": 15},
+                {"name": "negative", "type": "CONDITIONING", "link": 16},
+                {"name": "latent_image", "type": "LATENT", "link": 17}
+            ],
+            "outputs": [
+                {"name": "LATENT", "type": "LATENT", "links": [24]}
+            ],
+            "properties": {"Node name for S&R": "KSampler"},
+            "widgets_values": [
+                42,
+                "fixed",
+                30,
+                7.0,
+                "euler",
+                "normal",
+                1.0
+            ],
+            "title": "Phase 2: Full Generation (SDXL)"
+        },
+        {
+            "id": 15,
+            "type": "VAEDecode",
+            "pos": [1950, 600],
+            "size": [200, 50],
+            "flags": {},
+            "order": 14,
+            "mode": 0,
+            "inputs": [
+                {"name": "samples", "type": "LATENT", "link": 24},
+                {"name": "vae", "type": "VAE", "link": 25}
+            ],
+            "outputs": [
+                {"name": "IMAGE", "type": "IMAGE", "links": [26]}
+            ],
+            "properties": {"Node name for S&R": "VAEDecode"}
+        },
+        {
+            "id": 16,
+            "type": "SaveImage",
+            "pos": [2200, 500],
+            "size": [400, 400],
+            "flags": {},
+            "order": 15,
+            "mode": 0,
+            "inputs": [
+                {"name": "images", "type": "IMAGE", "link": 26}
+            ],
+            "properties": {"Node name for S&R": "SaveImage"},
+            "widgets_values": ["FreeFuse/sdxl_output"],
+            "title": "Final Output"
+        }
+    ],
+    "links": [
+        [1, 1, 0, 2, 0, "MODEL"],
+        [2, 1, 1, 2, 1, "CLIP"],
+        [3, 2, 0, 3, 0, "MODEL"],
+        [4, 2, 1, 3, 1, "CLIP"],
+        [5, 2, 2, 3, 2, "FREEFUSE_DATA"],
+        [6, 3, 0, 10, 0, "MODEL"],
+        [7, 3, 1, 6, 0, "CLIP"],
+        [8, 3, 1, 7, 0, "CLIP"],
+        [9, 3, 1, 8, 0, "CLIP"],
+        [10, 3, 2, 4, 0, "FREEFUSE_DATA"],
+        [11, 4, 0, 6, 1, "FREEFUSE_DATA"],
+        [14, 6, 0, 10, 4, "FREEFUSE_DATA"],
+        [15, 7, 0, 10, 1, "CONDITIONING"],
+        [16, 8, 0, 10, 2, "CONDITIONING"],
+        [17, 9, 0, 10, 3, "LATENT"],
+        [18, 10, 0, 12, 0, "MODEL"],
+        [19, 10, 1, 12, 1, "FREEFUSE_MASKS"],
+        [20, 10, 1, 13, 0, "FREEFUSE_MASKS"],
+        [21, 10, 2, 11, 0, "IMAGE"],
+        [22, 9, 0, 12, 3, "LATENT"],
+        [23, 12, 0, 14, 0, "MODEL"],
+        [24, 14, 0, 15, 0, "LATENT"],
+        [25, 1, 2, 15, 1, "VAE"],
+        [26, 15, 0, 16, 0, "IMAGE"]
+    ],
+    "groups": [
+        {
+            "title": "1. Load SDXL Model & LoRAs",
+            "bounding": [30, 30, 700, 480],
+            "color": "#3f789e"
+        },
+        {
+            "title": "2. Concept Mapping & Prompt",
+            "bounding": [730, 30, 400, 520],
+            "color": "#88A825"
+        },
+        {
+            "title": "3. Phase 1: Mask Collection (10 steps)",
+            "bounding": [1130, 30, 800, 330],
+            "color": "#A8442A"
+        },
+        {
+            "title": "4. Phase 2: Generation with Masks (30 steps)",
+            "bounding": [1130, 380, 800, 630],
+            "color": "#7B3F9E"
+        }
+    ],
+    "config": {},
+    "extra": {
+        "ds": {
+            "scale": 0.7,
+            "offset": [0, 0]
+        },
+        "info": {
+            "name": "FreeFuse SDXL Complete Workflow",
+            "description": "Two-phase FreeFuse workflow for SDXL model with two character LoRAs",
+            "author": "FreeFuse Team",
+            "version": "1.1",
+            "notes": "SDXL uses different CFG scale (7.0) and more steps (30) compared to Flux",
+            "models": {
+                "checkpoints": [
+                    {
+                        "name": "sd_xl_base_1.0.safetensors",
+                        "url": "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors"
+                    }
+                ]
+            }
+        }
+    },
+    "version": 0.4
+}
