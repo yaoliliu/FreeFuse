@@ -20,6 +20,7 @@ import torch
 import torch.nn.functional as F
 from typing import Dict, List, Optional, Tuple
 import logging
+import math
 
 
 def construct_attention_bias(
@@ -122,21 +123,112 @@ def construct_attention_bias(
                 if 0 <= pos < txt_seq_len:
                     text_token_to_lora[pos] = lora_idx
     
+    def _infer_target_hw(img_seq_len: int, ref_h: Optional[int], ref_w: Optional[int]) -> Tuple[int, int]:
+        """Infer target (H, W) from img_seq_len, preserving aspect ratio when possible."""
+        if img_seq_len <= 0:
+            return (0, 0)
+
+        if ref_h is not None and ref_w is not None and ref_h > 0 and ref_w > 0:
+            ratio = ref_w / ref_h
+            target_h = int(round((img_seq_len / max(ratio, 1e-8)) ** 0.5))
+            target_h = max(target_h, 1)
+            target_w = img_seq_len // target_h
+            if target_h * target_w == img_seq_len:
+                return (target_h, target_w)
+
+        # Fallback: try square
+        side = int(round(img_seq_len ** 0.5))
+        if side * side == img_seq_len:
+            return (side, side)
+
+        # Fallback: factor search close to square
+        best_h, best_w = 1, img_seq_len
+        min_diff = img_seq_len
+        for h in range(1, int(math.sqrt(img_seq_len)) + 1):
+            if img_seq_len % h == 0:
+                w = img_seq_len // h
+                diff = abs(w - h)
+                if diff < min_diff:
+                    best_h, best_w = h, w
+                    min_diff = diff
+        return (best_h, best_w)
+
+    def _normalize_img_mask(img_mask: torch.Tensor, img_seq_len: int) -> torch.Tensor:
+        """Normalize mask to shape (B, img_seq_len), resizing if needed."""
+        nonlocal batch_size, device, dtype
+
+        # Ensure float tensor on correct device
+        img_mask = img_mask.to(device=device, dtype=dtype)
+
+        # If mask is flat (B, img_seq_len)
+        if img_mask.dim() == 2 and img_mask.shape[0] == batch_size and img_mask.shape[1] == img_seq_len:
+            return img_mask
+
+        # If mask is spatial (H, W)
+        if img_mask.dim() == 2 and img_mask.shape[0] * img_mask.shape[1] == img_seq_len and batch_size == 1:
+            return img_mask.view(1, -1)
+
+        # If mask is (B, H, W)
+        if img_mask.dim() == 3 and img_mask.shape[0] == batch_size:
+            h, w = img_mask.shape[1], img_mask.shape[2]
+            if h * w == img_seq_len:
+                return img_mask.view(batch_size, -1)
+
+            # Resize to target spatial size
+            target_h, target_w = _infer_target_hw(img_seq_len, h, w)
+            if target_h <= 0 or target_w <= 0:
+                logging.warning("[FreeFuse] Invalid target size for attention bias resize")
+                return img_mask.view(batch_size, -1)
+
+            resized = F.interpolate(
+                img_mask.unsqueeze(1),
+                size=(target_h, target_w),
+                mode="bilinear",
+                align_corners=False,
+            ).squeeze(1)
+            return resized.view(batch_size, -1)
+
+        # If mask is (B, img_seq_len, 1) or (B, 1, img_seq_len)
+        if img_mask.dim() == 3 and img_mask.shape[0] == batch_size:
+            if img_mask.shape[1] == img_seq_len and img_mask.shape[2] == 1:
+                return img_mask.squeeze(-1)
+            if img_mask.shape[2] == img_seq_len and img_mask.shape[1] == 1:
+                return img_mask.squeeze(1)
+
+        # Fallback: try flatten and resize if needed
+        flat = img_mask.view(batch_size, -1)
+        if flat.shape[1] == img_seq_len:
+            return flat
+
+        # Last resort: treat as spatial with inferred target
+        target_h, target_w = _infer_target_hw(img_seq_len, None, None)
+        if target_h * target_w != flat.shape[1] and img_mask.dim() >= 2:
+            # Use nearest resize on a square-ish guess
+            spatial = img_mask
+            if spatial.dim() == 2:
+                spatial = spatial.unsqueeze(0)
+            if spatial.dim() == 3:
+                spatial = spatial.unsqueeze(1)
+            resized = F.interpolate(
+                spatial.float(),
+                size=(target_h, target_w),
+                mode="bilinear",
+                align_corners=False,
+            ).squeeze(1)
+            return resized.view(batch_size, -1).to(dtype=dtype)
+
+        return flat
+
     # For each LoRA, get its image mask and text token positions
     for lora_name, img_mask in lora_masks.items():
         if lora_name not in lora_name_to_idx:
             continue
         lora_idx = lora_name_to_idx[lora_name]
         
-        # Ensure img_mask has correct shape (B, img_seq_len)
-        if img_mask.dim() == 2 and img_mask.shape[1] != img_seq_len:
-            # Might be (H, W), flatten it
-            img_mask = img_mask.view(batch_size, -1)
-        elif img_mask.dim() == 1:
+        # Normalize mask to (B, img_seq_len), resizing if needed
+        if img_mask.dim() == 1:
             img_mask = img_mask.unsqueeze(0).expand(batch_size, -1)
-        
-        # Ensure mask is on correct device
-        img_mask = img_mask.to(device=device, dtype=dtype)
+        img_mask = _normalize_img_mask(img_mask, img_seq_len)
         
         # === NEGATIVE BIAS: Cross-LoRA suppression ===
         # For image positions in this LoRA's region,
@@ -193,7 +285,7 @@ def construct_attention_bias(
                 
                 attention_bias[:, :txt_seq_len, txt_seq_len:] += txt_to_img_positive_bias
     
-    logging.info(f"[FreeFuse] Constructed attention bias: shape={attention_bias.shape}, "
+    logging.debug(f"[FreeFuse] Constructed attention bias: shape={attention_bias.shape}, "
                 f"bias_scale={bias_scale}, positive_scale={positive_bias_scale}, "
                 f"bidirectional={bidirectional}, positive_bias={use_positive_bias}")
     

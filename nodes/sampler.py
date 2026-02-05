@@ -56,9 +56,37 @@ class FreeFusePhase1Sampler:
                 "scheduler": (comfy.samplers.KSampler.SCHEDULERS,),
             },
             "optional": {
+                # Block selection
                 "collect_block": ("INT", {
                     "default": 18, "min": 0, "max": 56,
-                    "tooltip": "Which transformer block to collect attention from"
+                    "tooltip": "Which transformer block to collect attention from (Flux: 0-56, SDXL: varies)"
+                }),
+                # Similarity map computation parameters
+                "temperature": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 10000.0, "step": 100.0,
+                    "tooltip": "Temperature for softmax in similarity computation. 0=auto (Flux:4000, SDXL:300)"
+                }),
+                "top_k_ratio": ("FLOAT", {
+                    "default": 0.3, "min": 0.01, "max": 1.0, "step": 0.05,
+                    "tooltip": "Ratio of top-k tokens to use for similarity computation"
+                }),
+                # LoRA control
+                "disable_lora_phase1": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Disable LoRA during Phase 1 for cleaner base model attention (recommended)"
+                }),
+                # Mask post-processing parameters
+                "bg_scale": ("FLOAT", {
+                    "default": 0.95, "min": 0.0, "max": 2.0, "step": 0.05,
+                    "tooltip": "Scale factor for background similarity (higher = more background)"
+                }),
+                "use_morphological_cleaning": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Apply morphological operations to clean up masks"
+                }),
+                "balance_iterations": ("INT", {
+                    "default": 15, "min": 1, "max": 50,
+                    "tooltip": "Number of iterations for balanced argmax algorithm"
                 }),
             }
         }
@@ -73,12 +101,22 @@ class FreeFusePhase1Sampler:
 Uses full sigma schedule (e.g., 28 steps) but stops early after collecting
 attention at collect_step. This ensures correct noise levels while saving time.
 
+Parameters:
+- collect_block: Which transformer block to extract attention from
+- temperature: Softmax temperature for similarity (0=auto-detect by model type)
+- top_k_ratio: Ratio of tokens used for similarity computation
+- disable_lora_phase1: Whether to disable LoRA during collection (recommended)
+- bg_scale: Background scaling factor for mask generation
+- use_morphological_cleaning: Clean up masks with morphological operations
+
 After this node, connect the model output to a standard KSampler
 for Phase 2 generation with the same seed and steps."""
     
     def collect_masks(self, model, conditioning, neg_conditioning, latent, 
                       freefuse_data, seed, steps, collect_step, cfg, sampler_name, scheduler,
-                      collect_block=18):
+                      collect_block=18, temperature=0.0, top_k_ratio=0.3,
+                      disable_lora_phase1=True, bg_scale=0.95, 
+                      use_morphological_cleaning=False, balance_iterations=15):
         
         concepts = freefuse_data.get("concepts", {})
         settings = freefuse_data.get("settings", {})
@@ -107,6 +145,16 @@ for Phase 2 generation with the same seed and steps."""
         # Clone model to add attention hooks
         model_clone = model.clone()
         
+        # Sanity check: collect_step must be within total steps
+        if collect_step > steps:
+            print(f"[FreeFuse] Warning: collect_step ({collect_step}) > steps ({steps}); "
+                  f"clamping to {steps}.")
+            collect_step = steps
+        if collect_step < 1:
+            print(f"[FreeFuse] Warning: collect_step ({collect_step}) < 1; "
+                  "clamping to 1.")
+            collect_step = 1
+
         # Set up FreeFuse state with the new system
         freefuse_state = FreeFuseState()
         freefuse_state.phase = "collect"
@@ -116,17 +164,23 @@ for Phase 2 generation with the same seed and steps."""
         freefuse_state.token_pos_maps = token_pos_maps
         freefuse_state.include_background = include_background
         
-        # Copy settings from freefuse_data
-        freefuse_state.top_k_ratio = settings.get("top_k_ratio", 0.3)
-        freefuse_state.temperature = settings.get("temperature", 1000.0)
-        
-        # Detect model type and apply replace patches
+        # Detect model type first (needed for default temperature)
         model_type = "auto"
         model_name = model_clone.model.__class__.__name__.lower()
         if "flux" in model_name:
             model_type = "flux"
         else:
             model_type = "sdxl"
+        
+        # Use user-provided parameters, with auto-detection for temperature=0
+        # Default temperature differs by model type: Flux=4000, SDXL=300
+        if temperature == 0.0:
+            auto_temperature = 4000.0 if model_type == "flux" else 300.0
+        else:
+            auto_temperature = temperature
+        
+        freefuse_state.top_k_ratio = top_k_ratio
+        freefuse_state.temperature = auto_temperature
             
         apply_freefuse_replace_patches(model_clone, freefuse_state, model_type=model_type)
         
@@ -142,6 +196,16 @@ for Phase 2 generation with the same seed and steps."""
         print(f"[FreeFuse] Concepts: {list(concepts.keys())}")
         print(f"[FreeFuse] Token positions: {token_pos_maps}")
         print(f"[FreeFuse] Model type: {model_type}")
+        print(f"[FreeFuse] Settings: temperature={auto_temperature}, top_k_ratio={top_k_ratio}, disable_lora={disable_lora_phase1}")
+        
+        # Optionally disable LoRA during Phase 1 to get clean base model attention patterns
+        # This matches the diffusers implementation behavior
+        bypass_manager = model_clone.model_options.get("transformer_options", {}).get("freefuse_bypass_manager")
+        if bypass_manager is not None and disable_lora_phase1:
+            bypass_manager.disable_lora()
+            print("[FreeFuse] Phase 1: LoRA disabled for clean attention collection")
+        elif bypass_manager is not None:
+            print("[FreeFuse] Phase 1: LoRA enabled (user override)")
         
         # Create noise for Phase 1
         noise = comfy.sample.prepare_noise(latent_image, seed, None)
@@ -184,6 +248,9 @@ for Phase 2 generation with the same seed and steps."""
             print(f"[FreeFuse] Phase 1 sampling error: {e}")
             import traceback
             traceback.print_exc()
+            # Re-enable LoRA before returning on error (if it was disabled)
+            if bypass_manager is not None and disable_lora_phase1:
+                bypass_manager.enable_lora()
             # Return empty masks on error
             empty_masks = {name: torch.ones(latent_h, latent_w) for name in concepts}
             preview = self._create_preview(empty_masks, img_w, img_h)
@@ -212,12 +279,14 @@ for Phase 2 generation with the same seed and steps."""
         if similarity_maps:
             masks = generate_masks(
                 similarity_maps, 
-                include_background=False,
+                include_background=include_background,  # Use setting from concept map
                 method="stabilized",  # Use the sophisticated algorithm from diffusers
-                bg_scale=0.95,  # Same as diffusers default
-                use_morphological_cleaning=False,
+                bg_scale=bg_scale,  # User-configurable background scale
+                use_morphological_cleaning=use_morphological_cleaning,  # User-configurable
                 debug=True,  # Enable debug output
-                max_iter=5,  # Test with iterations
+                max_iter=balance_iterations,  # User-configurable iterations
+                latent_h=latent_h,  # CRITICAL: Pass latent dimensions for correct reshape!
+                latent_w=latent_w,  # Without this, non-square images produce corrupted masks!
             )
         else:
             # Fallback: create uniform masks
@@ -234,6 +303,11 @@ for Phase 2 generation with the same seed and steps."""
         # Update state for Phase 2
         freefuse_state.phase = "generate"
         freefuse_state.masks = masks
+        
+        # Re-enable LoRA for Phase 2 generation (if it was disabled)
+        if bypass_manager is not None and disable_lora_phase1:
+            bypass_manager.enable_lora()
+            print("[FreeFuse] Phase 1 complete: LoRA re-enabled for Phase 2")
         
         # Store masks in model options for Phase 2
         if "transformer_options" not in model_clone.model_options:

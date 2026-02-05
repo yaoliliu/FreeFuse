@@ -163,22 +163,22 @@ Parameters:
         attention_bias = None
         
         if model_type == "flux":
-            # Compute Flux attention bias
-            img_seq_len = (latent_h // 2) * (latent_w // 2)
+            # For Flux, masks from generate_masks are ALREADY in packed space (H/16, W/16)
+            # So img_seq_len is simply latent_h * latent_w (no additional packing needed)
+            img_seq_len = latent_h * latent_w
             txt_seq_len = self._estimate_txt_seq_len(token_pos_maps)
             
-            # Prepare masks for Flux (pack like latents)
+            # Flatten masks - they are ALREADY in packed resolution
+            # No need to re-pack them!
             lora_masks_flat = {}
             for name, mask in mask_dict.items():
                 if name.startswith("_"):
                     continue
                 if mask.dim() == 3:
                     mask = mask[0]
-                h, w = mask.shape
-                # Pack mask like Flux latents
-                mask_packed = mask.view(h // 2, 2, w // 2, 2).permute(0, 2, 1, 3)
-                mask_packed = mask_packed.reshape(-1)
-                lora_masks_flat[name] = mask_packed.unsqueeze(0)
+                # Masks are already in packed space (H/16, W/16), just flatten
+                mask_flat = mask.reshape(-1)
+                lora_masks_flat[name] = mask_flat.unsqueeze(0)
             
             attention_bias = construct_attention_bias(
                 lora_masks=lora_masks_flat,
@@ -191,14 +191,18 @@ Parameters:
                 use_positive_bias=use_positive_bias,
             )
             
-            if attention_bias is not None:
-                apply_attention_bias_patches(
-                    model_patcher=model_clone,
-                    attention_bias=attention_bias,
-                    config=config,
-                    txt_seq_len=txt_seq_len,
-                    model_type="flux",
-                )
+            # Apply attention bias patches with dynamic bias construction
+            # Pass lora_masks and token_pos_maps so bias can be built at runtime
+            # with actual txt/img sequence lengths
+            apply_attention_bias_patches(
+                model_patcher=model_clone,
+                attention_bias=attention_bias,  # For debugging/preview
+                config=config,
+                txt_seq_len=txt_seq_len,  # Estimate - actual determined at runtime
+                model_type="flux",
+                lora_masks=lora_masks_flat,
+                token_pos_maps=token_pos_maps,
+            )
         else:  # SDXL
             # SDXL uses per-layer bias computation
             apply_attention_bias_patches(
@@ -220,16 +224,24 @@ Parameters:
         return (model_clone, {"bias": attention_bias, "config": config.to_dict()})
     
     def _get_latent_size(self, mask_dict, latent) -> Optional[Tuple[int, int]]:
-        """Get latent size from latent or masks."""
-        if latent is not None and "samples" in latent:
-            samples = latent["samples"]
-            return (samples.shape[2], samples.shape[3])
+        """Get latent size from masks or latent.
         
+        IMPORTANT: For Flux, masks are in packed space (H/16, W/16), while latent
+        input is in original space (H/8, W/8). We should prioritize mask dimensions
+        as they represent the actual spatial resolution used for attention bias.
+        """
+        # First try to get from masks - they are the authoritative source
+        # for the spatial resolution (especially for Flux with packed dimensions)
         for mask in mask_dict.values():
             if mask.dim() == 2:
                 return (mask.shape[0], mask.shape[1])
             elif mask.dim() == 3:
                 return (mask.shape[1], mask.shape[2])
+        
+        # Fallback to latent if no masks available
+        if latent is not None and "samples" in latent:
+            samples = latent["samples"]
+            return (samples.shape[2], samples.shape[3])
         
         return None
     

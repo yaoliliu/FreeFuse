@@ -1,57 +1,78 @@
 # ComfyUI-FreeFuse
 
-Multi-concept LoRA composition with spatial awareness.
+FreeFuse for ComfyUI: multi-concept LoRA composition with spatial awareness.
 
-## Design
+## Workflows (Complete only)
 
-**Simplified v2**: Maximum reuse of ComfyUI internals.
-
-- Uses `load_bypass_lora_for_models()` - LoRA not merged into base model
-- Phase 1 node collects masks
-- Phase 2 uses native `KSampler`
-
-## Nodes
-
-| Node | Purpose |
-|------|---------|
-| **FreeFuse LoRA Loader** | Load LoRA in bypass mode (chain multiple) |
-| **FreeFuse Concept Map** | Map adapter names to concept text |
-| **FreeFuse Phase 1** | Collect attention & generate masks |
-| **FreeFuse Mask Preview** | Visualize generated masks |
-
-## Workflow
-
-```
-Load Checkpoint
-      ↓
-FreeFuse LoRA Loader (character1)
-      ↓
-FreeFuse LoRA Loader (character2)
-      ↓
-FreeFuse Concept Map ← (define concepts)
-      ↓
-FreeFuse Phase 1 (5 steps) ← Empty Latent
-      ↓
-KSampler (28 steps) ← Same seed!
-      ↓
-VAE Decode → Save Image
-```
+- [workflows/flux_freefuse_complete.json](workflows/flux_freefuse_complete.json)
+- [workflows/sdxl_freefuse_complete.json](workflows/sdxl_freefuse_complete.json)
 
 ## Installation
 
 ```bash
-git clone <this-repo> 
+git clone <this-repo>
 ln -s /path/to/FreeFuse/comfyui ComfyUI/custom_nodes
 ```
 
-## Usage
+## Example LoRAs and Prompt (from test_parameters.py)
 
-1. Load your base model (Flux/SDXL)
-2. Chain `FreeFuse LoRA Loader` nodes for each character
-3. Create `FreeFuse Concept Map` - match adapter names to your prompt text
-4. Connect to `FreeFuse Phase 1` - runs 5 steps to collect masks
-5. Connect output model to standard `KSampler` - use **same seed**
-6. Decode and save
+**LoRA download links**
+
+- Daiyu: https://huggingface.co/lsmpp/freefuse_community_loras/resolve/main/daiyu_lin.safetensors?download=true
+- Harry: https://huggingface.co/lsmpp/freefuse_community_loras/resolve/main/harry_potter.safetensors?download=true
+
+> The workflows expect these filenames by default:
+> - Flux: harry_potter_flux.safetensors, daiyu_lin_flux.safetensors
+> - SDXL: harry_potter_xl.safetensors, daiyu_lin_xl.safetensors
+> If you use the downloads above, rename the files or update the workflow nodes.
+
+**Prompt**
+
+Realistic photography, harry potter, an European photorealistic style teenage wizard boy with messy black hair, round wire-frame glasses, and bright green eyes, wearing a white shirt, burgundy and gold striped tie, and dark robes hugging daiyu_lin, a young East Asian photorealistic style woman in traditional Chinese hanfu dress, elaborate black updo hairstyle adorned with delicate white floral hairpins and ornaments, dangling red tassel earrings, soft pink and red color palette, gentle smile with knowing expression, autumn leaves blurred in the background, high quality, detailed
+
+**Negative Prompt (SDXL only)**
+
+low quality, blurry, deformed, ugly, bad anatomy
+
+**Concept Map**
+
+- harry: harry potter, an European photorealistic style teenage wizard boy with messy black hair, round wire-frame glasses, and bright green eyes, wearing a white shirt, burgundy and gold striped tie, and dark robes
+- daiyu: daiyu_lin, a young East Asian photorealistic style woman in traditional Chinese hanfu dress, elaborate black updo hairstyle adorned with delicate white floral hairpins and ornaments, dangling red tassel earrings, soft pink and red color palette, gentle smile with knowing expression
+- background_text: autumn leaves blurred in the background
+
+## Hyperparameters
+
+### Phase 1 (FreeFuse Phase1 Sampler)
+
+- `steps`: Total steps for Phase 2 (keep consistent for the same noise schedule)
+- `collect_step`: Which step to collect attention and early-stop
+- `collect_block`: Transformer block to extract attention (Flux: 0-56; SDXL: usually ≤20)
+- `temperature`: Softmax temperature for similarity; 0 = auto (Flux=4000, SDXL=300)
+- `top_k_ratio`: Ratio of top-k tokens used for similarity
+- `disable_lora_phase1`: Disable LoRA in Phase 1 (recommended for cleaner attention)
+- `bg_scale`: Background similarity scale (higher = more background)
+- `use_morphological_cleaning`: Apply morphological cleanup
+- `balance_iterations`: Iterations for balanced argmax (higher = more stable, slower)
+
+### Phase 2 (FreeFuse Mask Applicator)
+
+- `enable_token_masking`: Token-level masking (zero out other concept tokens)
+- `enable_attention_bias`: Enable attention bias
+- `bias_scale`: Negative bias strength (suppresses wrong concepts)
+- `positive_bias_scale`: Positive bias strength (enhances correct concepts)
+- `bidirectional`: Flux-only bidirectional bias (text↔image)
+- `use_positive_bias`: Enable positive bias
+- `bias_blocks`: Which blocks to apply bias (recommended all or double_stream_only)
+
+### Sampling (KSampler / FluxGuidance)
+
+- Flux uses FluxGuidance for CFG; set KSampler CFG to 1.0
+- SDXL uses KSampler CFG directly (recommended 7.0)
+
+## Preview Image
+
+The workflows include a preview image:
+freefuse_flux_square_1024_output.png. It shows up in the Preview when the workflow loads.
 
 ## License
 

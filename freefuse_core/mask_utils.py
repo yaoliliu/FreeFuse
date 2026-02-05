@@ -28,8 +28,8 @@ def stabilized_balanced_argmax(
     target_count=None, 
     max_iter=15,
     lr=0.01,
-    gravity_weight=0.0003,   # Match diffusers (was 0.00004)
-    spatial_weight=0.0003,   # Match diffusers (was 0.00004)
+    gravity_weight=0.00004,   # Match diffusers (was 0.00004)
+    spatial_weight=0.00004,   # Match diffusers (was 0.00004)
     momentum=0.2,
     centroid_margin=0.0,
     border_penalty=0.0,
@@ -265,6 +265,8 @@ def generate_masks(
     use_morphological_cleaning=True,
     debug=False,
     max_iter=15,
+    latent_h=None,
+    latent_w=None,
 ):
     """
     Generate masks from similarity maps using the FreeFuse algorithm.
@@ -282,6 +284,8 @@ def generate_masks(
         bg_scale: Scaling factor for background channel (higher = more background)
         use_morphological_cleaning: Whether to apply morphological operations
         debug: Whether to print debug info
+        latent_h: Expected height of latent (IMPORTANT for non-square images!)
+        latent_w: Expected width of latent (IMPORTANT for non-square images!)
         
     Returns:
         Dict[name -> (H, W) mask tensor]
@@ -298,14 +302,37 @@ def generate_masks(
         # (B, N, 1) format from attention - convert to spatial
         B = first_map.shape[0]
         N = first_map.shape[1]
-        h = w = int(N ** 0.5)
-        if h * w != N:
-            # Try to find factors
-            for i in range(int(N ** 0.5), 0, -1):
-                if N % i == 0:
-                    h = i
-                    w = N // i
-                    break
+        
+        # Use provided latent dimensions if available (CRITICAL for non-square!)
+        if latent_h is not None and latent_w is not None:
+            h, w = latent_h, latent_w
+            if h * w != N:
+                # Similarity maps might be from a different resolution (e.g., packed Flux)
+                # Try to find compatible factors
+                for scale in [1, 2, 4, 8]:
+                    test_h, test_w = latent_h // scale, latent_w // scale
+                    if test_h * test_w == N:
+                        h, w = test_h, test_w
+                        break
+                else:
+                    print(f"[generate_masks] Warning: latent {latent_h}x{latent_w} ({latent_h*latent_w}) != N ({N})")
+                    # Fallback to square assumption
+                    h = w = int(N ** 0.5)
+        else:
+            # No latent dims provided - try square first, then find factors
+            h = w = int(N ** 0.5)
+            if h * w != N:
+                # Try to find factors (prefer wider aspect for landscape, taller for portrait)
+                # WARNING: This is a fallback and may produce incorrect results!
+                print(f"[generate_masks] WARNING: No latent dimensions provided for non-square N={N}!")
+                for i in range(int(N ** 0.5), 0, -1):
+                    if N % i == 0:
+                        h = i
+                        w = N // i
+                        break
+        
+        if debug:
+            print(f"[generate_masks] Converting (B={B}, N={N}, 1) to spatial ({h}, {w})")
         
         maps_spatial = []
         for m in maps:

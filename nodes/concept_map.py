@@ -101,7 +101,7 @@ class FreeFuseTokenPositions:
         return {
             "required": {
                 "clip": ("CLIP",),
-                "prompt": ("STRING", {"multiline": True, "forceInput": True}),
+                "prompt": ("STRING", {"multiline": True}),
                 "freefuse_data": ("FREEFUSE_DATA",),
             },
             "optional": {
@@ -185,7 +185,7 @@ class FreeFuseConceptMapSimple:
         return {
             "required": {
                 "clip": ("CLIP",),
-                "prompt": ("STRING", {"multiline": True, "forceInput": True}),
+                "prompt": ("STRING", {"multiline": True}),
                 "adapter_name_1": ("STRING", {"default": "character1"}),
                 "concept_text_1": ("STRING", {
                     "default": "a woman with red hair",

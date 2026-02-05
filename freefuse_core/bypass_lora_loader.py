@@ -120,10 +120,17 @@ class MultiAdapterBypassForwardHook:
     
     Formula without mask: output = g(f(x) + h1(x)[offset1] + h2(x)[offset2] + ...)
     Formula with mask: output = g(f(x) + mask1 * h1(x)[offset1] + mask2 * h2(x)[offset2] + ...)
+    
+    Note: Spatial masks are only applied to specific layers to match diffusers implementation:
+    - Flux: single_transformer_blocks (to_q/k/v, proj_mlp, proj_out), 
+            transformer_blocks (to_q/k/v, to_out, ff but NOT ff_context or add_*_proj)
+    - SDXL: attn1 (all), attn2 (to_q, to_out only), ff.net
+            NOT attn2.to_k or attn2.to_v (they process text tokens)
     """
     
-    def __init__(self, module: nn.Module):
+    def __init__(self, module: nn.Module, module_key: str = None):
         self.module = module
+        self.module_key = module_key  # Full path like "diffusion_model.double_blocks.0.img_attn.qkv"
         self.adapters: List[Dict[str, Any]] = []  # List of {'adapter', 'strength', 'offset', 'adapter_name'}
         self.original_forward = None
         
@@ -135,6 +142,13 @@ class MultiAdapterBypassForwardHook:
         self.latent_size: Optional[Tuple[int, int]] = None  # (H, W) of latent
         self.mask_enabled: bool = False
         self.txt_len: int = 256  # Default Flux txt length (CLIP + T5)
+        
+        # LoRA enable/disable support (for Phase 1 mask collection)
+        self.lora_enabled: bool = True
+        
+        # Cache mask application decision
+        self._should_apply_mask_cached: Optional[bool] = None
+        self._mask_type_cached: Optional[str] = None  # 'img_only', 'img_with_text', or None
     
     def __deepcopy__(self, memo):
         # Prevent deepcopy of self.module - we want the new hook to reference 
@@ -145,6 +159,7 @@ class MultiAdapterBypassForwardHook:
         
         # Reference copy for the module we want to patch
         new_obj.module = self.module
+        new_obj.module_key = self.module_key
         new_obj.module_info = self.module_info # dict, copy is fine
         
         # Deep copy other state
@@ -156,6 +171,9 @@ class MultiAdapterBypassForwardHook:
         new_obj.latent_size = copy.deepcopy(self.latent_size, memo)
         new_obj.mask_enabled = self.mask_enabled
         new_obj.txt_len = self.txt_len
+        new_obj.lora_enabled = self.lora_enabled
+        new_obj._should_apply_mask_cached = self._should_apply_mask_cached
+        new_obj._mask_type_cached = self._mask_type_cached
         
         return new_obj
 
@@ -219,6 +237,151 @@ class MultiAdapterBypassForwardHook:
         self.latent_size = None
         self.mask_enabled = False
     
+    def disable_lora(self):
+        """Disable LoRA output (for Phase 1 mask collection)."""
+        self.lora_enabled = False
+    
+    def enable_lora(self):
+        """Enable LoRA output (for Phase 2 generation)."""
+        self.lora_enabled = True
+    
+    def _should_apply_spatial_mask(self) -> bool:
+        """
+        Determine if spatial mask should be applied to this layer.
+        
+        This matches the diffusers implementation:
+        
+        For Flux:
+        - single_transformer_blocks: to_q, to_k, to_v, proj_mlp, proj_out -> YES (with text)
+        - transformer_blocks: to_q, to_k, to_v, to_out, ff -> YES (img only)
+        - transformer_blocks: ff_context, add_q_proj, add_k_proj, add_v_proj, to_add_out -> NO
+        
+        For SDXL:
+        - attn1: all layers -> YES
+        - attn2: to_q, to_out -> YES
+        - attn2: to_k, to_v -> NO (process text tokens, not image features)
+        - ff.net: YES
+        
+        Returns:
+            True if spatial mask should be applied, False otherwise
+        """
+        if self._should_apply_mask_cached is not None:
+            return self._should_apply_mask_cached
+        
+        if self.module_key is None:
+            self._should_apply_mask_cached = True  # Default: apply mask
+            self._mask_type_cached = 'img_with_text'
+            return True
+        
+        key = self.module_key.lower()
+        
+        # Detect model type from key structure
+        # IMPORTANT: Check SDXL first because SDXL keys contain "transformer_blocks" 
+        # which would also match Flux patterns. SDXL has down_blocks/mid_block/up_blocks
+        # as the outermost structure, while Flux has double_blocks/single_blocks.
+        is_sdxl = 'down_blocks' in key or 'mid_block' in key or 'up_blocks' in key
+        is_flux = ('single_blocks' in key or 'double_blocks' in key) and not is_sdxl
+        # Also check for Flux-style transformer_blocks that are NOT inside SDXL structure
+        if not is_sdxl and 'transformer_blocks' in key and 'attentions' not in key:
+            is_flux = True
+        
+        if is_sdxl:
+            result, mask_type = self._check_sdxl_layer(key)
+        elif is_flux:
+            result, mask_type = self._check_flux_layer(key)
+        else:
+            # Unknown model, apply mask by default
+            result, mask_type = True, 'img_with_text'
+        
+        self._should_apply_mask_cached = result
+        self._mask_type_cached = mask_type
+        
+        if not result:
+            logging.debug(f"[OffsetBypass] Skipping spatial mask for layer: {self.module_key}")
+        
+        return result
+    
+    def _check_flux_layer(self, key: str) -> Tuple[bool, Optional[str]]:
+        """
+        Check if a Flux layer should have spatial mask applied.
+        
+        Returns:
+            Tuple of (should_apply, mask_type) where mask_type is 'img_only' or 'img_with_text'
+        """
+        # Single stream blocks (single_blocks / single_transformer_blocks)
+        # These process joint txt+img sequence, so mask needs to include text portion
+        if 'single_block' in key or 'single_transformer_block' in key:
+            # Apply to: to_q, to_k, to_v, proj_mlp, proj_out (in attn module or directly)
+            if any(s in key for s in ['to_q', 'to_k', 'to_v', 'proj_mlp', 'proj_out', 'qkv']):
+                return True, 'img_with_text'
+            # Linear layers in single blocks
+            if 'linear' in key or 'proj' in key:
+                return True, 'img_with_text'
+            return False, None
+        
+        # Double stream blocks (double_blocks / transformer_blocks)
+        if 'double_block' in key or 'transformer_block' in key:
+            # Context (text) path - should NOT have spatial mask, only token position masking
+            # Excludes: ff_context, add_q_proj, add_k_proj, add_v_proj, to_add_out, txt_attn, txt_mlp
+            if 'ff_context' in key:
+                return False, None
+            if any(s in key for s in ['add_q', 'add_k', 'add_v', 'to_add_out']):
+                return False, None
+            # txt_attn and txt_mlp are for text path, should NOT have spatial mask
+            if 'txt_attn' in key or 'txt_mlp' in key:
+                return False, None
+            
+            # Image path - should have spatial mask (img only, no text in sequence)
+            # Includes: to_q, to_k, to_v, to_out, ff (but not ff_context)
+            # Also handles fused qkv weights
+            if any(s in key for s in ['to_q', 'to_k', 'to_v', 'to_out', 'qkv']):
+                return True, 'img_only'
+            if 'ff' in key and 'ff_context' not in key:
+                return True, 'img_only'
+            if 'img_attn' in key or 'img_mlp' in key:
+                return True, 'img_only'
+            
+            return False, None
+        
+        # Default for unknown Flux layers
+        return True, 'img_with_text'
+    
+    def _check_sdxl_layer(self, key: str) -> Tuple[bool, Optional[str]]:
+        """
+        Check if an SDXL UNet layer should have spatial mask applied.
+        
+        Returns:
+            Tuple of (should_apply, mask_type)
+        """
+        # Cross-attention (attn2) - processes text-to-image attention
+        # IMPORTANT: Check attn2 specific patterns FIRST before general attn checks
+        if 'attn2' in key:
+            # to_k and to_v process text tokens (77 tokens), NOT image features
+            # These should NOT have spatial mask applied
+            if '.to_k' in key or '.to_v' in key or 'to_k.' in key or 'to_v.' in key:
+                return False, None
+            # to_q and to_out process image features, should have mask
+            if '.to_q' in key or '.to_out' in key or 'to_q.' in key or 'to_out.' in key:
+                return True, 'img_only'
+            return False, None
+        
+        # Self-attention (attn1) - all layers process image features
+        if 'attn1' in key:
+            return True, 'img_only'
+        
+        # FeedForward layers - process image features
+        if 'ff.net' in key or 'ff_net' in key:
+            return True, 'img_only'
+        
+        # Default: don't apply mask to unknown SDXL layers
+        return False, None
+    
+    def _get_mask_type(self) -> Optional[str]:
+        """Get the mask type for this layer (after _should_apply_spatial_mask has been called)."""
+        if self._mask_type_cached is None:
+            self._should_apply_spatial_mask()  # Populate cache
+        return self._mask_type_cached
+    
     def _get_mask_for_sequence(
         self,
         adapter_name: str,
@@ -229,12 +392,15 @@ class MultiAdapterBypassForwardHook:
         """
         Get mask resized for the current sequence length.
         
-        For Flux models, the sequence is txt_tokens + img_tokens concatenated.
-        We apply mask only to img_tokens portion, keeping txt_tokens at 1.0.
+        Behavior depends on mask_type (determined by _should_apply_spatial_mask):
+        - 'img_with_text': For Flux single stream blocks where txt+img are concatenated.
+                          Returns mask with txt portion = 1.0 and img portion = spatial mask.
+        - 'img_only': For Flux double stream (img path) and SDXL layers.
+                      Returns mask for image sequence only (no text portion).
         
         Args:
             adapter_name: Name of the adapter to get mask for
-            seq_len: Total sequence length (txt_len + img_len for Flux)
+            seq_len: Total sequence length
             device: Target device
             dtype: Target dtype
             
@@ -248,19 +414,38 @@ class MultiAdapterBypassForwardHook:
             return None
         
         mask = self.masks[adapter_name]
+        mask_type = self._get_mask_type()
         
-        # Determine img_len from total seq_len
-        # For Flux: seq_len = txt_len + img_len
-        img_len = seq_len - self.txt_len
-        
-        if img_len <= 0:
-            # This might be a txt-only layer, don't apply mask
-            return None
+        # Determine img_len based on mask_type
+        if mask_type == 'img_with_text':
+            # Flux single stream: seq_len = txt_len + img_len
+            img_len = seq_len - self.txt_len
+            if img_len <= 0:
+                # This might be a txt-only layer, don't apply mask
+                return None
+        else:
+            # img_only or SDXL: seq_len = img_len (no text in sequence)
+            img_len = seq_len
         
         # mask shape: (H, W) - spatial mask for img tokens
         if mask.dim() == 2:
             h, w = mask.shape
             mask_flat = mask.view(-1)  # (H*W,)
+
+            # If this is a single-stream block, txt_len may be inaccurate.
+            # Prefer preserving the original mask shape by inferring txt_len
+            # from seq_len and the existing mask size.
+            if mask_type == 'img_with_text':
+                expected_img_len = img_len
+                if mask_flat.shape[0] != expected_img_len:
+                    inferred_txt_len = seq_len - mask_flat.shape[0]
+                    if inferred_txt_len >= 0:
+                        img_len = mask_flat.shape[0]
+                        full_mask = torch.ones(seq_len, device=device, dtype=dtype)
+                        full_mask[inferred_txt_len:inferred_txt_len + img_len] = mask_flat.to(
+                            device=device, dtype=dtype
+                        )
+                        return full_mask
             
             # Check if we need to resize
             if mask_flat.shape[0] != img_len:
@@ -301,10 +486,15 @@ class MultiAdapterBypassForwardHook:
             else:
                 mask_flat = mask.view(-1)
         
-        # For Flux: create full mask with txt part = 1.0 and img part = spatial mask
-        # txt tokens come first, then img tokens
-        full_mask = torch.ones(seq_len, device=device, dtype=dtype)
-        full_mask[self.txt_len:self.txt_len + img_len] = mask_flat.to(device=device, dtype=dtype)
+        # Build final mask based on mask_type
+        if mask_type == 'img_with_text':
+            # Flux single stream: create full mask with txt part = 1.0 and img part = spatial mask
+            # txt tokens come first, then img tokens
+            full_mask = torch.ones(seq_len, device=device, dtype=dtype)
+            full_mask[self.txt_len:self.txt_len + img_len] = mask_flat.to(device=device, dtype=dtype)
+        else:
+            # img_only: mask covers entire sequence (which is only image tokens)
+            full_mask = mask_flat.to(device=device, dtype=dtype)
         
         return full_mask
     
@@ -325,8 +515,16 @@ class MultiAdapterBypassForwardHook:
         - Each adapter_name has an associated spatial mask
         - Mask is applied to h(x) before adding to base output
         - Formula: output = g(f(x) + mask1 * h1(x) + mask2 * h2(x) + ...)
+        
+        When lora_enabled=False (Phase 1):
+        - Skip all adapter contributions, return only base model output
+        - This allows collecting attention patterns from pure base model
         """
         base_out = self.original_forward(x, *args, **kwargs)
+        
+        # If LoRA is disabled (Phase 1), return base output directly
+        if not self.lora_enabled:
+            return base_out
         
         # Accumulate all adapter contributions
         total_h = torch.zeros_like(base_out)
@@ -344,7 +542,7 @@ class MultiAdapterBypassForwardHook:
         # Debug logging (only once per run)
         if not hasattr(self, '_debug_logged'):
             self._debug_logged = True
-            logging.info(f"[OffsetBypass] _bypass_forward: mask_enabled={self.mask_enabled}, "
+            logging.debug(f"[OffsetBypass] _bypass_forward: mask_enabled={self.mask_enabled}, "
                         f"masks={list(self.masks.keys()) if self.masks else None}, "
                         f"seq_len={seq_len}, adapters={[a['adapter_name'] for a in self.adapters]}")
         
@@ -355,8 +553,10 @@ class MultiAdapterBypassForwardHook:
             
             h_out = adapter.h(x, base_out)
             
-            # Apply FreeFuse mask if available
-            if self.mask_enabled and adapter_name and seq_len is not None:
+            # Apply FreeFuse mask if available AND this layer should have mask applied
+            # Check _should_apply_spatial_mask to match diffusers implementation
+            should_apply = self._should_apply_spatial_mask()
+            if self.mask_enabled and adapter_name and seq_len is not None and should_apply:
                 mask = self._get_mask_for_sequence(
                     adapter_name, seq_len, h_out.device, h_out.dtype
                 )
@@ -368,9 +568,11 @@ class MultiAdapterBypassForwardHook:
                         img_len = seq_len - self.txt_len
                         txt_mask_mean = mask[:self.txt_len].mean().item() if self.txt_len > 0 else 0
                         img_mask_mean = mask[self.txt_len:].mean().item() if img_len > 0 else 0
-                        logging.info(f"[OffsetBypass] Mask applied for {adapter_name}: "
+                        mask_type = self._get_mask_type()
+                        logging.debug(f"[OffsetBypass] Mask applied for {adapter_name} at {self.module_key}: "
                                     f"seq_len={seq_len}, txt_len={self.txt_len}, img_len={img_len}, "
-                                    f"txt_mask_mean={txt_mask_mean:.4f}, img_mask_mean={img_mask_mean:.4f}")
+                                    f"txt_mask_mean={txt_mask_mean:.4f}, img_mask_mean={img_mask_mean:.4f}, "
+                                    f"mask_type={mask_type}")
                     
                     # Apply mask to h_out
                     # h_out shape: (B, seq_len, features) for transformer
@@ -586,8 +788,8 @@ class OffsetBypassInjectionManager:
                 logging.warning(f"[OffsetBypass] Module {module_key} has no weight")
                 continue
             
-            # Create multi-adapter hook for this module
-            hook = MultiAdapterBypassForwardHook(module)
+            # Create multi-adapter hook for this module, passing module_key for mask filtering
+            hook = MultiAdapterBypassForwardHook(module, module_key=module_key)
             
             for adapter_info in adapter_list:
                 hook.add_adapter(
@@ -615,7 +817,7 @@ class OffsetBypassInjectionManager:
                 logging.warning("[OffsetBypass] No manager found in model_options during inject")
                 return
             
-            logging.info(f"[OffsetBypass] inject_all: manager id={id(current_manager)}, "
+            logging.debug(f"[OffsetBypass] inject_all: manager id={id(current_manager)}, "
                         f"adapters={len(current_manager.adapters)}, hooks={len(current_manager.hooks)}, "
                         f"pending_masks={list(current_manager._pending_masks.keys()) if current_manager._pending_masks else None}")
             
@@ -625,7 +827,7 @@ class OffsetBypassInjectionManager:
             if current_manager.adapters:
                 current_model_id = id(model_patcher.model)
                 if current_manager._hooks_model_id != current_model_id:
-                    logging.info(
+                    logging.debug(
                         f"[OffsetBypass] Rebuilding hooks for current model "
                         f"(prev_model_id={current_manager._hooks_model_id}, current_model_id={current_model_id}, "
                         f"modules={len(current_manager.adapters)})"
@@ -637,7 +839,7 @@ class OffsetBypassInjectionManager:
             
             # Apply pending masks if they were set before injection
             if current_manager._pending_masks is not None:
-                logging.info(f"[OffsetBypass] Applying pending masks to {len(current_manager.hooks)} hooks")
+                logging.debug(f"[OffsetBypass] Applying pending masks to {len(current_manager.hooks)} hooks")
                 for hook in current_manager.hooks:
                     hook.set_masks(
                         current_manager._pending_masks,
@@ -672,7 +874,8 @@ class OffsetBypassInjectionManager:
             if not hasattr(module, "weight"):
                 continue
             
-            hook = MultiAdapterBypassForwardHook(module)
+            # Pass module_key for mask filtering
+            hook = MultiAdapterBypassForwardHook(module, module_key=module_key)
             
             for adapter_info in adapter_list:
                 hook.add_adapter(
@@ -722,9 +925,9 @@ class OffsetBypassInjectionManager:
                 hooks_updated += 1
         
         if hooks_updated > 0:
-            logging.info(f"[OffsetBypass] Applied masks to {hooks_updated} injected hooks")
+            logging.debug(f"[OffsetBypass] Applied masks to {hooks_updated} injected hooks")
         else:
-            logging.info(f"[OffsetBypass] Stored pending masks for {len(masks)} adapters (hooks not yet injected)")
+            logging.debug(f"[OffsetBypass] Stored pending masks for {len(masks)} adapters (hooks not yet injected)")
     
     def clear_masks(self):
         """Clear masks from all hooks."""
@@ -732,6 +935,28 @@ class OffsetBypassInjectionManager:
         self._pending_latent_size = None
         for hook in self.hooks:
             hook.clear_masks()
+    
+    def disable_lora(self):
+        """
+        Disable LoRA output on all hooks (for Phase 1 mask collection).
+        
+        When disabled, adapters' h(x) contributions are skipped and only
+        the base model output is returned. This allows collecting attention
+        patterns from the pure base model without LoRA interference.
+        """
+        for hook in self.hooks:
+            hook.disable_lora()
+        logging.debug(f"[OffsetBypass] Disabled LoRA on {len(self.hooks)} hooks")
+    
+    def enable_lora(self):
+        """
+        Enable LoRA output on all hooks (for Phase 2 generation).
+        
+        Re-enables adapter contributions after Phase 1 collection.
+        """
+        for hook in self.hooks:
+            hook.enable_lora()
+        logging.debug(f"[OffsetBypass] Enabled LoRA on {len(self.hooks)} hooks")
     
     def get_hook_count(self) -> int:
         """Return number of hooks."""
