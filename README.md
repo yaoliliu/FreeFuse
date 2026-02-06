@@ -14,7 +14,7 @@
 
 - [x] Release basic inference code
 - [x] Release inference code for controlnet, ipadapter and redux
-- [ ] Supports ComfyUI
+- [x] Supports ComfyUI
 
 ## 📖 Abstract
 
@@ -54,7 +54,14 @@ This paper proposes **FreeFuse**, a training-free framework for multi-subject te
 
 ## 🚀 Quick Start
 
-### Installation
+### Installation with ComfyUI
+
+```shell
+git clone https://github.com/yaoliliu/FreeFuse.git
+ln -s /path/to/FreeFuse/freefuse_comfyui <your ComfyUI path>/custom_nodes
+```
+
+### Installation with diffusers
 
 You just need clone this repo and use [uv](https://docs.astral.sh/uv/) to install dependencies.
 
