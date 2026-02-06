@@ -912,6 +912,7 @@ def apply_freefuse_replace_patches(
     model,
     state: FreeFuseState,
     model_type: str = "auto",
+    sdxl_collect_blocks: Optional[List[Tuple]] = None,
 ) -> None:
     """
     Apply FreeFuse replace patches to a ComfyUI model.
@@ -923,6 +924,8 @@ def apply_freefuse_replace_patches(
         model: ComfyUI ModelPatcher object
         state: FreeFuse state
         model_type: "flux", "sdxl", or "auto"
+        sdxl_collect_blocks: Optional list of (block_name, block_num, tf_index)
+                            tuples for SDXL. If None, uses default.
     """
     # Auto-detect model type
     if model_type == "auto":
@@ -962,7 +965,7 @@ def apply_freefuse_replace_patches(
         
     else:
         # For SDXL, use attn1_output_patch + attn2 replace with SelfConcept method
-        replacer = FreeFuseSDXLAttnReplace(state)
+        replacer = FreeFuseSDXLAttnReplace(state, collect_blocks=sdxl_collect_blocks)
         replacer.apply_to_model(model)
         
         logging.info(f"[FreeFuse] Set attn1_output_patch + attn2 replace for blocks: {replacer.collect_blocks}")

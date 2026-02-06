@@ -106,7 +106,7 @@ def stabilized_balanced_argmax(
     
     for i in range(max_iter):
         # A. Linear normalization (instead of softmax)
-        probs = linear_normalize(current_logits - bias, dim=1)
+        probs = linear_normalize(current_logits - bias, dim=-1)
         
         # B. Momentum smoothing
         running_probs = (1 - momentum) * probs + momentum * running_probs
@@ -267,6 +267,14 @@ def generate_masks(
     max_iter=15,
     latent_h=None,
     latent_w=None,
+    # stabilized_balanced_argmax parameters
+    balance_lr=0.01,
+    gravity_weight=0.00004,
+    spatial_weight=0.00004,
+    momentum=0.2,
+    centroid_margin=0.0,
+    border_penalty=0.0,
+    anisotropy=1.3,
 ):
     """
     Generate masks from similarity maps using the FreeFuse algorithm.
@@ -286,6 +294,13 @@ def generate_masks(
         debug: Whether to print debug info
         latent_h: Expected height of latent (IMPORTANT for non-square images!)
         latent_w: Expected width of latent (IMPORTANT for non-square images!)
+        balance_lr: Learning rate for bias updates in stabilized_balanced_argmax
+        gravity_weight: Weight for centroid attraction (spatial coherence)
+        spatial_weight: Weight for neighbor voting (spatial smoothing)
+        momentum: Momentum for probability smoothing between iterations
+        centroid_margin: Margin to clamp centroids away from borders
+        border_penalty: Penalty for assigning pixels near image borders
+        anisotropy: Horizontal stretch factor for spatial coordinates
         
     Returns:
         Dict[name -> (H, W) mask tensor]
@@ -413,7 +428,18 @@ def generate_masks(
             not_background_mask = torch.ones(1, N, device=device, dtype=dtype)
         
         # Run stabilized balanced argmax on concept logits only
-        max_indices = stabilized_balanced_argmax(logits, h, w, max_iter=max_iter, debug=debug)  # (1, N)
+        max_indices = stabilized_balanced_argmax(
+            logits, h, w, 
+            max_iter=max_iter, 
+            lr=balance_lr,
+            gravity_weight=gravity_weight,
+            spatial_weight=spatial_weight,
+            momentum=momentum,
+            centroid_margin=centroid_margin,
+            border_penalty=border_penalty,
+            anisotropy=anisotropy,
+            debug=debug,
+        )  # (1, N)
         
         # Create masks with background exclusion
         result = {}

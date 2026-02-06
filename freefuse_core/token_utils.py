@@ -227,7 +227,36 @@ def find_concept_positions_t5(
     return concept_pos_map
 
 
+def _flatten_chunked_token_ids(token_weight_pairs) -> List[int]:
+    """
+    Flatten ComfyUI chunked token-weight pairs into a single token id list.
+
+    Supports:
+    - SDXL: dict with keys "l"/"g", each a list of chunks
+    - SD1/SD2: list of chunks directly
+    Each chunk is a list of (token_id, weight[, word_id]) tuples.
+    """
+    if isinstance(token_weight_pairs, dict):
+        if "l" in token_weight_pairs:
+            chunks = token_weight_pairs["l"]
+        else:
+            # Fallback to first entry in dict
+            chunks = next(iter(token_weight_pairs.values()))
+    else:
+        chunks = token_weight_pairs
+
+    flat_ids: List[int] = []
+    for chunk in chunks:
+        for item in chunk:
+            if isinstance(item, (tuple, list)):
+                flat_ids.append(int(item[0]))
+            else:
+                flat_ids.append(int(item))
+    return flat_ids
+
+
 def find_concept_positions_clip(
+    clip,
     tokenizer,
     prompts: Union[str, List[str]],
     concepts: Dict[str, str],
@@ -235,56 +264,107 @@ def find_concept_positions_clip(
     filter_single_char: bool = True,
 ) -> Dict[str, List[List[int]]]:
     """
-    Find token positions for CLIP-based models (SDXL, SD1.x) using sliding window matching.
-    
-    This method matches token ID sequences since CLIP tokenizers may not support
-    offset_mapping consistently.
-    
+    Find token positions for CLIP-based models (SDXL, SD1.x).
+
+    IMPORTANT: For SDXL in ComfyUI, tokenization is chunked into 77-token blocks
+    with BOS/EOS inserted for each chunk. The cross-attention key/value tensor
+    has shape (B, heads, img_len, N*77) where N = number of chunks. So token
+    positions must refer to indices in the *flattened chunked* stream.
+
+    When a concept text spans a chunk boundary, the contiguous concept token
+    sequence is interrupted by EOS+BOS tokens. This function handles that by:
+    1. Building a mapping from "content-only index" -> "chunked position"
+    2. Matching concept tokens against the content-only stream
+    3. Returning the corresponding chunked positions
+
     Args:
+        clip: ComfyUI CLIP object (needed for chunked tokenization)
         tokenizer: CLIPTokenizer instance
         prompts: Single prompt or list of prompts
         concepts: Dict mapping concept name to concept text
         filter_meaningless: Whether to filter stopwords/punctuation
         filter_single_char: Whether to filter single-char tokens
-        
+
     Returns:
         Dict mapping concept name to list of position lists (one per prompt)
     """
     if isinstance(prompts, str):
         prompts = [prompts]
-    
+
+    # Detect BOS/EOS token IDs for this tokenizer
+    bos_id = getattr(tokenizer, 'bos_token_id', 49406)
+    eos_id = getattr(tokenizer, 'eos_token_id', 49407)
+    if bos_id is None:
+        bos_id = 49406
+    if eos_id is None:
+        eos_id = 49407
+
     concept_pos_map = {}
     for concept_name, concept_text in concepts.items():
         concept_pos_map[concept_name] = []
-        
+
         # Tokenize concept text (without special tokens)
         concept_tokens = tokenizer.encode(concept_text, add_special_tokens=False)
-        
+
         for prompt in prompts:
-            # Tokenize prompt (with special tokens)
-            prompt_tokens = tokenizer.encode(prompt, add_special_tokens=True)
-            prompt_token_texts = [tokenizer.decode([tid]) for tid in prompt_tokens]
-            
+            # Get chunked tokenization from ComfyUI (this is what cross-attention sees)
+            try:
+                token_weight_pairs = clip.tokenize(prompt)
+                flat_ids = _flatten_chunked_token_ids(token_weight_pairs)
+            except Exception:
+                flat_ids = tokenizer.encode(prompt, add_special_tokens=True)
+
+            # Build content-only stream with position mapping.
+            # Each chunk has: [BOS, content..., EOS, padding...]
+            # We extract only content tokens and remember their positions
+            # in the flattened chunked stream.
+            content_ids: List[int] = []     # content token IDs only
+            content_pos: List[int] = []     # corresponding position in flat_ids
+
+            # Determine which positions are BOS/EOS/padding per chunk
+            # Chunks are 77 tokens each
+            chunk_size = 77
+            num_chunks = (len(flat_ids) + chunk_size - 1) // chunk_size
+
+            for chunk_idx in range(num_chunks):
+                chunk_start = chunk_idx * chunk_size
+                chunk_end = min(chunk_start + chunk_size, len(flat_ids))
+
+                for pos_in_chunk, global_pos in enumerate(range(chunk_start, chunk_end)):
+                    tid = flat_ids[global_pos]
+                    if pos_in_chunk == 0 and tid == bos_id:
+                        continue  # Skip BOS
+                    if tid == eos_id:
+                        # EOS marks end of content in this chunk; skip rest
+                        break
+                    if tid == 0:
+                        continue  # Skip padding (clip_g uses 0 for padding)
+                    content_ids.append(tid)
+                    content_pos.append(global_pos)
+
+            # Now do sliding window match on the content-only stream
             positions = []
             positions_with_text = []
-            
-            # Sliding window match
             concept_len = len(concept_tokens)
-            prompt_len = len(prompt_tokens)
-            
+            content_len = len(content_ids)
+
             if concept_len > 0:
-                for i in range(prompt_len - concept_len + 1):
+                for i in range(content_len - concept_len + 1):
                     match = all(
-                        prompt_tokens[i + j] == concept_tokens[j]
+                        content_ids[i + j] == concept_tokens[j]
                         for j in range(concept_len)
                     )
                     if match:
                         for j in range(concept_len):
-                            pos = i + j
-                            if pos not in positions:
-                                positions.append(pos)
-                                positions_with_text.append((pos, prompt_token_texts[pos]))
-            
+                            chunked_pos = content_pos[i + j]
+                            if chunked_pos not in positions:
+                                positions.append(chunked_pos)
+                                token_text = tokenizer.decode(
+                                    [content_ids[i + j]],
+                                    skip_special_tokens=False
+                                )
+                                positions_with_text.append((chunked_pos, token_text))
+
             # Apply filtering
             if filter_meaningless and positions_with_text:
                 filtered_positions = [
@@ -360,7 +440,7 @@ def find_concept_positions(
         )
     elif model_type in ('sdxl', 'sd1'):
         return find_concept_positions_clip(
-            tokenizer, prompts, concepts,
+            clip, tokenizer, prompts, concepts,
             filter_meaningless=filter_meaningless,
             filter_single_char=filter_single_char
         )

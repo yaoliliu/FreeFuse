@@ -1,439 +1,1312 @@
 {
-    "last_node_id": 30,
-    "last_link_id": 50,
-    "nodes": [
-        {
-            "id": 100,
-            "type": "Note",
-            "pos": [-700, 50],
-            "size": [600, 550],
-            "flags": {},
-            "order": 0,
-            "mode": 0,
-            "properties": {"text": ""},
-            "widgets_values": [
-                "# FreeFuse SDXL Workflow\n\n## Required Models\n\n### checkpoints/\n- sd_xl_base_1.0.safetensors\n\n### vae/ (optional)\n- sdxl_vae.safetensors (or use built-in)\n\n## LoRA Downloads (loras/)\n- harry_potter_xl.safetensors\n- daiyu_lin_xl.safetensors\n\n## Notes\n- SDXL requires ~8GB VRAM for 1024x1024\n- Uses standard CFG (7.0)\n- 30 steps recommended"
-            ],
-            "color": "#432",
-            "bgcolor": "#653"
-        },
-        {
-            "id": 101,
-            "type": "Note",
-            "pos": [-700, 650],
-            "size": [600, 500],
-            "flags": {},
-            "order": 0,
-            "mode": 0,
-            "properties": {"text": ""},
-            "widgets_values": [
-                "# Phase 1 Parameters\n\n- steps: Total steps (match Phase 2)\n- collect_step: Step to collect attention (10)\n- collect_block: UNet block (8)\n- temperature: Softmax temp (0=auto:4000)\n- top_k_ratio: Token ratio (0.3)\n- disable_lora_phase1: Disable LoRA (true)\n- bg_scale: Background scale (0.95)\n- balance_iterations: Iterations (15)\n\n# Phase 2 Parameters\n\n- bias_scale: Negative bias (5.0)\n- positive_bias_scale: Positive bias (1.0)\n- bidirectional: Both directions (true)\n- bias_blocks: all"
-            ],
-            "color": "#224",
-            "bgcolor": "#335"
-        },
-        {
-            "id": 1,
-            "type": "CheckpointLoaderSimple",
-            "pos": [50, 100],
-            "size": [315, 100],
-            "flags": {},
-            "order": 1,
-            "mode": 0,
-            "outputs": [
-                {"name": "MODEL", "type": "MODEL", "links": [1], "slot_index": 0},
-                {"name": "CLIP", "type": "CLIP", "links": [2], "slot_index": 1},
-                {"name": "VAE", "type": "VAE", "links": [30], "slot_index": 2}
-            ],
-            "properties": {"Node name for S&R": "CheckpointLoaderSimple"},
-            "widgets_values": ["sd_xl_base_1.0.safetensors"],
-            "title": "Load SDXL Checkpoint"
-        },
-        {
-            "id": 4,
-            "type": "FreeFuseLoRALoader",
-            "pos": [450, 100],
-            "size": [315, 150],
-            "flags": {},
-            "order": 2,
-            "mode": 0,
-            "inputs": [
-                {"name": "model", "type": "MODEL", "link": 1},
-                {"name": "clip", "type": "CLIP", "link": 2},
-                {"name": "freefuse_data", "type": "FREEFUSE_DATA", "link": null}
-            ],
-            "outputs": [
-                {"name": "model", "type": "MODEL", "links": [3], "slot_index": 0},
-                {"name": "clip", "type": "CLIP", "links": [4], "slot_index": 1},
-                {"name": "freefuse_data", "type": "FREEFUSE_DATA", "links": [5], "slot_index": 2}
-            ],
-            "properties": {"Node name for S&R": "FreeFuseLoRALoader"},
-            "widgets_values": ["harry_potter_xl.safetensors", "harry", 1.0, 1.0],
-            "title": "LoRA 1: Harry Potter"
-        },
-        {
-            "id": 5,
-            "type": "FreeFuseLoRALoader",
-            "pos": [450, 320],
-            "size": [315, 150],
-            "flags": {},
-            "order": 3,
-            "mode": 0,
-            "inputs": [
-                {"name": "model", "type": "MODEL", "link": 3},
-                {"name": "clip", "type": "CLIP", "link": 4},
-                {"name": "freefuse_data", "type": "FREEFUSE_DATA", "link": 5}
-            ],
-            "outputs": [
-                {"name": "model", "type": "MODEL", "links": [6], "slot_index": 0},
-                {"name": "clip", "type": "CLIP", "links": [7, 8, 9], "slot_index": 1},
-                {"name": "freefuse_data", "type": "FREEFUSE_DATA", "links": [10], "slot_index": 2}
-            ],
-            "properties": {"Node name for S&R": "FreeFuseLoRALoader"},
-            "widgets_values": ["daiyu_lin_xl.safetensors", "daiyu", 1.0, 1.0],
-            "title": "LoRA 2: Daiyu Lin"
-        },
-        {
-            "id": 6,
-            "type": "FreeFuseConceptMap",
-            "pos": [850, 100],
-            "size": [380, 340],
-            "flags": {},
-            "order": 4,
-            "mode": 0,
-            "inputs": [
-                {"name": "freefuse_data", "type": "FREEFUSE_DATA", "link": 10}
-            ],
-            "outputs": [
-                {"name": "freefuse_data", "type": "FREEFUSE_DATA", "links": [11], "slot_index": 0}
-            ],
-            "properties": {"Node name for S&R": "FreeFuseConceptMap"},
-            "widgets_values": [
-                "harry",
-                "harry potter, an European photorealistic style teenage wizard boy with messy black hair, round wire-frame glasses, and bright green eyes, wearing a white shirt, burgundy and gold striped tie, and dark robes",
-                "daiyu",
-                "daiyu_lin, a young East Asian photorealistic style woman in traditional Chinese hanfu dress, elaborate black updo hairstyle adorned with delicate white floral hairpins and ornaments, dangling red tassel earrings, soft pink and red color palette, gentle smile with knowing expression",
-                "",
-                "",
-                "",
-                "",
-                true,
-                "autumn leaves blurred in the background"
-            ],
-            "title": "Concept Mapping"
-        },
-        {
-            "id": 20,
-            "type": "PrimitiveNode",
-            "pos": [850, 500],
-            "size": [380, 130],
-            "flags": {},
-            "order": 5,
-            "mode": 0,
-            "outputs": [
-                {"name": "STRING", "type": "STRING", "links": [35, 36], "slot_index": 0, "widget": {"name": "value"}}
-            ],
-            "title": "Main Prompt",
-            "properties": {"Run widget replace on values": false},
-            "widgets_values": [
-                "Realistic photography, harry potter, an European photorealistic style teenage wizard boy with messy black hair, round wire-frame glasses, and bright green eyes, wearing a white shirt, burgundy and gold striped tie, and dark robes hugging daiyu_lin, a young East Asian photorealistic style woman in traditional Chinese hanfu dress, elaborate black updo hairstyle adorned with delicate white floral hairpins and ornaments, dangling red tassel earrings, soft pink and red color palette, gentle smile with knowing expression, autumn leaves blurred in the background, high quality, detailed"
-            ]
-        },
-        {
-            "id": 8,
-            "type": "FreeFuseTokenPositions",
-            "pos": [1320, 100],
-            "size": [340, 130],
-            "flags": {},
-            "order": 6,
-            "mode": 0,
-            "inputs": [
-                {"name": "clip", "type": "CLIP", "link": 7},
-                {"name": "prompt", "type": "STRING", "link": 35, "widget": {"name": "prompt"}},
-                {"name": "freefuse_data", "type": "FREEFUSE_DATA", "link": 11}
-            ],
-            "outputs": [
-                {"name": "freefuse_data", "type": "FREEFUSE_DATA", "links": [14], "slot_index": 0}
-            ],
-            "properties": {"Node name for S&R": "FreeFuseTokenPositions"},
-            "widgets_values": [true, true],
-            "title": "Compute Token Positions"
-        },
-        {
-            "id": 9,
-            "type": "CLIPTextEncode",
-            "pos": [1320, 280],
-            "size": [340, 120],
-            "flags": {},
-            "order": 7,
-            "mode": 0,
-            "inputs": [
-                {"name": "clip", "type": "CLIP", "link": 8},
-                {"name": "text", "type": "STRING", "link": 36, "widget": {"name": "text"}}
-            ],
-            "outputs": [
-                {"name": "CONDITIONING", "type": "CONDITIONING", "links": [16, 28], "slot_index": 0}
-            ],
-            "properties": {"Node name for S&R": "CLIPTextEncode"},
-            "widgets_values": [""],
-            "title": "Positive Conditioning"
-        },
-        {
-            "id": 11,
-            "type": "CLIPTextEncode",
-            "pos": [1320, 450],
-            "size": [340, 100],
-            "flags": {},
-            "order": 8,
-            "mode": 0,
-            "inputs": [
-                {"name": "clip", "type": "CLIP", "link": 9}
-            ],
-            "outputs": [
-                {"name": "CONDITIONING", "type": "CONDITIONING", "links": [38, 39], "slot_index": 0}
-            ],
-            "properties": {"Node name for S&R": "CLIPTextEncode"},
-            "widgets_values": ["ugly, blurry, low quality, deformed"],
-            "title": "Negative Conditioning"
-        },
-        {
-            "id": 10,
-            "type": "EmptyLatentImage",
-            "pos": [1320, 600],
-            "size": [340, 106],
-            "flags": {},
-            "order": 9,
-            "mode": 0,
-            "outputs": [
-                {"name": "LATENT", "type": "LATENT", "links": [17, 22, 50], "slot_index": 0}
-            ],
-            "properties": {"Node name for S&R": "EmptyLatentImage"},
-            "widgets_values": [1024, 1024, 1],
-            "title": "Latent Image Size"
-        },
-        {
-            "id": 12,
-            "type": "FreeFusePhase1Sampler",
-            "pos": [1750, 100],
-            "size": [380, 450],
-            "flags": {},
-            "order": 10,
-            "mode": 0,
-            "inputs": [
-                {"name": "model", "type": "MODEL", "link": 6},
-                {"name": "conditioning", "type": "CONDITIONING", "link": 16},
-                {"name": "neg_conditioning", "type": "CONDITIONING", "link": 38},
-                {"name": "latent", "type": "LATENT", "link": 17},
-                {"name": "freefuse_data", "type": "FREEFUSE_DATA", "link": 14}
-            ],
-            "outputs": [
-                {"name": "model", "type": "MODEL", "links": [18], "slot_index": 0},
-                {"name": "masks", "type": "FREEFUSE_MASKS", "links": [19, 20], "slot_index": 1},
-                {"name": "mask_preview", "type": "IMAGE", "links": [21], "slot_index": 2}
-            ],
-            "properties": {"Node name for S&R": "FreeFusePhase1Sampler"},
-            "widgets_values": [
-                42,
-                30,
-                10,
-                7.0,
-                "euler",
-                "normal",
-                8,
-                0.0,
-                0.3,
-                true,
-                0.95,
-                false,
-                15
-            ],
-            "title": "Phase 1: Collect Masks"
-        },
-        {
-            "id": 13,
-            "type": "PreviewImage",
-            "pos": [2220, 100],
-            "size": [320, 280],
-            "flags": {},
-            "order": 11,
-            "mode": 0,
-            "inputs": [
-                {"name": "images", "type": "IMAGE", "link": 21}
-            ],
-            "properties": {"Node name for S&R": "PreviewImage"},
-            "title": "Phase 1 Mask Preview"
-        },
-        {
-            "id": 15,
-            "type": "FreeFuseMaskPreview",
-            "pos": [2220, 420],
-            "size": [320, 150],
-            "flags": {},
-            "order": 12,
-            "mode": 0,
-            "inputs": [
-                {"name": "masks", "type": "FREEFUSE_MASKS", "link": 20}
-            ],
-            "outputs": [
-                {"name": "combined_preview", "type": "IMAGE", "links": [40], "slot_index": 0},
-                {"name": "individual_masks", "type": "IMAGE", "links": [41], "slot_index": 1}
-            ],
-            "properties": {"Node name for S&R": "FreeFuseMaskPreview"},
-            "widgets_values": [512, 512, true, true],
-            "title": "Detailed Mask Preview"
-        },
-        {
-            "id": 25,
-            "type": "PreviewImage",
-            "pos": [2600, 420],
-            "size": [260, 220],
-            "flags": {},
-            "order": 13,
-            "mode": 0,
-            "inputs": [
-                {"name": "images", "type": "IMAGE", "link": 40}
-            ],
-            "properties": {"Node name for S&R": "PreviewImage"},
-            "title": "Combined Masks"
-        },
-        {
-            "id": 26,
-            "type": "PreviewImage",
-            "pos": [2600, 680],
-            "size": [260, 220],
-            "flags": {},
-            "order": 14,
-            "mode": 0,
-            "inputs": [
-                {"name": "images", "type": "IMAGE", "link": 41}
-            ],
-            "properties": {"Node name for S&R": "PreviewImage"},
-            "title": "Individual Masks"
-        },
-        {
-            "id": 14,
-            "type": "FreeFuseMaskApplicator",
-            "pos": [1750, 600],
-            "size": [380, 320],
-            "flags": {},
-            "order": 15,
-            "mode": 0,
-            "inputs": [
-                {"name": "model", "type": "MODEL", "link": 18},
-                {"name": "masks", "type": "FREEFUSE_MASKS", "link": 19},
-                {"name": "freefuse_data", "type": "FREEFUSE_DATA", "link": 14},
-                {"name": "latent", "type": "LATENT", "link": 22}
-            ],
-            "outputs": [
-                {"name": "model", "type": "MODEL", "links": [23], "slot_index": 0}
-            ],
-            "properties": {"Node name for S&R": "FreeFuseMaskApplicator"},
-            "widgets_values": [true, true, 5.0, 1.0, true, true, "all"],
-            "title": "Phase 2: Apply Masks"
-        },
-        {
-            "id": 16,
-            "type": "KSampler",
-            "pos": [1750, 1000],
-            "size": [380, 350],
-            "flags": {},
-            "order": 16,
-            "mode": 0,
-            "inputs": [
-                {"name": "model", "type": "MODEL", "link": 23},
-                {"name": "positive", "type": "CONDITIONING", "link": 28},
-                {"name": "negative", "type": "CONDITIONING", "link": 39},
-                {"name": "latent_image", "type": "LATENT", "link": 50}
-            ],
-            "outputs": [
-                {"name": "LATENT", "type": "LATENT", "links": [24], "slot_index": 0}
-            ],
-            "properties": {"Node name for S&R": "KSampler"},
-            "widgets_values": [42, "fixed", 30, 7.0, "euler", "normal", 1.0],
-            "title": "Phase 2: Full Generation"
-        },
-        {
-            "id": 17,
-            "type": "VAEDecode",
-            "pos": [2220, 1050],
-            "size": [200, 50],
-            "flags": {},
-            "order": 17,
-            "mode": 0,
-            "inputs": [
-                {"name": "samples", "type": "LATENT", "link": 24},
-                {"name": "vae", "type": "VAE", "link": 30}
-            ],
-            "outputs": [
-                {"name": "IMAGE", "type": "IMAGE", "links": [26], "slot_index": 0}
-            ],
-            "properties": {"Node name for S&R": "VAEDecode"}
-        },
-        {
-            "id": 18,
-            "type": "SaveImage",
-            "pos": [2500, 950],
-            "size": [400, 400],
-            "flags": {},
-            "order": 18,
-            "mode": 0,
-            "inputs": [
-                {"name": "images", "type": "IMAGE", "link": 26}
-            ],
-            "properties": {"Node name for S&R": "SaveImage"},
-            "widgets_values": ["FreeFuse/sdxl_output"],
-            "title": "Final Output"
-        }
-    ],
-    "links": [
-        [1, 1, 0, 4, 0, "MODEL"],
-        [2, 1, 1, 4, 1, "CLIP"],
-        [3, 4, 0, 5, 0, "MODEL"],
-        [4, 4, 1, 5, 1, "CLIP"],
-        [5, 4, 2, 5, 2, "FREEFUSE_DATA"],
-        [6, 5, 0, 12, 0, "MODEL"],
-        [7, 5, 1, 8, 0, "CLIP"],
-        [8, 5, 1, 9, 0, "CLIP"],
-        [9, 5, 1, 11, 0, "CLIP"],
-        [10, 5, 2, 6, 0, "FREEFUSE_DATA"],
-        [11, 6, 0, 8, 2, "FREEFUSE_DATA"],
-        [14, 8, 0, 12, 4, "FREEFUSE_DATA"],
-        [16, 9, 0, 12, 1, "CONDITIONING"],
-        [17, 10, 0, 12, 3, "LATENT"],
-        [18, 12, 0, 14, 0, "MODEL"],
-        [19, 12, 1, 14, 1, "FREEFUSE_MASKS"],
-        [20, 12, 1, 15, 0, "FREEFUSE_MASKS"],
-        [21, 12, 2, 13, 0, "IMAGE"],
-        [22, 10, 0, 14, 3, "LATENT"],
-        [23, 14, 0, 16, 0, "MODEL"],
-        [24, 16, 0, 17, 0, "LATENT"],
-        [26, 17, 0, 18, 0, "IMAGE"],
-        [28, 9, 0, 16, 1, "CONDITIONING"],
-        [30, 1, 2, 17, 1, "VAE"],
-        [35, 20, 0, 8, 1, "STRING"],
-        [36, 20, 0, 9, 1, "STRING"],
-        [38, 11, 0, 12, 2, "CONDITIONING"],
-        [39, 11, 0, 16, 2, "CONDITIONING"],
-        [40, 15, 0, 25, 0, "IMAGE"],
-        [41, 15, 1, 26, 0, "IMAGE"],
-        [50, 10, 0, 16, 3, "LATENT"]
-    ],
-    "groups": [
-        {"title": "1. Load Checkpoint", "bounding": [30, 50, 380, 280], "color": "#3f789e"},
-        {"title": "2. Load LoRAs", "bounding": [430, 50, 380, 480], "color": "#2E8B57"},
-        {"title": "3. Concept Mapping", "bounding": [830, 50, 420, 620], "color": "#88A825"},
-        {"title": "4. Conditioning", "bounding": [1300, 50, 400, 700], "color": "#DAA520"},
-        {"title": "5. Phase 1: Masks", "bounding": [1730, 50, 520, 500], "color": "#A8442A"},
-        {"title": "6. Phase 2: Generate", "bounding": [1730, 550, 520, 850], "color": "#7B3F9E"}
-    ],
-    "config": {},
-    "extra": {
-        "ds": {"scale": 0.5, "offset": [300, 100]},
-        "info": {
-            "name": "FreeFuse SDXL Complete Workflow",
-            "author": "FreeFuse Team",
-            "version": "3.0"
-        }
+  "id": "795e58af-67d8-4595-8ea9-4521b524f563",
+  "revision": 0,
+  "last_node_id": 101,
+  "last_link_id": 50,
+  "nodes": [
+    {
+      "id": 100,
+      "type": "Note",
+      "pos": [
+        -700,
+        50
+      ],
+      "size": [
+        700,
+        1000
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {
+        "text": ""
+      },
+      "widgets_values": [
+        "# FreeFuse SDXL — Model & LoRA Download Guide\n# FreeFuse SDXL — 模型与LoRA下载指南\n\n═══════════════════════════════════════\n\n## Required Models / 所需模型\n\n### 📂 checkpoints/\n• sd_xl_base_1.0.safetensors\n  → https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors?download=true\n  EN: SDXL Base 1.0 checkpoint (includes UNet + CLIP + VAE)\n  中: SDXL Base 1.0 检查点模型（包含UNet + CLIP + VAE）\n\n### 📂 vae/ (Optional / 可选)\n• Built-in VAE from checkpoint is used by default\n  默认使用检查点自带的VAE\n• No separate VAE file required for SDXL\n  SDXL不需要单独的VAE文件\n\n### 📂 loras/ (LoRA Files)\n• harry_potter_xl.safetensors\n  EN: SDXL LoRA for Harry Potter (custom trained)\n  中: Harry Potter角色的SDXL LoRA（自训练）\n• daiyu_lin_xl.safetensors\n  EN: SDXL LoRA for Daiyu Lin (custom trained)\n  中: 林黛玉角色的SDXL LoRA（自训练）\n\n⚠ SDXL LoRAs must be trained for SDXL architecture.\nFlux LoRAs are NOT compatible with SDXL!\n⚠ SDXL LoRA必须基于SDXL架构训练，\nFlux LoRA与SDXL不兼容！\n\n═══════════════════════════════════════\n\n## Directory Structure / 目录结构\n📂 ComfyUI/models/\n├─ checkpoints/\n│  └─ sd_xl_base_1.0.safetensors\n└─ loras/\n   ├─ harry_potter_xl.safetensors\n   └─ daiyu_lin_xl.safetensors\n\n═══════════════════════════════════════\n\n## Important Notes / 重要提示\n• SDXL requires ~8GB VRAM for 1024×1024\n  SDXL生成1024×1024约需8GB显存\n• Uses standard CFG (7.0 recommended)\n  使用标准CFG引导（推荐7.0）\n• 30 steps recommended / 推荐30步\n• Uses CLIPTextEncode (not CLIPTextEncodeFlux)\n  使用CLIPTextEncode（非CLIPTextEncodeFlux）\n• Supports negative prompts / 支持负面提示词\n• SDXL concept_text should be shorter than Flux\n  SDXL的concept_text应比Flux更简短"
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
     },
-    "version": 0.4
+    {
+      "id": 1,
+      "type": "CheckpointLoaderSimple",
+      "pos": [
+        50,
+        100
+      ],
+      "size": [
+        315,
+        100
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "slot_index": 0,
+          "links": [
+            1
+          ]
+        },
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "slot_index": 1,
+          "links": [
+            2
+          ]
+        },
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "slot_index": 2,
+          "links": [
+            30
+          ]
+        }
+      ],
+      "title": "Load SDXL Checkpoint",
+      "properties": {
+        "Node name for S&R": "CheckpointLoaderSimple",
+        "cnr_id": "comfy-core",
+        "models": [
+          {
+            "name": "sd_xl_base_1.0.safetensors",
+            "url": "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors?download=true",
+            "directory": "checkpoints"
+          }
+        ]
+      },
+      "widgets_values": [
+        "sd_xl_base_1.0.safetensors"
+      ]
+    },
+    {
+      "id": 4,
+      "type": "FreeFuseLoRALoader",
+      "pos": [
+        450,
+        100
+      ],
+      "size": [
+        315,
+        170
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 1
+        },
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 2
+        },
+        {
+          "name": "freefuse_data",
+          "shape": 7,
+          "type": "FREEFUSE_DATA",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "slot_index": 0,
+          "links": [
+            3
+          ]
+        },
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "slot_index": 1,
+          "links": [
+            4
+          ]
+        },
+        {
+          "name": "freefuse_data",
+          "type": "FREEFUSE_DATA",
+          "slot_index": 2,
+          "links": [
+            5
+          ]
+        }
+      ],
+      "title": "LoRA 1: Harry Potter",
+      "properties": {
+        "Node name for S&R": "FreeFuseLoRALoader"
+      },
+      "widgets_values": [
+        "harry_potter_xl.safetensors",
+        "harry",
+        1,
+        1
+      ]
+    },
+    {
+      "id": 5,
+      "type": "FreeFuseLoRALoader",
+      "pos": [
+        450,
+        320
+      ],
+      "size": [
+        315,
+        170
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 3
+        },
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 4
+        },
+        {
+          "name": "freefuse_data",
+          "shape": 7,
+          "type": "FREEFUSE_DATA",
+          "link": 5
+        }
+      ],
+      "outputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "slot_index": 0,
+          "links": [
+            6
+          ]
+        },
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "slot_index": 1,
+          "links": [
+            7,
+            8,
+            9
+          ]
+        },
+        {
+          "name": "freefuse_data",
+          "type": "FREEFUSE_DATA",
+          "slot_index": 2,
+          "links": [
+            10
+          ]
+        }
+      ],
+      "title": "LoRA 2: Daiyu Lin",
+      "properties": {
+        "Node name for S&R": "FreeFuseLoRALoader"
+      },
+      "widgets_values": [
+        "daiyu_lin_xl.safetensors",
+        "daiyu",
+        1,
+        1
+      ]
+    },
+    {
+      "id": 6,
+      "type": "FreeFuseConceptMap",
+      "pos": [
+        850,
+        100
+      ],
+      "size": [
+        380,
+        424.0000000000001
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "freefuse_data",
+          "shape": 7,
+          "type": "FREEFUSE_DATA",
+          "link": 10
+        }
+      ],
+      "outputs": [
+        {
+          "name": "freefuse_data",
+          "type": "FREEFUSE_DATA",
+          "slot_index": 0,
+          "links": [
+            11
+          ]
+        }
+      ],
+      "title": "Concept Mapping",
+      "properties": {
+        "Node name for S&R": "FreeFuseConceptMap"
+      },
+      "widgets_values": [
+        "harry",
+        "an European man wearing Hogwarts uniform",
+        "daiyu",
+        "an Asian woman wearing Chinese traditional clothing",
+        "",
+        "",
+        "",
+        "",
+        false,
+        "autumn leaves blurred in the background"
+      ]
+    },
+    {
+      "id": 20,
+      "type": "PrimitiveNode",
+      "pos": [
+        850,
+        500
+      ],
+      "size": [
+        380,
+        130
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "widget": {
+            "name": "prompt"
+          },
+          "slot_index": 0,
+          "links": [
+            35,
+            36
+          ]
+        }
+      ],
+      "title": "Main Prompt",
+      "properties": {
+        "Run widget replace on values": false
+      },
+      "widgets_values": [
+        "Realistic photography, an European man wearing Hogwarts uniform hugging an Asian woman wearing Chinese traditional clothing warmly, both faces close together, autumn leaves blurred in the background, high quality, detailed"
+      ]
+    },
+    {
+      "id": 8,
+      "type": "FreeFuseTokenPositions",
+      "pos": [
+        1320,
+        100
+      ],
+      "size": [
+        340,
+        156
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 7
+        },
+        {
+          "name": "freefuse_data",
+          "type": "FREEFUSE_DATA",
+          "link": 11
+        },
+        {
+          "name": "prompt",
+          "type": "STRING",
+          "widget": {
+            "name": "prompt"
+          },
+          "link": 35
+        }
+      ],
+      "outputs": [
+        {
+          "name": "freefuse_data",
+          "type": "FREEFUSE_DATA",
+          "slot_index": 0,
+          "links": [
+            14
+          ]
+        }
+      ],
+      "title": "Compute Token Positions",
+      "properties": {
+        "Node name for S&R": "FreeFuseTokenPositions"
+      },
+      "widgets_values": [
+        "Realistic photography, an European man wearing Hogwarts uniform hugging an Asian woman wearing Chinese traditional clothing warmly, both faces close together, autumn leaves blurred in the background, high quality, detailed",
+        true,
+        true
+      ]
+    },
+    {
+      "id": 9,
+      "type": "CLIPTextEncode",
+      "pos": [
+        1320,
+        280
+      ],
+      "size": [
+        340,
+        120
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 8
+        },
+        {
+          "name": "text",
+          "type": "STRING",
+          "widget": {
+            "name": "text"
+          },
+          "link": 36
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "slot_index": 0,
+          "links": [
+            16,
+            28
+          ]
+        }
+      ],
+      "title": "Positive Conditioning",
+      "properties": {
+        "Node name for S&R": "CLIPTextEncode"
+      },
+      "widgets_values": [
+        "Realistic photography, an European man wearing Hogwarts uniform hugging an Asian woman wearing Chinese traditional clothing warmly, both faces close together, autumn leaves blurred in the background, high quality, detailed"
+      ]
+    },
+    {
+      "id": 11,
+      "type": "CLIPTextEncode",
+      "pos": [
+        1320,
+        450
+      ],
+      "size": [
+        340,
+        100
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 9
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "slot_index": 0,
+          "links": [
+            38,
+            39
+          ]
+        }
+      ],
+      "title": "Negative Conditioning",
+      "properties": {
+        "Node name for S&R": "CLIPTextEncode"
+      },
+      "widgets_values": [
+        "ugly, blurry, low quality, deformed"
+      ]
+    },
+    {
+      "id": 10,
+      "type": "EmptyLatentImage",
+      "pos": [
+        1320,
+        600
+      ],
+      "size": [
+        340,
+        106
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "slot_index": 0,
+          "links": [
+            17,
+            22,
+            50
+          ]
+        }
+      ],
+      "title": "Latent Image Size",
+      "properties": {
+        "Node name for S&R": "EmptyLatentImage"
+      },
+      "widgets_values": [
+        1024,
+        1024,
+        1
+      ]
+    },
+    {
+      "id": 12,
+      "type": "FreeFusePhase1Sampler",
+      "pos": [
+        1750,
+        100
+      ],
+      "size": [
+        380,
+        666
+      ],
+      "flags": {},
+      "order": 11,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 6
+        },
+        {
+          "name": "conditioning",
+          "type": "CONDITIONING",
+          "link": 16
+        },
+        {
+          "name": "neg_conditioning",
+          "type": "CONDITIONING",
+          "link": 38
+        },
+        {
+          "name": "latent",
+          "type": "LATENT",
+          "link": 17
+        },
+        {
+          "name": "freefuse_data",
+          "type": "FREEFUSE_DATA",
+          "link": 14
+        }
+      ],
+      "outputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "slot_index": 0,
+          "links": [
+            18
+          ]
+        },
+        {
+          "name": "masks",
+          "type": "FREEFUSE_MASKS",
+          "slot_index": 1,
+          "links": [
+            19,
+            20
+          ]
+        },
+        {
+          "name": "mask_preview",
+          "type": "IMAGE",
+          "slot_index": 2,
+          "links": [
+            21
+          ]
+        }
+      ],
+      "title": "Phase 1: Collect Masks",
+      "properties": {
+        "Node name for S&R": "FreeFusePhase1Sampler"
+      },
+      "widgets_values": [
+        77,
+        30,
+        30,
+        10,
+        7,
+        "euler",
+        "normal",
+        18,
+        "output_early ★ (recommended)",
+        3,
+        500,
+        0.1,
+        true,
+        0.95,
+        false,
+        15,
+        0.01,
+        0.01,
+        0.00004,
+        0.2,
+        0,
+        0,
+        1.3
+      ]
+    },
+    {
+      "id": 13,
+      "type": "PreviewImage",
+      "pos": [
+        2220,
+        100
+      ],
+      "size": [
+        320,
+        280
+      ],
+      "flags": {},
+      "order": 13,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 21
+        }
+      ],
+      "outputs": [],
+      "title": "Phase 1 Mask Preview",
+      "properties": {
+        "Node name for S&R": "PreviewImage"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 15,
+      "type": "FreeFuseMaskPreview",
+      "pos": [
+        2220,
+        420
+      ],
+      "size": [
+        320,
+        150
+      ],
+      "flags": {},
+      "order": 12,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "masks",
+          "type": "FREEFUSE_MASKS",
+          "link": 20
+        }
+      ],
+      "outputs": [
+        {
+          "name": "combined_preview",
+          "type": "IMAGE",
+          "slot_index": 0,
+          "links": [
+            40
+          ]
+        },
+        {
+          "name": "individual_masks",
+          "type": "IMAGE",
+          "slot_index": 1,
+          "links": [
+            41
+          ]
+        }
+      ],
+      "title": "Detailed Mask Preview",
+      "properties": {
+        "Node name for S&R": "FreeFuseMaskPreview"
+      },
+      "widgets_values": [
+        512,
+        512,
+        true,
+        true
+      ]
+    },
+    {
+      "id": 25,
+      "type": "PreviewImage",
+      "pos": [
+        2600,
+        420
+      ],
+      "size": [
+        260,
+        246
+      ],
+      "flags": {},
+      "order": 14,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 40
+        }
+      ],
+      "outputs": [],
+      "title": "Combined Masks",
+      "properties": {
+        "Node name for S&R": "PreviewImage"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 26,
+      "type": "PreviewImage",
+      "pos": [
+        2600,
+        680
+      ],
+      "size": [
+        260,
+        246
+      ],
+      "flags": {},
+      "order": 15,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 41
+        }
+      ],
+      "outputs": [],
+      "title": "Individual Masks",
+      "properties": {
+        "Node name for S&R": "PreviewImage"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 14,
+      "type": "FreeFuseMaskApplicator",
+      "pos": [
+        1750,
+        600
+      ],
+      "size": [
+        380,
+        320
+      ],
+      "flags": {},
+      "order": 16,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 18
+        },
+        {
+          "name": "masks",
+          "type": "FREEFUSE_MASKS",
+          "link": 19
+        },
+        {
+          "name": "freefuse_data",
+          "type": "FREEFUSE_DATA",
+          "link": 14
+        },
+        {
+          "name": "latent",
+          "shape": 7,
+          "type": "LATENT",
+          "link": 22
+        }
+      ],
+      "outputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "slot_index": 0,
+          "links": [
+            23
+          ]
+        }
+      ],
+      "title": "Phase 2: Apply Masks",
+      "properties": {
+        "Node name for S&R": "FreeFuseMaskApplicator"
+      },
+      "widgets_values": [
+        true,
+        true,
+        5,
+        7,
+        true,
+        true,
+        "all"
+      ]
+    },
+    {
+      "id": 16,
+      "type": "KSampler",
+      "pos": [
+        1750,
+        1000
+      ],
+      "size": [
+        380,
+        350
+      ],
+      "flags": {},
+      "order": 17,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 23
+        },
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "link": 28
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "link": 39
+        },
+        {
+          "name": "latent_image",
+          "type": "LATENT",
+          "link": 50
+        }
+      ],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "slot_index": 0,
+          "links": [
+            24
+          ]
+        }
+      ],
+      "title": "Phase 2: Full Generation",
+      "properties": {
+        "Node name for S&R": "KSampler"
+      },
+      "widgets_values": [
+        42,
+        "fixed",
+        30,
+        7,
+        "euler",
+        "normal",
+        1
+      ]
+    },
+    {
+      "id": 17,
+      "type": "VAEDecode",
+      "pos": [
+        2220,
+        1050
+      ],
+      "size": [
+        200,
+        50
+      ],
+      "flags": {},
+      "order": 18,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 24
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 30
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "slot_index": 0,
+          "links": [
+            26
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "VAEDecode"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 18,
+      "type": "SaveImage",
+      "pos": [
+        2500,
+        950
+      ],
+      "size": [
+        400,
+        400
+      ],
+      "flags": {},
+      "order": 19,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 26
+        }
+      ],
+      "outputs": [],
+      "title": "Final Output",
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "FreeFuse/sdxl_output"
+      ]
+    },
+    {
+      "id": 101,
+      "type": "Note",
+      "pos": [
+        -688.984375,
+        1111.05078125
+      ],
+      "size": [
+        700,
+        2200
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {
+        "text": ""
+      },
+      "widgets_values": [
+        "# FreeFuse SDXL — Complete Parameter Guide\n# FreeFuse SDXL — 完整参数指南\n\n═══════════════════════════════════════\n\n## Workflow Overview / 工作流概览\nEN: FreeFuse uses a two-phase approach for multi-LoRA composition:\n  Phase 1: Collect cross-attention → generate spatial masks\n  Phase 2: Apply masks to LoRAs → full denoising generation\n中: FreeFuse 采用两阶段方法实现多LoRA合成：\n  阶段1：收集交叉注意力 → 生成空间掩码\n  阶段2：对LoRA应用掩码 → 完整去噪生成\n\n═══════════════════════════════════════\n\n## 1. LoRA Loader / LoRA加载器\n• adapter_name (string): Unique ID, MUST match ConceptMap\n  适配器名称：必须与ConceptMap中一致\n• strength_model (float, default=1.0): LoRA strength for UNet\n  UNet的LoRA强度\n• strength_clip (float, default=1.0): LoRA strength for text encoder\n  文本编码器的LoRA强度\n\n## 2. Concept Map / 概念映射\n• concept_text: Description text for this concept\n  MUST appear verbatim in prompt\n  概念文本：必须原样出现在提示词中\n• enable_background (bool, default=true): Background as separate concept\n  将背景作为独立概念处理\n• background_text (string): Background description (optional)\n  背景描述（可选，留空则自动检测）\n\n## 3. Token Positions / Token位置\n• filter_meaningless (bool, default=true): Remove articles/prepositions\n  过滤冠词/介词等无意义词\n• filter_single_char (bool, default=true): Remove single-char tokens\n  过滤单字符token\n\n═══════════════════════════════════════\n\n## 4. Phase 1 Sampler / 阶段1采样器\n\n### Core Parameters / 核心参数\n• steps (int, default=30): Total steps, MUST match Phase 2\n  总步数：须与阶段2一致\n• collect_step (int, default=10): Collect attention then early-stop\n  收集注意力后提前终止的步骤（SDXL推荐10）\n• cfg (float, default=7.0): Standard CFG guidance scale\n  标准CFG引导尺度（SDXL推荐7.0）\n• sampler_name: euler recommended for SDXL\n  SDXL推荐euler\n• scheduler: normal recommended for SDXL\n  SDXL推荐normal\n\n### Block Selection [SDXL] / Block选择\n• collect_region (enum): UNet region to collect attention\n  收集注意力的UNet区域\n  ★ output_early recommended / 推荐output_early\n• collect_tf_index (int, default=3): Transformer index in region (0-9)\n  该区域内的transformer索引（0-9）\n• collect_block: [Flux only, ignored for SDXL]\n  [仅Flux，SDXL忽略此参数]\n\n### Similarity / 相似度计算\n• temperature (float, default=0→auto:300):\n  Softmax temperature. Higher = sharper maps\n  Softmax温度，越高→越锐利的映射（SDXL自动值300）\n• top_k_ratio (float, default=0.1):\n  Ratio of top-k tokens for similarity\n  top-k token比例\n\n### LoRA Control / LoRA控制\n• disable_lora_phase1 (bool, default=true ★):\n  Disable LoRA for cleaner base-model attention\n  禁用LoRA以获取更干净的注意力 ★推荐\n\n### Mask Post-processing / 掩码后处理\n• bg_scale (float, default=0.95):\n  Background scaling. Higher = more background\n  背景缩放，越高→背景越大\n• use_morphological_cleaning (bool, default=false):\n  Clean mask boundaries with morphology\n  形态学清理掩码边界\n\n### Mask Balancing (Advanced) / 掩码平衡（高级）\n• balance_iterations (int, 15): Balanced argmax iterations\n  平衡argmax迭代次数\n• balance_lr (float, 0.01): Bias update learning rate\n  偏置更新学习率\n• gravity_weight (float, 0.01): Centroid attraction\n  质心吸引力（SDXL推荐0.01，比Flux大）\n• spatial_weight (float, 0.00004): Neighbor voting\n  邻域投票（空间平滑性）\n• momentum (float, 0.2): Smoothing between iters\n  迭代间平滑动量\n• centroid_margin (float, 0.0): Clamp from borders\n  质心边界夹紧\n• border_penalty (float, 0.0): Border assignment penalty\n  边界分配惩罚\n• anisotropy (float, 1.3): H-stretch >1=wider masks\n  各向异性 >1=更宽的掩码\n\n═══════════════════════════════════════\n\n## 5. Mask Applicator / 掩码应用器\n\n### LoRA Masking / LoRA掩码\n• enable_token_masking (bool, true):\n  Zero LoRA at other concepts' tokens\n  在其他概念token处清零LoRA输出\n\n### Attention Bias / 注意力偏置\n• enable_attention_bias (bool, true):\n  Apply attention bias to guide cross-attention\n  启用注意力偏置引导交叉注意力\n• bias_scale (float, 5.0): Negative bias strength\n  Suppress cross-LoRA attention (5-10 typical)\n  负偏置强度（抑制跨LoRA注意力，典型值5-10）\n• positive_bias_scale (float, 7.0):\n  Enhance same-LoRA attention (SDXL uses higher value)\n  正偏置强度（SDXL使用较高值7.0）\n• bidirectional: [Flux only, ignored for SDXL]\n  [仅Flux，SDXL交叉注意力本身是单向的]\n• use_positive_bias (bool, true):\n  Add positive bias for matched pairs\n  为匹配对添加正偏置\n• bias_blocks: Which blocks get bias\n  应用偏置的block范围\n  ★ all recommended for SDXL / SDXL推荐all\n  - all: All blocks / 所有block\n  - none: Disable / 禁用\n\n═══════════════════════════════════════\n\n## 6. KSampler (Phase 2)\n• seed: Same as Phase 1 / 与阶段1相同\n• steps: MUST match Phase 1 (30) / 须一致\n• cfg: 7.0 recommended for SDXL / SDXL推荐7.0\n• sampler/scheduler: Match Phase 1 / 与阶段1一致\n• denoise: 1.0 for full generation / 完整生成\n\n═══════════════════════════════════════\n\n## SDXL vs Flux Key Differences / SDXL与Flux主要区别\n• CFG: SDXL uses standard CFG (7.0) / SDXL用标准CFG\n  Flux uses guidance embedding (cfg=1.0)\n• Negative prompt: SDXL supported ✓ / SDXL支持 ✓\n  Flux not supported ✗\n• collect_step: SDXL=10, Flux=5\n• temperature auto: SDXL=300, Flux=4000\n• gravity_weight: SDXL=0.01, Flux=0.00004\n• positive_bias_scale: SDXL=7.0, Flux=1.0\n• bias_blocks: SDXL=all, Flux=double_stream_only\n• Text encoder: SDXL=CLIPTextEncode\n  Flux=CLIPTextEncodeFlux"
+      ],
+      "color": "#224",
+      "bgcolor": "#335"
+    }
+  ],
+  "links": [
+    [
+      1,
+      1,
+      0,
+      4,
+      0,
+      "MODEL"
+    ],
+    [
+      2,
+      1,
+      1,
+      4,
+      1,
+      "CLIP"
+    ],
+    [
+      3,
+      4,
+      0,
+      5,
+      0,
+      "MODEL"
+    ],
+    [
+      4,
+      4,
+      1,
+      5,
+      1,
+      "CLIP"
+    ],
+    [
+      5,
+      4,
+      2,
+      5,
+      2,
+      "FREEFUSE_DATA"
+    ],
+    [
+      6,
+      5,
+      0,
+      12,
+      0,
+      "MODEL"
+    ],
+    [
+      7,
+      5,
+      1,
+      8,
+      0,
+      "CLIP"
+    ],
+    [
+      8,
+      5,
+      1,
+      9,
+      0,
+      "CLIP"
+    ],
+    [
+      9,
+      5,
+      1,
+      11,
+      0,
+      "CLIP"
+    ],
+    [
+      10,
+      5,
+      2,
+      6,
+      0,
+      "FREEFUSE_DATA"
+    ],
+    [
+      11,
+      6,
+      0,
+      8,
+      1,
+      "FREEFUSE_DATA"
+    ],
+    [
+      14,
+      8,
+      0,
+      12,
+      2,
+      "FREEFUSE_DATA"
+    ],
+    [
+      16,
+      9,
+      0,
+      12,
+      1,
+      "CONDITIONING"
+    ],
+    [
+      17,
+      10,
+      0,
+      12,
+      3,
+      "LATENT"
+    ],
+    [
+      18,
+      12,
+      0,
+      14,
+      0,
+      "MODEL"
+    ],
+    [
+      19,
+      12,
+      1,
+      14,
+      1,
+      "FREEFUSE_MASKS"
+    ],
+    [
+      20,
+      12,
+      1,
+      15,
+      0,
+      "FREEFUSE_MASKS"
+    ],
+    [
+      21,
+      12,
+      2,
+      13,
+      0,
+      "IMAGE"
+    ],
+    [
+      22,
+      10,
+      0,
+      14,
+      3,
+      "LATENT"
+    ],
+    [
+      23,
+      14,
+      0,
+      16,
+      0,
+      "MODEL"
+    ],
+    [
+      24,
+      16,
+      0,
+      17,
+      0,
+      "LATENT"
+    ],
+    [
+      26,
+      17,
+      0,
+      18,
+      0,
+      "IMAGE"
+    ],
+    [
+      28,
+      9,
+      0,
+      16,
+      1,
+      "CONDITIONING"
+    ],
+    [
+      30,
+      1,
+      2,
+      17,
+      1,
+      "VAE"
+    ],
+    [
+      35,
+      20,
+      0,
+      8,
+      2,
+      "STRING"
+    ],
+    [
+      36,
+      20,
+      0,
+      9,
+      1,
+      "STRING"
+    ],
+    [
+      38,
+      11,
+      0,
+      12,
+      2,
+      "CONDITIONING"
+    ],
+    [
+      39,
+      11,
+      0,
+      16,
+      2,
+      "CONDITIONING"
+    ],
+    [
+      40,
+      15,
+      0,
+      25,
+      0,
+      "IMAGE"
+    ],
+    [
+      41,
+      15,
+      1,
+      26,
+      0,
+      "IMAGE"
+    ],
+    [
+      50,
+      10,
+      0,
+      16,
+      3,
+      "LATENT"
+    ]
+  ],
+  "groups": [
+    {
+      "id": 1,
+      "title": "1. Load Checkpoint",
+      "bounding": [
+        30,
+        50,
+        380,
+        280
+      ],
+      "color": "#3f789e",
+      "font_size": 24,
+      "flags": {}
+    },
+    {
+      "id": 2,
+      "title": "2. Load LoRAs",
+      "bounding": [
+        430,
+        50,
+        380,
+        480
+      ],
+      "color": "#2E8B57",
+      "font_size": 24,
+      "flags": {}
+    },
+    {
+      "id": 3,
+      "title": "3. Concept Mapping",
+      "bounding": [
+        830,
+        50,
+        420,
+        620
+      ],
+      "color": "#88A825",
+      "font_size": 24,
+      "flags": {}
+    },
+    {
+      "id": 4,
+      "title": "4. Conditioning",
+      "bounding": [
+        1300,
+        50,
+        400,
+        700
+      ],
+      "color": "#DAA520",
+      "font_size": 24,
+      "flags": {}
+    },
+    {
+      "id": 5,
+      "title": "5. Phase 1: Masks",
+      "bounding": [
+        1730,
+        50,
+        520,
+        500
+      ],
+      "color": "#A8442A",
+      "font_size": 24,
+      "flags": {}
+    },
+    {
+      "id": 6,
+      "title": "6. Phase 2: Generate",
+      "bounding": [
+        1730,
+        550,
+        520,
+        850
+      ],
+      "color": "#7B3F9E",
+      "font_size": 24,
+      "flags": {}
+    }
+  ],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 1.174030132313047,
+      "offset": [
+        494.7243956090085,
+        11.80860895394125
+      ]
+    },
+    "info": {
+      "name": "FreeFuse SDXL Complete Workflow",
+      "description": "Two-phase FreeFuse workflow for SDXL model with multi-LoRA composition. Uses CheckpointLoaderSimple for SDXL base (UNet + CLIP + VAE), CLIPTextEncode for standard CFG prompts, and supports negative prompts.",
+      "author": "FreeFuse Team",
+      "version": "3.1",
+      "notes": "SDXL uses standard CFG guidance (7.0 recommended). Supports negative prompts. Requires ~8GB VRAM for 1024x1024. SDXL LoRAs must be trained specifically for SDXL architecture - Flux LoRAs are NOT compatible.",
+      "models": {
+        "checkpoints": [
+          {
+            "name": "sd_xl_base_1.0.safetensors",
+            "url": "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors?download=true"
+          }
+        ],
+        "loras": [
+          {
+            "name": "harry_potter_xl.safetensors",
+            "note": "Custom trained SDXL LoRA for Harry Potter character"
+          },
+          {
+            "name": "daiyu_lin_xl.safetensors",
+            "note": "Custom trained SDXL LoRA for Daiyu Lin character"
+          }
+        ]
+      }
+    },
+    "workflowRendererVersion": "LG",
+    "frontendVersion": "1.37.11"
+  },
+  "version": 0.4
 }
