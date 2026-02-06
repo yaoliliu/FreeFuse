@@ -61,6 +61,8 @@ git clone https://github.com/yaoliliu/FreeFuse.git
 ln -s /path/to/FreeFuse/freefuse_comfyui <your ComfyUI path>/custom_nodes
 ```
 
+You can find workflows for flux.dev and SDXL in the `freefuse_comfyui/workflows` folder. (*^▽^*)
+
 ### Installation with diffusers
 
 You just need clone this repo and use [uv](https://docs.astral.sh/uv/) to install dependencies.
