@@ -519,7 +519,46 @@ class FreeFuseSDXLBiasAttnReplace:
         
         # Cache computed biases for different resolutions
         self._bias_cache: Dict[Tuple[int, int], torch.Tensor] = {}
-        
+
+    def _infer_spatial_size(self, img_len: int) -> Tuple[int, int]:
+        """Infer (img_h, img_w) from flattened img_len using latent_size aspect ratio.
+
+        SDXL UNet preserves aspect ratio through all downsample stages.
+        Each layer is (latent_h // d, latent_w // d) for d in {1, 2, 4, 8, ...}.
+        We try these factors against the known latent_size first, then fall back
+        to a generic aspect-ratio-preserving factorisation.
+        """
+        lat_h, lat_w = self.latent_size
+
+        # Strategy 1: try power-of-2 downscale factors of latent_size
+        for d in (1, 2, 4, 8, 16):
+            h, w = lat_h // d, lat_w // d
+            if h > 0 and w > 0 and h * w == img_len:
+                return (h, w)
+
+        # Strategy 2: aspect-ratio-preserving decomposition
+        if lat_h > 0 and lat_w > 0:
+            ratio = lat_w / lat_h
+            h = max(int(round((img_len / max(ratio, 1e-8)) ** 0.5)), 1)
+            w = img_len // h
+            if h * w == img_len:
+                return (h, w)
+
+        # Strategy 3: try square
+        side = int(round(img_len ** 0.5))
+        if side * side == img_len:
+            return (side, side)
+
+        # Strategy 4: closest-to-square factor search (general fallback)
+        import math as _math
+        best_h, best_w = 1, img_len
+        for h in range(1, int(_math.isqrt(img_len)) + 1):
+            if img_len % h == 0:
+                w = img_len // h
+                if abs(w - h) < abs(best_w - best_h):
+                    best_h, best_w = h, w
+        return (best_h, best_w)
+
     def _get_bias_for_size(
         self,
         img_h: int,
@@ -591,16 +630,8 @@ class FreeFuseSDXLBiasAttnReplace:
                 batch_size, _, img_len, _ = q.shape
                 txt_len = k.shape[2]
             
-            # Infer spatial size from img_len
-            # Common SDXL sizes: 64x64, 32x32, 16x16, 8x8
-            img_h = img_w = int(img_len ** 0.5)
-            if img_h * img_w != img_len:
-                # Not square, try common aspect ratios
-                for h in [64, 32, 16, 8]:
-                    if img_len % h == 0:
-                        img_h = h
-                        img_w = img_len // h
-                        break
+            # Infer spatial size from img_len using latent_size aspect ratio
+            img_h, img_w = self._infer_spatial_size(img_len)
             
             # Get bias for this resolution
             bias = self._get_bias_for_size(img_h, img_w, txt_len, q.device, q.dtype)

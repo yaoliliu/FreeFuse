@@ -424,6 +424,44 @@ for Phase 2 generation with the same seed and steps."""
             preview
         )
     
+    @staticmethod
+    def _infer_spatial_size_from_latent(
+        seq_len: int, lat_h: int, lat_w: int
+    ) -> tuple:
+        """Infer (h, w) from a flattened sequence length using latent aspect ratio.
+
+        Tries power-of-2 downscale factors first, then aspect-ratio-preserving
+        factorisation, then square, and finally a generic closest-to-square search.
+        """
+        # Strategy 1: power-of-2 downscale factors of latent_size
+        for d in (1, 2, 4, 8, 16):
+            h, w = lat_h // d, lat_w // d
+            if h > 0 and w > 0 and h * w == seq_len:
+                return (h, w)
+
+        # Strategy 2: aspect-ratio-preserving decomposition
+        if lat_h > 0 and lat_w > 0:
+            ratio = lat_w / lat_h
+            h = max(int(round((seq_len / max(ratio, 1e-8)) ** 0.5)), 1)
+            w = seq_len // h
+            if h * w == seq_len:
+                return (h, w)
+
+        # Strategy 3: square
+        side = int(round(seq_len ** 0.5))
+        if side * side == seq_len:
+            return (side, side)
+
+        # Strategy 4: closest-to-square factor search
+        import math as _math
+        best_h, best_w = 1, seq_len
+        for h in range(1, int(_math.isqrt(seq_len)) + 1):
+            if seq_len % h == 0:
+                w = seq_len // h
+                if abs(w - h) < abs(best_w - best_h):
+                    best_h, best_w = h, w
+        return (best_h, best_w)
+
     def _process_similarity_maps(self, similarity_maps, latent_size):
         """Convert similarity maps to spatial format."""
         if not similarity_maps:
@@ -446,10 +484,11 @@ for Phase 2 generation with the same seed and steps."""
                 spatial = sim_map[0].view(h, w)
                 result[name] = spatial.detach()
             else:
-                # Need to resize
+                # Need to resize – infer (current_h, current_w) from latent aspect ratio
                 current_len = sim_map.shape[-1]
-                current_h = int((current_len) ** 0.5)
-                current_w = current_len // current_h
+                current_h, current_w = self._infer_spatial_size_from_latent(
+                    current_len, h, w
+                )
                 
                 if current_h * current_w == current_len:
                     spatial = sim_map[0].view(current_h, current_w)
