@@ -57,6 +57,11 @@ This paper proposes **FreeFuse**, a training-free framework for multi-subject te
 ### Installation with ComfyUI
 
 ```shell
+# use comfy-cli
+pip install comfy-cli
+comfy node install freefuse
+
+# or manual installation
 git clone https://github.com/yaoliliu/FreeFuse.git
 ln -s /path/to/FreeFuse/freefuse_comfyui <your ComfyUI path>/custom_nodes
 ```
