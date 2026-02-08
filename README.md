@@ -15,7 +15,7 @@
 - [x] Release basic inference code
 - [x] Release inference code for controlnet, ipadapter and redux
 - [x] Supports ComfyUI
-- [ ] Supports Z-Image-turbo in diffusers
+- [x] Supports Z-Image-turbo in diffusers
 - [ ] Supports Z-Image-turbo in ComfyUI
 
 ## 📖 Abstract
@@ -122,5 +122,15 @@ python controlnet_freefuse_flux_bg_except.py
 ``` shell
 python main_freefuse_sdxl.py
 ```
+
+### Running on Z-Image-turbo
+
+``` shell
+python main_freefuse_z_image.py
+```
+
+# Acknowledgement
+
+Thanks for [Tekemo](https://civarchive.com/users/Tekemo)'s ZIT LoRAs, which are used in our Z-Image-turbo examples.
 
 
