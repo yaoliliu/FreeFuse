@@ -15,6 +15,8 @@
 - [x] Release basic inference code
 - [x] Release inference code for controlnet, ipadapter and redux
 - [x] Supports ComfyUI
+- [ ] Supports Z-Image-turbo in diffusers
+- [ ] Supports Z-Image-turbo in ComfyUI
 
 ## 📖 Abstract
 
