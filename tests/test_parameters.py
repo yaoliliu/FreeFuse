@@ -2,7 +2,7 @@
 """
 FreeFuse Parameter Test Suite
 
-Comprehensive tests for various parameters on both Flux and SDXL models:
+Comprehensive tests for various parameters on Flux, SDXL, and Z-Image-Turbo models:
 1. Different aspect ratios (portrait, landscape, square)
 2. Different collect_block values
 3. Different similarity map parameters (temperature, top_k_ratio)
@@ -13,6 +13,7 @@ Comprehensive tests for various parameters on both Flux and SDXL models:
 Run from repository root:
     python freefuse_comfyui/tests/test_parameters.py --flux
     python freefuse_comfyui/tests/test_parameters.py --sdxl
+    python freefuse_comfyui/tests/test_parameters.py --zimage
     python freefuse_comfyui/tests/test_parameters.py --all
 """
 
@@ -315,6 +316,131 @@ ATTN_BIAS_TESTS = [
     ),
 ]
 
+# ── Z-Image-Turbo specific test configurations ──────────────────────────
+# Parameters aligned with main_freefuse_z_image.py:
+#   - top_k_ratio=0.1, temperature=0 (auto → 4000), bias_scale=3.0
+#   - positive_bias_scale=1.0, collect_block=18
+
+ZIMAGE_ASPECT_RATIO_TESTS = [
+    TestConfig(
+        name="zimg_square_1024",
+        width=1024, height=1024,
+        collect_block=18, temperature=0, top_k_ratio=0.1,
+        disable_lora_phase1=True, bg_scale=0.95,
+        use_morphological_cleaning=False, balance_iterations=15,
+        bias_scale=3.0, positive_bias_scale=1.0,
+        description="Z-Image standard 1:1 square (baseline)"
+    ),
+    TestConfig(
+        name="zimg_portrait_768x1024",
+        width=768, height=1024,
+        collect_block=18, temperature=0, top_k_ratio=0.1,
+        disable_lora_phase1=True, bg_scale=0.95,
+        use_morphological_cleaning=False, balance_iterations=15,
+        bias_scale=3.0, positive_bias_scale=1.0,
+        description="Z-Image portrait 3:4 aspect ratio"
+    ),
+    TestConfig(
+        name="zimg_landscape_1024x768",
+        width=1024, height=768,
+        collect_block=18, temperature=0, top_k_ratio=0.1,
+        disable_lora_phase1=True, bg_scale=0.95,
+        use_morphological_cleaning=False, balance_iterations=15,
+        bias_scale=3.0, positive_bias_scale=1.0,
+        description="Z-Image landscape 4:3 aspect ratio"
+    ),
+]
+
+ZIMAGE_BLOCK_TESTS = [
+    TestConfig(
+        name="zimg_block_5",
+        width=1024, height=1024,
+        collect_block=5, temperature=0, top_k_ratio=0.1,
+        disable_lora_phase1=True, bg_scale=0.95,
+        use_morphological_cleaning=False, balance_iterations=15,
+        bias_scale=3.0, positive_bias_scale=1.0,
+        description="Z-Image early block"
+    ),
+    TestConfig(
+        name="zimg_block_18",
+        width=1024, height=1024,
+        collect_block=18, temperature=0, top_k_ratio=0.1,
+        disable_lora_phase1=True, bg_scale=0.95,
+        use_morphological_cleaning=False, balance_iterations=15,
+        bias_scale=3.0, positive_bias_scale=1.0,
+        description="Z-Image default block (baseline)"
+    ),
+    TestConfig(
+        name="zimg_block_24",
+        width=1024, height=1024,
+        collect_block=24, temperature=0, top_k_ratio=0.1,
+        disable_lora_phase1=True, bg_scale=0.95,
+        use_morphological_cleaning=False, balance_iterations=15,
+        bias_scale=3.0, positive_bias_scale=1.0,
+        description="Z-Image late block"
+    ),
+]
+
+ZIMAGE_SIMMAP_PARAM_TESTS = [
+    TestConfig(
+        name="zimg_temp_100",
+        width=1024, height=1024,
+        collect_block=18, temperature=100.0, top_k_ratio=0.1,
+        disable_lora_phase1=True, bg_scale=0.95,
+        use_morphological_cleaning=False, balance_iterations=15,
+        bias_scale=3.0, positive_bias_scale=1.0,
+        description="Z-Image very low temperature (sharper attention)"
+    ),
+    TestConfig(
+        name="zimg_temp_10000",
+        width=1024, height=1024,
+        collect_block=18, temperature=10000.0, top_k_ratio=0.1,
+        disable_lora_phase1=True, bg_scale=0.95,
+        use_morphological_cleaning=False, balance_iterations=15,
+        bias_scale=3.0, positive_bias_scale=1.0,
+        description="Z-Image very high temperature (smoother attention)"
+    ),
+    TestConfig(
+        name="zimg_topk_0.3",
+        width=1024, height=1024,
+        collect_block=18, temperature=0, top_k_ratio=0.3,
+        disable_lora_phase1=True, bg_scale=0.95,
+        use_morphological_cleaning=False, balance_iterations=15,
+        bias_scale=3.0, positive_bias_scale=1.0,
+        description="Z-Image higher top_k ratio (denser selection)"
+    ),
+]
+
+ZIMAGE_ATTN_BIAS_TESTS = [
+    TestConfig(
+        name="zimg_bias_scale_0",
+        width=1024, height=1024,
+        collect_block=18, temperature=0, top_k_ratio=0.1,
+        disable_lora_phase1=True, bg_scale=0.95,
+        use_morphological_cleaning=False, balance_iterations=15,
+        bias_scale=0.0, positive_bias_scale=0.0,
+        description="Z-Image no attention bias (baseline)"
+    ),
+    TestConfig(
+        name="zimg_bias_scale_3",
+        width=1024, height=1024,
+        collect_block=18, temperature=0, top_k_ratio=0.1,
+        disable_lora_phase1=True, bg_scale=0.95,
+        use_morphological_cleaning=False, balance_iterations=15,
+        bias_scale=3.0, positive_bias_scale=1.0,
+        description="Z-Image default bias (aligned with main script)"
+    ),
+    TestConfig(
+        name="zimg_bias_scale_10",
+        width=1024, height=1024,
+        collect_block=18, temperature=0, top_k_ratio=0.1,
+        disable_lora_phase1=True, bg_scale=0.95,
+        use_morphological_cleaning=False, balance_iterations=15,
+        bias_scale=10.0, positive_bias_scale=1.0,
+        description="Z-Image high negative bias (strong suppression)"
+    ),
+]
+
 
 def load_flux_models():
     """Load Flux model and return components."""
@@ -382,6 +508,59 @@ def load_sdxl_models():
     return model, clip, vae, "sdxl"
 
 
+def load_zimage_models():
+    """Load Z-Image-Turbo model and return components."""
+    print("\n[Loading Z-Image-Turbo Models]")
+    
+    # Find model files
+    unet_name = None
+    for name in folder_paths.get_filename_list("diffusion_models"):
+        if "z_image" in name.lower() or "zimage" in name.lower() or "lumina" in name.lower():
+            unet_name = name
+            break
+    
+    if not unet_name:
+        raise FileNotFoundError("No Z-Image-Turbo model found in diffusion_models")
+    
+    # Find Qwen3 text encoder for Lumina2/Z-Image
+    clip_name = None
+    for name in folder_paths.get_filename_list("text_encoders"):
+        if "qwen" in name.lower():
+            clip_name = name
+            break
+    
+    vae_name = None
+    for name in folder_paths.get_filename_list("vae"):
+        if "ae" in name.lower() or "sdxl" in name.lower():
+            vae_name = name
+            break
+    
+    # Load models
+    from nodes import UNETLoader, CLIPLoader, VAELoader
+    
+    unet_loader = UNETLoader()
+    model, = unet_loader.load_unet(unet_name, "default")
+    print(f"  ✅ UNET loaded: {unet_name}")
+    
+    # Load Qwen3 CLIP using CLIPLoader with lumina2 type
+    clip = None
+    if clip_name:
+        try:
+            clip_loader = CLIPLoader()
+            clip, = clip_loader.load_clip(clip_name, type="lumina2")
+            print(f"  ✅ CLIP loaded: {clip_name} (lumina2 type)")
+        except Exception as e:
+            print(f"  ⚠️ Failed to load Qwen3 CLIP: {e}")
+    else:
+        print(f"  ⚠️ Qwen3 text encoder not found in text_encoders/")
+    
+    vae_loader = VAELoader()
+    vae, = vae_loader.load_vae(vae_name)
+    print(f"  ✅ VAE loaded: {vae_name}")
+    
+    return model, clip, vae, "z_image"
+
+
 def load_loras(model, clip, model_type: str):
     """Load LoRAs in bypass mode."""
     print("\n[Loading LoRAs]")
@@ -390,14 +569,24 @@ def load_loras(model, clip, model_type: str):
     
     lora_list = folder_paths.get_filename_list("loras")
     
-    if model_type == "flux":
-        harry_lora = next((l for l in lora_list if "harry" in l.lower() and "flux" in l.lower()), None)
-        daiyu_lora = next((l for l in lora_list if "daiyu" in l.lower() and "flux" in l.lower()), None)
+    if model_type == "z_image":
+        # Z-Image uses Jinx + Skeletor LoRAs (aligned with main_freefuse_z_image.py)
+        lora_a = next((l for l in lora_list if "jinx" in l.lower() and "zit" in l.lower()), None)
+        lora_b = next((l for l in lora_list if "skeletor" in l.lower() and "zit" in l.lower()), None)
+        adapter_a, adapter_b = "jinx", "skeleton"
+        strength = 0.8  # Matches main_freefuse_z_image.py
+    elif model_type == "flux":
+        lora_a = next((l for l in lora_list if "harry" in l.lower() and "flux" in l.lower()), None)
+        lora_b = next((l for l in lora_list if "daiyu" in l.lower() and "flux" in l.lower()), None)
+        adapter_a, adapter_b = "harry", "daiyu"
+        strength = 1.0
     else:
-        harry_lora = next((l for l in lora_list if "harry" in l.lower() and "xl" in l.lower()), None)
-        daiyu_lora = next((l for l in lora_list if "daiyu" in l.lower() and "xl" in l.lower()), None)
+        lora_a = next((l for l in lora_list if "harry" in l.lower() and "xl" in l.lower()), None)
+        lora_b = next((l for l in lora_list if "daiyu" in l.lower() and "xl" in l.lower()), None)
+        adapter_a, adapter_b = "harry", "daiyu"
+        strength = 1.0
     
-    if not harry_lora or not daiyu_lora:
+    if not lora_a or not lora_b:
         print(f"  Warning: LoRAs not found for {model_type}")
         print(f"  Available: {lora_list}")
         return model, clip, {"adapters": []}
@@ -405,38 +594,69 @@ def load_loras(model, clip, model_type: str):
     loader = FreeFuseLoRALoader()
     
     model, clip, freefuse_data = loader.load_lora(
-        model, clip, harry_lora, "harry", 1.0, 1.0, None
+        model, clip, lora_a, adapter_a, strength, strength, None
     )
-    print(f"  ✅ LoRA loaded: harry ({harry_lora})")
+    print(f"  ✅ LoRA loaded: {adapter_a} ({lora_a}), strength={strength}")
     
     model, clip, freefuse_data = loader.load_lora(
-        model, clip, daiyu_lora, "daiyu", 1.0, 1.0, freefuse_data
+        model, clip, lora_b, adapter_b, strength, strength, freefuse_data
     )
-    print(f"  ✅ LoRA loaded: daiyu ({daiyu_lora})")
+    print(f"  ✅ LoRA loaded: {adapter_b} ({lora_b}), strength={strength}")
     
     return model, clip, freefuse_data
 
 
 def setup_concepts_and_conditioning(clip, freefuse_data, model_type: str):
     """Set up concept map and conditioning."""
-    # prompt = "Realistic photography, an European man wearing Hogwarts uniform hugging an Asian woman wearing Chinese traditional clothing warmly, both faces close together, autumn leaves blurred in the background, high quality, detailed"
-    prompt = "Realistic photography, harry potter, an European photorealistic style teenage wizard boy with messy black hair, round wire-frame glasses, and bright green eyes, wearing a white shirt, burgundy and gold striped tie, and dark robes hugging daiyu_lin, a young East Asian photorealistic style woman in traditional Chinese hanfu dress, elaborate black updo hairstyle adorned with delicate white floral hairpins and ornaments, dangling red tassel earrings, soft pink and red color palette, gentle smile with knowing expression, autumn leaves blurred in the background, high quality, detailed"
-    negative_prompt = "low quality, blurry, deformed, ugly, bad anatomy"
     
-    concept_map = {
-        "harry": "harry potter, an European photorealistic style teenage wizard boy with messy black hair, round wire-frame glasses, and bright green eyes, wearing a white shirt, burgundy and gold striped tie, and dark robes",
-        "daiyu": "daiyu_lin, a young East Asian photorealistic style woman in traditional Chinese hanfu dress, elaborate black updo hairstyle adorned with delicate white floral hairpins and ornaments, dangling red tassel earrings, soft pink and red color palette, gentle smile with knowing expression",
-    }
-    background_text = "autumn leaves blurred in the background"
+    if model_type == "z_image":
+        # Z-Image uses Jinx + Skeletor (aligned with main_freefuse_z_image.py)
+        prompt = ("A picture of two characters, a starry night scene with northern lights in background: "
+                  "The first character is Jinx_Arcane, a young woman with long blue hair in a loose braid "
+                  "and bright blue eyes, wearing a cropped halter top, gloves, striped pants with belts, "
+                  "and visible tattoos and the second character is Skeletor in purple hooded cloak flexing "
+                  "muscular blue arms triumphantly, skull face grinning menacingly, cartoon animation style, "
+                  "Masters of the Universe character, vibrant purple and blue color scheme")
+        negative_prompt = ""
+        
+        concept_map = {
+            "jinx": ("Jinx_Arcane, a young woman with long blue hair in a loose braid and bright blue eyes, "
+                     "wearing a cropped halter top, gloves, striped pants with belts, and visible tattoos"),
+            "skeleton": ("Skeletor in purple hooded cloak flexing muscular blue arms triumphantly, "
+                         "skull face grinning menacingly, cartoon animation style, "
+                         "Masters of the Universe character, vibrant purple and blue color scheme"),
+        }
+        background_text = "a starry night scene with northern lights"
+        adapter_a, adapter_b = "jinx", "skeleton"
+    else:
+        # Flux / SDXL use Harry + Daiyu
+        prompt = ("Realistic photography, harry potter, an European photorealistic style teenage wizard boy "
+                  "with messy black hair, round wire-frame glasses, and bright green eyes, wearing a white shirt, "
+                  "burgundy and gold striped tie, and dark robes hugging daiyu_lin, a young East Asian photorealistic "
+                  "style woman in traditional Chinese hanfu dress, elaborate black updo hairstyle adorned with delicate "
+                  "white floral hairpins and ornaments, dangling red tassel earrings, soft pink and red color palette, "
+                  "gentle smile with knowing expression, autumn leaves blurred in the background, high quality, detailed")
+        negative_prompt = "low quality, blurry, deformed, ugly, bad anatomy"
+        
+        concept_map = {
+            "harry": ("harry potter, an European photorealistic style teenage wizard boy with messy black hair, "
+                      "round wire-frame glasses, and bright green eyes, wearing a white shirt, burgundy and gold "
+                      "striped tie, and dark robes"),
+            "daiyu": ("daiyu_lin, a young East Asian photorealistic style woman in traditional Chinese hanfu dress, "
+                      "elaborate black updo hairstyle adorned with delicate white floral hairpins and ornaments, "
+                      "dangling red tassel earrings, soft pink and red color palette, gentle smile with knowing expression"),
+        }
+        background_text = "autumn leaves blurred in the background"
+        adapter_a, adapter_b = "harry", "daiyu"
     
     from freefuse_comfyui.nodes.concept_map import FreeFuseConceptMap, FreeFuseTokenPositions
     
     concept_mapper = FreeFuseConceptMap()
     freefuse_data, = concept_mapper.create_map(
-        adapter_name_1="harry",
-        concept_text_1=concept_map["harry"],
-        adapter_name_2="daiyu", 
-        concept_text_2=concept_map["daiyu"],
+        adapter_name_1=adapter_a,
+        concept_text_1=concept_map[adapter_a],
+        adapter_name_2=adapter_b, 
+        concept_text_2=concept_map[adapter_b],
         enable_background=True,
         background_text=background_text,
         freefuse_data=freefuse_data,
@@ -457,6 +677,18 @@ def setup_concepts_and_conditioning(clip, freefuse_data, model_type: str):
         encoder = CLIPTextEncodeFlux()
         conditioning, = encoder.encode(clip, prompt, prompt, 3.5)
         neg_conditioning, = encoder.encode(clip, "", "", 3.5)
+    elif model_type == "z_image":
+        # Z-Image uses Lumina2 text encoding
+        # Replicate CLIPTextEncodeLumina2 logic: prepend system prompt, then tokenize
+        system_prompt = ("You are an assistant designed to generate superior images with the superior "
+                         "degree of image-text alignment based on textual prompts or user prompts.")
+        lumina_prompt = f"{system_prompt} <Prompt Start> {prompt}"
+        tokens = clip.tokenize(lumina_prompt)
+        conditioning = clip.encode_from_tokens_scheduled(tokens)
+        
+        neg_lumina_prompt = f"{system_prompt} <Prompt Start> {negative_prompt}" if negative_prompt else f"{system_prompt} <Prompt Start> "
+        neg_tokens = clip.tokenize(neg_lumina_prompt)
+        neg_conditioning = clip.encode_from_tokens_scheduled(neg_tokens)
     else:
         tokens = clip.tokenize(prompt)
         cond, pooled = clip.encode_from_tokens(tokens, return_pooled=True)
@@ -504,7 +736,8 @@ def run_single_test(
     
     try:
         # Create latent
-        if model_type == "flux":
+        # Z-Image and Flux use 16 channels, SDXL uses 4
+        if model_type in ["flux", "z_image"]:
             latent_h, latent_w = config.height // 8, config.width // 8
             latent = torch.zeros([1, 16, latent_h, latent_w], device="cpu")
         else:
@@ -518,6 +751,22 @@ def run_single_test(
         
         start_time = time.time()
         with torch.inference_mode():
+            # Z-Image: 12 steps, cfg=1.0, collect_step=3 (turbo schedule)
+            #   NOTE: diffusers uses guidance_scale=0.0 (skip CFG, cond-only output)
+            #   In ComfyUI, cfg=1.0 triggers cfg1_optimization which skips uncond entirely
+            #   cfg=0.0 would return ONLY uncond_pred (gibberish!)
+            # Flux: 28 steps, cfg=1.0, collect_step=5
+            # SDXL: 30 steps, cfg=7.0, collect_step=10
+            if model_type == "z_image":
+                p1_steps, p1_collect, p1_cfg = 12, 3, 1.0
+                p1_scheduler = "simple"
+            elif model_type == "flux":
+                p1_steps, p1_collect, p1_cfg = 28, 5, 1.0
+                p1_scheduler = "simple"
+            else:
+                p1_steps, p1_collect, p1_cfg = 30, 10, 7.0
+                p1_scheduler = "normal"
+            
             model_phase1, masks_output, preview = sampler.collect_masks(
                 model=model,
                 conditioning=conditioning,
@@ -525,11 +774,11 @@ def run_single_test(
                 latent=latent_dict,
                 freefuse_data=freefuse_data,
                 seed=seed,
-                steps=28 if model_type == "flux" else 30,
-                collect_step=5 if model_type == "flux" else 10,
-                cfg=1.0 if model_type == "flux" else 7.0,
+                steps=p1_steps,
+                collect_step=p1_collect,
+                cfg=p1_cfg,
                 sampler_name="euler",
-                scheduler="simple" if model_type == "flux" else "normal",
+                scheduler=p1_scheduler,
                 collect_block=config.collect_block,
                 temperature=config.temperature,
                 top_k_ratio=config.top_k_ratio,
@@ -574,22 +823,30 @@ def run_single_test(
         # Phase 2 - Generate
         noise = comfy.sample.prepare_noise(latent, seed, None)
         
+        # Use matching parameters for Phase 2
+        if model_type == "z_image":
+            p2_steps, p2_cfg, p2_scheduler = 12, 1.0, "simple"  # cfg=1.0 = no CFG (cond-only)
+        elif model_type == "flux":
+            p2_steps, p2_cfg, p2_scheduler = 28, 1.0, "simple"
+        else:
+            p2_steps, p2_cfg, p2_scheduler = 30, 7.0, "normal"
+        
         start_time = time.time()
         with torch.inference_mode():
             samples = comfy.sample.sample(
                 model_masked,
                 noise,
-                28 if model_type == "flux" else 30,
-                1.0 if model_type == "flux" else 7.0,
+                p2_steps,
+                p2_cfg,
                 "euler",
-                "simple" if model_type == "flux" else "normal",
+                p2_scheduler,
                 conditioning,
                 neg_conditioning,
                 latent,
                 denoise=1.0,
                 disable_noise=False,
                 start_step=0,
-                last_step=28 if model_type == "flux" else 30,
+                last_step=p2_steps,
                 force_full_denoise=True,
                 noise_mask=None,
                 callback=None,
@@ -650,6 +907,8 @@ def run_test_suite(model_type: str, test_categories: List[str] = None):
     # Load models
     if model_type == "flux":
         model, clip, vae, mt = load_flux_models()
+    elif model_type == "z_image":
+        model, clip, vae, mt = load_zimage_models()
     else:
         model, clip, vae, mt = load_sdxl_models()
     
@@ -661,15 +920,26 @@ def run_test_suite(model_type: str, test_categories: List[str] = None):
         clip, freefuse_data, model_type
     )
     
-    # Select test categories
-    all_tests = {
-        "aspect": ASPECT_RATIO_TESTS,
-        "block": BLOCK_TESTS,
-        "simmap": SIMMAP_PARAM_TESTS,
-        "mask": MASK_PARAM_TESTS,
-        "lora": LORA_PHASE1_TESTS,
-        "bias": ATTN_BIAS_TESTS,
-    }
+    # Select test categories - use Z-Image specific configs when model_type is z_image
+    if model_type == "z_image":
+        all_tests = {
+            "aspect": ZIMAGE_ASPECT_RATIO_TESTS,
+            "block": ZIMAGE_BLOCK_TESTS,
+            "simmap": ZIMAGE_SIMMAP_PARAM_TESTS,
+            "bias": ZIMAGE_ATTN_BIAS_TESTS,
+        }
+    else:
+        all_tests = {
+            "aspect": ASPECT_RATIO_TESTS,
+            "block": BLOCK_TESTS,
+            "simmap": SIMMAP_PARAM_TESTS,
+            "mask": MASK_PARAM_TESTS,
+            "lora": LORA_PHASE1_TESTS,
+            "bias": ATTN_BIAS_TESTS,
+        }
+    
+    # Default seed: 77 for Z-Image (matches main_freefuse_z_image.py), 42 otherwise
+    default_seed = 77 if model_type == "z_image" else 42
     
     if test_categories is None:
         test_categories = list(all_tests.keys())
@@ -696,7 +966,7 @@ def run_test_suite(model_type: str, test_categories: List[str] = None):
             result = run_single_test(
                 config, model, clip, vae, freefuse_data,
                 conditioning, neg_conditioning,
-                model_type, output_dir
+                model_type, output_dir, seed=default_seed
             )
             all_results.append(result)
     
@@ -724,6 +994,7 @@ def main():
     parser = argparse.ArgumentParser(description="FreeFuse Parameter Test Suite")
     parser.add_argument("--flux", action="store_true", help="Run Flux tests")
     parser.add_argument("--sdxl", action="store_true", help="Run SDXL tests")
+    parser.add_argument("--zimage", action="store_true", help="Run Z-Image-Turbo tests")
     parser.add_argument("--all", action="store_true", help="Run all tests")
     parser.add_argument("--category", type=str, nargs="+", 
                        choices=["aspect", "block", "simmap", "mask", "lora", "bias"],
@@ -734,7 +1005,7 @@ def main():
     args = parser.parse_args()
     
     # Default to all if nothing specified
-    if not args.flux and not args.sdxl and not args.all:
+    if not args.flux and not args.sdxl and not args.zimage and not args.all:
         args.all = True
     
     categories = args.category
@@ -756,6 +1027,14 @@ def main():
             results["sdxl"] = run_test_suite("sdxl", categories)
         except Exception as e:
             print(f"SDXL tests failed: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    if args.zimage or args.all:
+        try:
+            results["z_image"] = run_test_suite("z_image", categories)
+        except Exception as e:
+            print(f"Z-Image tests failed: {e}")
             import traceback
             traceback.print_exc()
     

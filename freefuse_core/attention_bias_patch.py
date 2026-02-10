@@ -690,6 +690,239 @@ def _compute_standard_attention(
     return out
 
 
+class FreeFuseZImageBiasBlockReplace:
+    """
+    Block replace patch for Z-Image (Lumina2/NextDiT) that applies attention bias.
+    
+    Z-Image uses a unified [img, txt] sequence (image FIRST, then text).
+    We construct bias using the standard construct_attention_bias (which outputs
+    [txt, img] layout) and then permute to [img, txt] layout.
+    """
+    
+    def __init__(
+        self,
+        lora_masks: Dict[str, torch.Tensor],
+        token_pos_maps: Dict[str, List[List[int]]],
+        config: AttentionBiasConfig,
+        block_index: int,
+        block=None,  # Actual JointTransformerBlock reference
+    ):
+        self.lora_masks = lora_masks
+        self.token_pos_maps = token_pos_maps
+        self.config = config
+        self.block_index = block_index
+        self.block = block
+        self._bias_cache = {}
+    
+    def _get_or_build_bias(
+        self,
+        img_len: int,
+        cap_len: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> Optional[torch.Tensor]:
+        """Get cached bias or build new one, permuted to [img, txt] layout."""
+        cache_key = (img_len, cap_len)
+        if cache_key in self._bias_cache:
+            bias = self._bias_cache[cache_key]
+            return bias.to(device=device, dtype=dtype)
+        
+        # Build in [txt, img] layout first
+        bias_txt_img = construct_attention_bias(
+            lora_masks=self.lora_masks,
+            token_pos_maps=self.token_pos_maps,
+            txt_seq_len=cap_len,
+            img_seq_len=img_len,
+            bias_scale=self.config.bias_scale,
+            positive_bias_scale=self.config.positive_bias_scale,
+            bidirectional=self.config.bidirectional,
+            use_positive_bias=self.config.use_positive_bias,
+            device=device,
+            dtype=dtype,
+        )
+        
+        if bias_txt_img is None:
+            self._bias_cache[cache_key] = None
+            return None
+        
+        # Permute from [txt, img] to [img, txt] layout
+        # bias_txt_img shape: (B, txt+img, txt+img)
+        # Create permutation: [txt_indices, img_indices] -> [img_indices, txt_indices]
+        perm = torch.cat([
+            torch.arange(cap_len, cap_len + img_len),  # img indices first
+            torch.arange(cap_len),                      # txt indices second
+        ]).to(device)
+        
+        # Reorder both dimensions
+        bias_img_txt = bias_txt_img[:, perm][:, :, perm]
+        
+        self._bias_cache[cache_key] = bias_img_txt
+        return bias_img_txt
+    
+    def create_block_replace(self) -> Callable:
+        """Create a block replace function for Z-Image JointTransformerBlock."""
+        config = self.config
+        block_index = self.block_index
+        block = self.block
+        bias_builder = self
+        
+        def block_replace(args: Dict, extra_args: Dict) -> Dict:
+            """
+            Replace function for Z-Image JointTransformerBlock with attention bias.
+            """
+            x = args["x"]  # (B, seq_len, dim) = [img + cap]
+            x_mask = args.get("x_mask")
+            freqs_cis = args["freqs_cis"]
+            adaln_input = args.get("adaln_input")
+            transformer_options = args.get("transformer_options", {})
+            
+            original_block = extra_args["original_block"]
+            
+            # Check if we should apply bias to this block
+            block_name = f"layers.{block_index}"
+            if not config.should_apply_to_block(block_name):
+                return original_block(args)
+            
+            if block is None:
+                logging.warning(f"[FreeFuse Z-Image] Block {block_index} is None, falling back")
+                return original_block(args)
+            
+            try:
+                bsz, seqlen, dim = x.shape
+                
+                # Get sequence lengths from transformer_options or infer
+                img_seq_len = transformer_options.get("img_seq_len")
+                cap_seq_len = transformer_options.get("cap_seq_len")
+                
+                if img_seq_len is None or cap_seq_len is None:
+                    # Infer from lora_masks
+                    if bias_builder.lora_masks:
+                        first_mask = next(iter(bias_builder.lora_masks.values()))
+                        if first_mask.dim() == 2:
+                            img_seq_len = first_mask.shape[1]
+                        else:
+                            img_seq_len = first_mask.numel()
+                        cap_seq_len = seqlen - img_seq_len
+                    else:
+                        logging.warning(f"[FreeFuse Z-Image] Cannot infer sequence lengths at block {block_index}")
+                        return original_block(args)
+                
+                if cap_seq_len <= 0:
+                    return original_block(args)
+                
+                # Build attention bias in [img, txt] layout
+                attention_bias = bias_builder._get_or_build_bias(
+                    img_len=img_seq_len,
+                    cap_len=cap_seq_len,
+                    device=x.device,
+                    dtype=x.dtype,
+                )
+                
+                if attention_bias is None:
+                    return original_block(args)
+                
+                # === Execute block with modified attention ===
+                attention = block.attention
+                
+                # Apply modulation
+                if block.modulation and adaln_input is not None:
+                    scale_msa, gate_msa, scale_mlp, gate_mlp = block.adaLN_modulation(adaln_input).chunk(4, dim=1)
+                    x_normed = block.attention_norm1(x)
+                    x_modulated = x_normed * (1 + scale_msa.unsqueeze(1))
+                else:
+                    x_modulated = block.attention_norm1(x)
+                    gate_msa = None
+                    scale_mlp = None
+                    gate_mlp = None
+                
+                # Compute QKV
+                qkv = attention.qkv(x_modulated)
+                num_heads = attention.num_heads
+                head_dim = dim // num_heads
+                qkv = qkv.view(bsz, seqlen, 3, num_heads, head_dim)
+                q, k, v = qkv.unbind(dim=2)  # Each: (B, seq, heads, head_dim)
+                q = q.transpose(1, 2)  # (B, heads, seq, head_dim)
+                k = k.transpose(1, 2)
+                v = v.transpose(1, 2)
+                
+                # Apply RoPE if available
+                if freqs_cis is not None and hasattr(attention, 'apply_rotary_emb'):
+                    q, k = attention.apply_rotary_emb(q, k, freqs_cis)
+                elif freqs_cis is not None:
+                    # Manual RoPE application
+                    q_img = q[:, :, :img_seq_len]
+                    k_img = k[:, :, :img_seq_len]
+                    # Only apply to image portion if freqs_cis is for image
+                    if freqs_cis.shape[0] == img_seq_len:
+                        q_real = q_img.float().reshape(*q_img.shape[:-1], -1, 2)
+                        k_real = k_img.float().reshape(*k_img.shape[:-1], -1, 2)
+                        freqs = freqs_cis.unsqueeze(0).unsqueeze(0)  # (1, 1, seq, dim/2, 2)
+                        q_rot = torch.stack([
+                            q_real[..., 0] * freqs[..., 0] - q_real[..., 1] * freqs[..., 1],
+                            q_real[..., 0] * freqs[..., 1] + q_real[..., 1] * freqs[..., 0],
+                        ], dim=-1).reshape(q_img.shape).to(q.dtype)
+                        k_rot = torch.stack([
+                            k_real[..., 0] * freqs[..., 0] - k_real[..., 1] * freqs[..., 1],
+                            k_real[..., 0] * freqs[..., 1] + k_real[..., 1] * freqs[..., 0],
+                        ], dim=-1).reshape(k_img.shape).to(k.dtype)
+                        q = torch.cat([q_rot, q[:, :, img_seq_len:]], dim=2)
+                        k = torch.cat([k_rot, k[:, :, img_seq_len:]], dim=2)
+                
+                # Compute attention with bias
+                scale = head_dim ** -0.5
+                attn_weights = torch.einsum('bhid,bhjd->bhij', q, k) * scale
+                
+                # Apply attention bias
+                bias_for_attn = attention_bias.to(device=attn_weights.device, dtype=attn_weights.dtype)
+                if bias_for_attn.dim() == 3:
+                    bias_for_attn = bias_for_attn.unsqueeze(1)  # (B, 1, seq, seq)
+                
+                attn_weights = attn_weights + bias_for_attn
+                
+                # Apply attention mask
+                if x_mask is not None:
+                    if x_mask.dim() == 2:
+                        x_mask_expanded = x_mask.unsqueeze(1).unsqueeze(2)  # (B, 1, 1, seq)
+                        attn_weights = attn_weights.masked_fill(~x_mask_expanded.bool(), float('-inf'))
+                
+                attn_weights = F.softmax(attn_weights, dim=-1)
+                attn_output = torch.einsum('bhij,bhjd->bhid', attn_weights, v)
+                
+                # Reshape
+                attn_output = attn_output.transpose(1, 2).reshape(bsz, seqlen, dim)
+                
+                # Output projection
+                attn_output = attention.out_proj(attn_output)
+                
+                # Apply gate and residual
+                if gate_msa is not None:
+                    x = x + gate_msa.unsqueeze(1) * attn_output
+                else:
+                    x = x + attn_output
+                
+                # FFN
+                if hasattr(block, 'feed_forward'):
+                    if scale_mlp is not None:
+                        ff_input = block.ffn_norm1(x) * (1 + scale_mlp.unsqueeze(1))
+                    else:
+                        ff_input = block.ffn_norm1(x)
+                    ff_output = block.feed_forward(ff_input)
+                    if gate_mlp is not None:
+                        x = x + gate_mlp.unsqueeze(1) * ff_output
+                    else:
+                        x = x + ff_output
+                
+                return {"x": x}
+                
+            except Exception as e:
+                logging.warning(f"[FreeFuse Z-Image] Failed to apply attention bias at block {block_index}: {e}")
+                import traceback
+                traceback.print_exc()
+                return original_block(args)
+        
+        return block_replace
+
+
 def apply_attention_bias_patches(
     model_patcher,
     attention_bias: torch.Tensor,
@@ -719,6 +952,11 @@ def apply_attention_bias_patches(
     
     if model_type == "flux":
         _apply_flux_bias_patches(model_patcher, lora_masks, token_pos_maps, config)
+    elif model_type == "z_image":
+        if lora_masks is None or token_pos_maps is None:
+            logging.warning("[FreeFuse] Z-Image attention bias requires lora_masks and token_pos_maps")
+            return
+        _apply_z_image_bias_patches(model_patcher, lora_masks, token_pos_maps, config)
     elif model_type == "sdxl":
         if lora_masks is None or token_pos_maps is None or latent_size is None:
             logging.warning("[FreeFuse] SDXL attention bias requires lora_masks, token_pos_maps, and latent_size")
@@ -843,3 +1081,49 @@ def _apply_sdxl_bias_patches(
             patches_applied += 1
     
     logging.info(f"[FreeFuse] Applied attention bias to {patches_applied} SDXL cross-attention blocks")
+
+
+def _apply_z_image_bias_patches(
+    model_patcher,
+    lora_masks: Dict[str, torch.Tensor],
+    token_pos_maps: Dict[str, List[List[int]]],
+    config: AttentionBiasConfig,
+):
+    """Apply attention bias patches for Z-Image (Lumina2/NextDiT) model."""
+    if not lora_masks:
+        logging.warning("[FreeFuse] No LoRA masks provided for Z-Image attention bias")
+        return
+    
+    if not token_pos_maps:
+        logging.warning("[FreeFuse] No token position maps provided for Z-Image attention bias")
+        return
+    
+    try:
+        diffusion_model = model_patcher.model.diffusion_model
+        num_layers = len(diffusion_model.layers)
+    except AttributeError:
+        logging.warning("[FreeFuse] Could not access Z-Image model structure")
+        return
+    
+    patches_applied = 0
+    
+    for i in range(num_layers):
+        block_name = f"layers.{i}"
+        if config.should_apply_to_block(block_name):
+            block = diffusion_model.layers[i]
+            replacer = FreeFuseZImageBiasBlockReplace(
+                lora_masks=lora_masks,
+                token_pos_maps=token_pos_maps,
+                config=config,
+                block_index=i,
+                block=block,
+            )
+            model_patcher.set_model_patch_replace(
+                replacer.create_block_replace(),
+                "dit",
+                "layer",
+                i,
+            )
+            patches_applied += 1
+    
+    logging.info(f"[FreeFuse] Applied attention bias to {patches_applied} Z-Image transformer layers")

@@ -57,15 +57,19 @@ def is_meaningless_token(token_text: str, check_single_char: bool = True) -> boo
 
 def detect_model_type(clip) -> str:
     """
-    Detect whether the CLIP model is for Flux (T5) or SDXL.
+    Detect whether the CLIP model is for Flux (T5), SDXL, or Z-Image (Qwen3).
     
     Args:
         clip: ComfyUI CLIP object
         
     Returns:
-        'flux' or 'sdxl' or 'unknown'
+        'flux', 'sdxl', 'z_image', or 'unknown'
     """
     tokenizer = clip.tokenizer
+    
+    # Check for Z-Image (Qwen3) tokenizer
+    if hasattr(tokenizer, 'qwen3_4b'):
+        return 'z_image'
     
     # Check for Flux tokenizer (has t5xxl attribute)
     if hasattr(tokenizer, 't5xxl'):
@@ -88,7 +92,7 @@ def get_tokenizer_for_model(clip, model_type: str = None):
     
     Args:
         clip: ComfyUI CLIP object
-        model_type: Optional override ('flux', 'sdxl', 'sd1')
+        model_type: Optional override ('flux', 'sdxl', 'sd1', 'z_image')
         
     Returns:
         The underlying tokenizer object
@@ -98,7 +102,10 @@ def get_tokenizer_for_model(clip, model_type: str = None):
     
     tokenizer = clip.tokenizer
     
-    if model_type == 'flux':
+    if model_type == 'z_image':
+        # Z-Image uses Qwen3 tokenizer
+        return tokenizer.qwen3_4b.tokenizer
+    elif model_type == 'flux':
         # Flux uses T5 tokenizer for the main text encoding
         return tokenizer.t5xxl.tokenizer
     elif model_type == 'sdxl':
@@ -391,6 +398,150 @@ def find_concept_positions_clip(
     return concept_pos_map
 
 
+def find_concept_positions_qwen3(
+    clip,
+    tokenizer,
+    prompts: Union[str, List[str]],
+    concepts: Dict[str, str],
+    filter_meaningless: bool = True,
+    filter_single_char: bool = True,
+) -> Dict[str, List[List[int]]]:
+    """
+    Find token positions for Z-Image (Qwen3) models.
+    
+    Z-Image uses Qwen3 tokenizer with chat template wrapping. This function:
+    1. Applies the chat template to the prompt (matching ComfyUI's actual processing)
+    2. Tokenizes the wrapped text
+    3. Builds a concat_text by decoding each token and tracks positions
+    4. Finds concept text in concat_text and maps back to token positions
+    
+    The key insight is that ComfyUI's Z-Image tokenizer uses llama_template:
+    "<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+    
+    Args:
+        clip: ComfyUI CLIP object
+        tokenizer: Qwen3 tokenizer instance
+        prompts: Single prompt or list of prompts
+        concepts: Dict mapping concept name to concept text
+        filter_meaningless: Whether to filter stopwords/punctuation
+        filter_single_char: Whether to filter single-char tokens
+        
+    Returns:
+        Dict mapping concept name to list of position lists (one per prompt)
+    """
+    if isinstance(prompts, str):
+        prompts = [prompts]
+    
+    # Build prompt data with template wrapping (matching ZImageTokenizer behavior)
+    prompt_data_list = []
+    for prompt in prompts:
+        # Apply Z-Image's llama template (from comfy/text_encoders/z_image.py)
+        # Template: "<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+        llama_template = "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
+        wrapped_text = llama_template.format(prompt)
+        
+        # Tokenize using the ComfyUI clip's tokenize method
+        # This gives us the actual token sequence used during generation
+        try:
+            token_weight_pairs = clip.tokenize(prompt)
+            # For Z-Image, the tokens are directly in qwen3_4b key
+            if 'qwen3_4b' in token_weight_pairs:
+                chunks = token_weight_pairs['qwen3_4b']
+            else:
+                chunks = token_weight_pairs
+            
+            # Flatten chunks to get token IDs
+            token_ids = []
+            for chunk in chunks:
+                for item in chunk:
+                    if isinstance(item, (tuple, list)):
+                        token_ids.append(int(item[0]))
+                    else:
+                        token_ids.append(int(item))
+        except Exception as e:
+            # Fallback: tokenize directly
+            print(f"[FreeFuse] Warning: clip.tokenize failed, using direct tokenization: {e}")
+            encoded = tokenizer(wrapped_text, add_special_tokens=True)
+            token_ids = encoded['input_ids'] if hasattr(encoded, 'keys') else encoded.input_ids
+            if hasattr(token_ids, 'tolist'):
+                token_ids = token_ids.tolist()
+        
+        # Decode each token individually to build char offsets
+        token_texts = [tokenizer.decode([tid]) for tid in token_ids]
+        
+        # Filter out padding tokens (0 or eos_token_id at end)
+        # For Z-Image, we usually don't have padding but keep all non-zero tokens
+        active_indices = list(range(len(token_ids)))
+        active_token_texts = token_texts
+        
+        # Reconstruct the concatenated decoded string and track spans
+        concat_text = ""
+        token_spans = []  # (start_in_concat, end_in_concat) per token
+        for tt in active_token_texts:
+            start = len(concat_text)
+            concat_text += tt
+            token_spans.append((start, len(concat_text)))
+        
+        prompt_data_list.append({
+            "raw": prompt,
+            "wrapped": wrapped_text,
+            "active_indices": active_indices,
+            "active_token_texts": active_token_texts,
+            "concat_text": concat_text,
+            "token_spans": token_spans,
+        })
+    
+    # Find positions for each concept
+    concept_pos_map = {}
+    for concept_name, concept_text in concepts.items():
+        concept_pos_map[concept_name] = []
+        
+        for pd in prompt_data_list:
+            positions = []
+            positions_with_text = []
+            
+            # Find concept_text inside concat_text (case-sensitive)
+            search_start = 0
+            while True:
+                idx = pd["concat_text"].find(concept_text, search_start)
+                if idx == -1:
+                    break
+                c_start, c_end = idx, idx + len(concept_text)
+                
+                for tok_i, (ts, te) in enumerate(pd["token_spans"]):
+                    if te > c_start and ts < c_end and tok_i not in positions:
+                        positions.append(tok_i)
+                        positions_with_text.append(
+                            (tok_i, pd["active_token_texts"][tok_i])
+                        )
+                search_start = idx + 1
+            
+            # Filter meaningless tokens
+            if filter_meaningless and positions_with_text:
+                filtered_positions = [
+                    pos for pos, text in positions_with_text
+                    if not is_meaningless_token(text, check_single_char=filter_single_char)
+                ]
+                
+                # Fallback if all filtered
+                if not filtered_positions:
+                    non_punct = [
+                        pos for pos, text in positions_with_text
+                        if clean_token_text(text) not in PUNCTUATION
+                    ]
+                    if non_punct:
+                        filtered_positions = non_punct[:1]
+                    elif positions_with_text:
+                        filtered_positions = [positions_with_text[0][0]]
+                
+                positions = filtered_positions
+            
+            positions.sort()
+            concept_pos_map[concept_name].append(positions)
+    
+    return concept_pos_map
+
+
 def find_concept_positions(
     clip,
     prompts: Union[str, List[str]],
@@ -432,7 +583,13 @@ def find_concept_positions(
     
     tokenizer = get_tokenizer_for_model(clip, model_type)
     
-    if model_type == 'flux':
+    if model_type == 'z_image':
+        return find_concept_positions_qwen3(
+            clip, tokenizer, prompts, concepts,
+            filter_meaningless=filter_meaningless,
+            filter_single_char=filter_single_char
+        )
+    elif model_type == 'flux':
         return find_concept_positions_t5(
             tokenizer, prompts, concepts,
             filter_meaningless=filter_meaningless,
@@ -445,7 +602,7 @@ def find_concept_positions(
             filter_single_char=filter_single_char
         )
     else:
-        raise ValueError(f"Unsupported model type: {model_type}. Use 'flux', 'sdxl', or 'sd1'.")
+        raise ValueError(f"Unsupported model type: {model_type}. Use 'flux', 'sdxl', 'z_image', or 'sd1'.")
 
 
 def find_eos_position_t5(

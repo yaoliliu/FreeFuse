@@ -20,9 +20,11 @@ from .attention_replace import (
     FreeFuseFluxBlockReplace,
     FreeFuseFluxAttentionReplace,
     FreeFuseSDXLAttnReplace,
+    FreeFuseZImageBlockReplace,
     apply_freefuse_replace_patches,
     compute_flux_similarity_maps_from_outputs,
     compute_flux_similarity_maps_with_qkv,
+    compute_z_image_similarity_maps,
 )
 
 from .mask_utils import (
@@ -35,6 +37,7 @@ from .token_utils import (
     find_concept_positions,
     find_concept_positions_t5,
     find_concept_positions_clip,
+    find_concept_positions_qwen3,
     find_background_positions,
     find_eos_position_t5,
     detect_model_type,
@@ -94,9 +97,11 @@ __all__ = [
     "FreeFuseFluxBlockReplace",
     "FreeFuseFluxAttentionReplace",
     "FreeFuseSDXLAttnReplace",
+    "FreeFuseZImageBlockReplace",
     "apply_freefuse_replace_patches",
     "compute_flux_similarity_maps_from_outputs",
     "compute_flux_similarity_maps_with_qkv",
+    "compute_z_image_similarity_maps",
     # Masks
     "generate_masks",
     "balanced_argmax",
@@ -105,6 +110,7 @@ __all__ = [
     "find_concept_positions",
     "find_concept_positions_t5",
     "find_concept_positions_clip",
+    "find_concept_positions_qwen3",
     "find_background_positions",
     "find_eos_position_t5",
     "detect_model_type",
