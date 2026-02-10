@@ -329,3 +329,28 @@ class FreeFuseLinear(nn.Module, LoraLayer):
     def __repr__(self) -> str:
         rep = super().__repr__()
         return "lora." + rep
+
+
+def convert_peft_lora_to_freefuse_lora(model: nn.Module, lora_names: list = None) -> None:
+    """
+    Convert PEFT LoRA layers to FreeFuseLinear layers in-place.
+    
+    This function traverses the model and upgrades any LoraLayer instances
+    to FreeFuseLinear, enabling spatial masking for FreeFuse.
+    
+    Args:
+        model: The model containing LoRA layers
+        lora_names: Optional list of LoRA adapter names to convert.
+                   If None, converts all LoRA layers.
+    """
+    from peft.tuners.lora.layer import LoraLayer, Linear as LoraLinear
+    
+    modules_to_convert = []
+    
+    for name, module in model.named_modules():
+        if isinstance(module, LoraLayer) and not isinstance(module, FreeFuseLinear):
+            modules_to_convert.append((name, module))
+    
+    for name, module in modules_to_convert:
+        FreeFuseLinear.init_from_lora_linear(module)
+

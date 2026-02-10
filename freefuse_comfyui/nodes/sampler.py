@@ -16,8 +16,10 @@ from ..freefuse_core.attention_replace import (
     FreeFuseState,
     FreeFuseFluxBlockReplace,
     FreeFuseSDXLAttnReplace,
+    FreeFuseZImageBlockReplace,
     apply_freefuse_replace_patches,
     compute_flux_similarity_maps_from_outputs,
+    compute_z_image_similarity_maps,
 )
 from ..freefuse_core.mask_utils import generate_masks
 
@@ -239,15 +241,22 @@ for Phase 2 generation with the same seed and steps."""
         # Detect model type first (needed for default temperature and block routing)
         model_type = "auto"
         model_name = model_clone.model.__class__.__name__.lower()
-        if "flux" in model_name:
+        if "nextdit" in model_name or "lumina" in model_name:
+            model_type = "z_image"
+        elif "flux" in model_name:
             model_type = "flux"
         else:
             model_type = "sdxl"
         
         # Use user-provided parameters, with auto-detection for temperature=0
-        # Default temperature differs by model type: Flux=4000, SDXL=300
+        # Default temperature differs by model type: Flux=4000, SDXL=300, Z-Image=4000
         if temperature == 0.0:
-            auto_temperature = 4000.0 if model_type == "flux" else 300.0
+            if model_type == "z_image":
+                auto_temperature = 4000.0
+            elif model_type == "flux":
+                auto_temperature = 4000.0
+            else:
+                auto_temperature = 300.0
         else:
             auto_temperature = temperature
         
@@ -285,6 +294,21 @@ for Phase 2 generation with the same seed and steps."""
         # Calculate image dimensions
         latent_h, latent_w = latent_image.shape[2], latent_image.shape[3]
         img_h, img_w = latent_h * 8, latent_w * 8
+        
+        # For Z-Image: store sequence lengths in state so block_replace can access them
+        if model_type == "z_image":
+            z_img_seq_len = latent_h * latent_w
+            # Estimate cap_seq_len from token positions map
+            z_cap_seq_len = 256  # Default
+            for positions_list in token_pos_maps.values():
+                if positions_list and positions_list[0]:
+                    max_pos = max(positions_list[0])
+                    z_cap_seq_len = max(z_cap_seq_len, max_pos + 10)
+            freefuse_state.collected_outputs["img_seq_len"] = z_img_seq_len
+            freefuse_state.collected_outputs["cap_seq_len"] = z_cap_seq_len
+            freefuse_state.collected_outputs["latent_h"] = latent_h
+            freefuse_state.collected_outputs["latent_w"] = latent_w
+            print(f"[FreeFuse] Z-Image sequence info: img_seq_len={z_img_seq_len}, cap_seq_len={z_cap_seq_len}")
         
         block_info = f"double_block {collect_block}" if model_type == "flux" else f"{collect_region} tf={collect_tf_index}"
         print(f"[FreeFuse] Phase 1: {steps} total steps, collecting at step {collect_step}, {block_info}")

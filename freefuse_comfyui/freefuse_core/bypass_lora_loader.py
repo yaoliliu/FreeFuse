@@ -262,6 +262,11 @@ class MultiAdapterBypassForwardHook:
         - attn2: to_k, to_v -> NO (process text tokens, not image features)
         - ff.net: YES
         
+        For Z-Image (Lumina2/NextDiT):
+        - layers.N.attention.qkv, out_proj -> YES (img_with_text, unified [img, txt] sequence)
+        - layers.N.feed_forward -> YES (img_with_text)
+        - layers.N.adaLN_modulation -> NO (global, not per-token)
+        
         Returns:
             True if spatial mask should be applied, False otherwise
         """
@@ -285,10 +290,17 @@ class MultiAdapterBypassForwardHook:
         if not is_sdxl and 'transformer_blocks' in key and 'attentions' not in key:
             is_flux = True
         
+        # Z-Image: has 'layers.N' pattern without SDXL or Flux markers
+        is_z_image = (not is_sdxl and not is_flux and 
+                      'layers.' in key and 
+                      ('attention' in key or 'feed_forward' in key))
+        
         if is_sdxl:
             result, mask_type = self._check_sdxl_layer(key)
         elif is_flux:
             result, mask_type = self._check_flux_layer(key)
+        elif is_z_image:
+            result, mask_type = self._check_z_image_layer(key)
         else:
             # Unknown model, apply mask by default
             result, mask_type = True, 'img_with_text'
@@ -376,6 +388,33 @@ class MultiAdapterBypassForwardHook:
         # Default: don't apply mask to unknown SDXL layers
         return False, None
     
+    def _check_z_image_layer(self, key: str) -> Tuple[bool, Optional[str]]:
+        """
+        Check if a Z-Image (Lumina2/NextDiT) layer should have spatial mask applied.
+        
+        Z-Image uses a unified [img, txt] sequence (image FIRST, then text).
+        All transformer layers process this unified sequence.
+        
+        Returns:
+            Tuple of (should_apply, mask_type)
+        """
+        # adaLN_modulation is global conditioning, not per-token
+        if 'adaln_modulation' in key or 'adaln' in key:
+            return False, None
+        
+        # Attention layers (qkv, out_proj) process the full unified sequence
+        if 'attention' in key:
+            if any(s in key for s in ['qkv', 'to_q', 'to_k', 'to_v', 'out_proj', 'proj']):
+                return True, 'z_image_unified'
+            return True, 'z_image_unified'
+        
+        # Feed-forward layers process the full unified sequence
+        if 'feed_forward' in key or 'ff' in key:
+            return True, 'z_image_unified'
+        
+        # Default for unknown Z-Image layers: apply
+        return True, 'z_image_unified'
+    
     def _get_mask_type(self) -> Optional[str]:
         """Get the mask type for this layer (after _should_apply_spatial_mask has been called)."""
         if self._mask_type_cached is None:
@@ -395,6 +434,10 @@ class MultiAdapterBypassForwardHook:
         Behavior depends on mask_type (determined by _should_apply_spatial_mask):
         - 'img_with_text': For Flux single stream blocks where txt+img are concatenated.
                           Returns mask with txt portion = 1.0 and img portion = spatial mask.
+                          Layout: [txt_tokens, img_tokens]
+        - 'z_image_unified': For Z-Image unified sequence where img comes FIRST.
+                            Returns mask with img portion = spatial mask and txt portion = 1.0.
+                            Layout: [img_tokens, txt_tokens]
         - 'img_only': For Flux double stream (img path) and SDXL layers.
                       Returns mask for image sequence only (no text portion).
         
@@ -423,6 +466,19 @@ class MultiAdapterBypassForwardHook:
             if img_len <= 0:
                 # This might be a txt-only layer, don't apply mask
                 return None
+        elif mask_type == 'z_image_unified':
+            # Z-Image unified: seq_len = img_len + cap_len
+            # img comes first, text second
+            # Infer img_len from mask shape
+            if mask.dim() == 2:
+                img_len = mask.shape[0] * mask.shape[1]
+            else:
+                img_len = mask.numel()
+            cap_len = seq_len - img_len
+            if cap_len < 0:
+                # Mask is larger than sequence, fallback: entire sequence is image
+                img_len = seq_len
+                cap_len = 0
         else:
             # img_only or SDXL: seq_len = img_len (no text in sequence)
             img_len = seq_len
@@ -487,9 +543,14 @@ class MultiAdapterBypassForwardHook:
                 mask_flat = mask.view(-1)
         
         # Build final mask based on mask_type
-        if mask_type == 'img_with_text':
-            # Flux single stream: create full mask with txt part = 1.0 and img part = spatial mask
-            # txt tokens come first, then img tokens
+        if mask_type == 'z_image_unified':
+            # Z-Image unified: img tokens come FIRST, then text tokens
+            # Layout: [img_tokens(spatial mask), txt_tokens(1.0)]
+            full_mask = torch.ones(seq_len, device=device, dtype=dtype)
+            full_mask[:img_len] = mask_flat[:img_len].to(device=device, dtype=dtype)
+        elif mask_type == 'img_with_text':
+            # Flux single stream: txt tokens come first, then img tokens
+            # Layout: [txt_tokens(1.0), img_tokens(spatial mask)]
             full_mask = torch.ones(seq_len, device=device, dtype=dtype)
             full_mask[self.txt_len:self.txt_len + img_len] = mask_flat.to(device=device, dtype=dtype)
         else:

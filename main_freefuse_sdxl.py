@@ -18,7 +18,7 @@ to enable communication between attn1 (self-attention) and attn2 (cross-attentio
 import os
 # Set GPU
 import torch
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 
 from diffusers import StableDiffusionXLPipeline, EulerDiscreteScheduler, EulerAncestralDiscreteScheduler, AutoencoderKL
@@ -141,6 +141,9 @@ def main():
     # Best block discovered from experiments
     cal_sim_blocks = ['up_blocks.0.attentions.0.transformer_blocks.3.attn2']
     
+    # Compare option: generate baseline image (no FreeFuse) for comparison
+    compare = True
+    
     
     # ========== Load Pipeline ==========
     print("Loading base model...")
@@ -225,13 +228,42 @@ def main():
         print(f"  {adapter_name}: positions {positions[0]}")
     
     # ========== Generate Image ==========
-    print(f"\nGenerating image with FreeFuse ({processor_type} method)...")
-    
-        
     # Output
     output_dir = f"./"
     os.makedirs(output_dir, exist_ok=True)
 
+    image_no_freefuse = None
+    if compare:
+        print("\nGenerating without FreeFuse for comparison...")
+        
+        generator = torch.Generator("cuda").manual_seed(seed)
+        
+        # Reset cross_attention_kwargs for baseline
+        cross_attention_kwargs_baseline = {}
+        if requires_cache:
+            cross_attention_kwargs_baseline["_self_attn_cache"] = {}
+        
+        image_no_freefuse = pipe(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            height=height,
+            width=width,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            generator=generator,
+            freefuse_concepts=concepts,
+            freefuse_token_pos_maps=freefuse_token_pos_maps,
+            num_mask_collect_steps=num_mask_collect_steps,
+            use_freefuse=False,  # Disable FreeFuse
+            cross_attention_kwargs=cross_attention_kwargs_baseline,
+        ).images[0]
+        
+        output_path_no_ff = os.path.join(output_dir, "result_no_freefuse_sdxl.png")
+        image_no_freefuse.save(output_path_no_ff)
+        print(f"Saved comparison to: {output_path_no_ff}")
+
+    print(f"\nGenerating image with FreeFuse ({processor_type} method)...")
+    
     generator = torch.Generator("cuda").manual_seed(seed)
     
     # Prepare cross_attention_kwargs
@@ -264,24 +296,34 @@ def main():
     print(f"\nSaved result to: {output_path}")
     
     # ========== Generate without FreeFuse for comparison ==========
-    # print("\nGenerating without FreeFuse for comparison...")
-    
-    # generator = torch.Generator("cuda").manual_seed(seed)
-    
-    # image_no_freefuse = pipe(
-    #     prompt=prompt,
-    #     negative_prompt=negative_prompt,
-    #     height=height,
-    #     width=width,
-    #     num_inference_steps=num_inference_steps,
-    #     guidance_scale=guidance_scale,
-    #     generator=generator,
-    #     use_freefuse=False,  # Disable FreeFuse
-    # ).images[0]
-    
-    # output_path_no_ff = os.path.join(output_dir, "result_no_freefuse_sdxl.png")
-    # image_no_freefuse.save(output_path_no_ff)
-    # print(f"Saved comparison to: {output_path_no_ff}")
+    if compare and image_no_freefuse is not None:
+        # Create comparison composite image
+        def create_comparison_image(before_image, after_image, 
+                                    before_label="Before (No FreeFuse)", 
+                                    after_label="After (FreeFuse)"):
+            """创建水平拼接的对比图像，带有标签"""
+            w, h = before_image.size
+            label_height = 40
+            composite = Image.new('RGB', (w * 2, h + label_height), color='white')
+            
+            composite.paste(before_image, (0, label_height))
+            composite.paste(after_image, (w, label_height))
+            
+            draw = ImageDraw.Draw(composite)
+            try:
+                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 24)
+            except:
+                font = ImageFont.load_default()
+            
+            draw.text((w // 2, 10), before_label, fill='black', font=font, anchor='mt')
+            draw.text((w + w // 2, 10), after_label, fill='black', font=font, anchor='mt')
+            
+            return composite
+        
+        composite = create_comparison_image(image_no_freefuse, image)
+        composite_path = os.path.join(output_dir, "freefuse_sdxl_compare.png")
+        composite.save(composite_path)
+        print(f"Saved comparison composite to: {composite_path}")
     
     print("\nDone!")
 

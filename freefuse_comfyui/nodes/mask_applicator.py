@@ -198,18 +198,25 @@ When enabled, constructs soft attention bias to guide cross-attention:
         return (model_clone,)
     
     def _detect_model_type(self, model_patcher) -> str:
-        """Detect whether model is Flux or SDXL."""
+        """Detect whether model is Flux, SDXL, or Z-Image (Lumina2/NextDiT)."""
         model = model_patcher.model
         model_class_name = model.__class__.__name__.lower()
+        
+        # Z-Image / Lumina2 / NextDiT detection
+        if "nextdit" in model_class_name or "lumina" in model_class_name:
+            return "z_image"
         
         if "flux" in model_class_name:
             return "flux"
         
-        # Check for Flux model structure
+        # Check for specific model structure
         if hasattr(model, 'diffusion_model'):
             dm = model.diffusion_model
             if hasattr(dm, 'double_blocks') and hasattr(dm, 'single_blocks'):
                 return "flux"
+            # Z-Image has 'layers' but NOT 'double_blocks'
+            if hasattr(dm, 'layers') and not hasattr(dm, 'double_blocks'):
+                return "z_image"
         
         return "sdxl"
     
@@ -280,6 +287,40 @@ When enabled, constructs soft attention bias to guide cross-attention:
             print(f"[FreeFuse] Applied attention bias for Flux "
                   f"(bias_scale={bias_scale}, positive_scale={positive_bias_scale}, "
                   f"bidirectional={bidirectional}, blocks={bias_blocks})")
+        
+        elif model_type == "z_image":
+            # Z-Image uses unified [img, txt] sequence (image FIRST)
+            img_seq_len = latent_h * latent_w
+            
+            # Estimate cap_seq_len from token_pos_maps
+            cap_seq_len = 256  # Default for Qwen3 tokenizer
+            for positions_list in token_pos_maps.values():
+                if positions_list and positions_list[0]:
+                    max_pos = max(positions_list[0])
+                    cap_seq_len = max(cap_seq_len, max_pos + 10)
+            
+            # Flatten masks to (B, img_seq_len)
+            lora_masks_flat = {}
+            for name, mask in mask_dict.items():
+                if name.startswith("_"):
+                    continue
+                if mask.dim() == 3:
+                    mask = mask[0]
+                mask_flat = mask.reshape(-1)
+                lora_masks_flat[name] = mask_flat.unsqueeze(0)  # Add batch dim
+            
+            apply_attention_bias_patches(
+                model_patcher=model_patcher,
+                attention_bias=None,
+                config=config,
+                txt_seq_len=cap_seq_len,
+                model_type="z_image",
+                lora_masks=lora_masks_flat,
+                token_pos_maps=token_pos_maps,
+            )
+            print(f"[FreeFuse] Applied attention bias for Z-Image "
+                  f"(bias_scale={bias_scale}, positive_scale={positive_bias_scale}, "
+                  f"bidirectional={bidirectional}, img_seq={img_seq_len}, cap_seq={cap_seq_len})")
         
         else:  # SDXL
             # For SDXL, use the direct SDXL bias patches

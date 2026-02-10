@@ -30,3 +30,6 @@ members = [
     "eval",
     "eval/other_methods/LoRAShop",
 ]
+
+[tool.uv.sources]
+diffusers = { git = "https://github.com/huggingface/diffusers.git", rev = "main" }

@@ -11,6 +11,7 @@ This script demonstrates:
 """
 import os
 import torch
+from PIL import Image, ImageDraw, ImageFont
 from peft.tuners.lora.layer import LoraLayer, Linear
 
 from src.pipeline.freefuse_z_image_pipeline import FreeFuseZImagePipeline
@@ -220,10 +221,36 @@ def find_eos_index(pipe, prompt, max_sequence_length=512):
 
 # ── Main ────────────────────────────────────────────────────────────────
 
+def create_comparison_image(before_image, after_image, 
+                            before_label="Before (No FreeFuse)", 
+                            after_label="After (FreeFuse)"):
+    """创建水平拼接的对比图像，带有标签"""
+    w, h = before_image.size
+    label_height = 40
+    composite = Image.new('RGB', (w * 2, h + label_height), color='white')
+    
+    composite.paste(before_image, (0, label_height))
+    composite.paste(after_image, (w, label_height))
+    
+    draw = ImageDraw.Draw(composite)
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 24)
+    except:
+        font = ImageFont.load_default()
+    
+    draw.text((w // 2, 10), before_label, fill='black', font=font, anchor='mt')
+    draw.text((w + w // 2, 10), after_label, fill='black', font=font, anchor='mt')
+    
+    return composite
+
+
 def main():
     device = "cuda"
     dtype = torch.bfloat16
     model_id = "Tongyi-MAI/Z-Image-Turbo"
+    
+    # Compare option
+    compare = True
 
     # ── 1. Load pipeline ──
     pipe = FreeFuseZImagePipeline.from_pretrained(model_id, torch_dtype=dtype)
@@ -232,8 +259,9 @@ def main():
     # ── 2. Load LoRA adapters ──
     # TODO: replace with Z-Image-compatible LoRA files once available
     pipe.load_lora_weights("loras/Jinx_Arcane_zit.safetensors", adapter_name="jinx")
-    pipe.load_lora_weights("loras/Vi_Arcane_zit.safetensors", adapter_name="vi")
-    pipe.set_adapters(["jinx", "vi"], [0.8, 0.8])
+    # pipe.load_lora_weights("loras/Vi_Arcane_zit.safetensors", adapter_name="vi")
+    pipe.load_lora_weights("loras/skeletor_zit.safetensors", adapter_name="skeleton")
+    pipe.set_adapters(["jinx", "skeleton"], [0.8, 0.8])
 
     # ── 3. Swap transformer class ──
     pipe.transformer.__class__ = ZImageTransformer2DModel
@@ -253,10 +281,12 @@ def main():
     # ── 6. Build prompts & concept map ──
     concept_map = {
         "jinx": "Jinx_Arcane, a young woman with long blue hair in a loose braid and bright blue eyes, wearing a cropped halter top, gloves, striped pants with belts, and visible tattoos",
-        "vi": "Vi_Arcane, a young woman with short pink hair in an undercut swept to one side and blue eyes, wearing a red jacket over a fitted top, small 'VI' tattoo under her eye, nose ring"
+        # "vi": "Vi_Arcane, a young woman with short pink hair in an undercut swept to one side and blue eyes, wearing a red jacket over a fitted top, small 'VI' tattoo under her eye, nose ring"
+        "skeleton": "Skeletor in purple hooded cloak flexing muscular blue arms triumphantly, skull face grinning menacingly, cartoon animation style, Masters of the Universe character, vibrant purple and blue color scheme"
     }
 
-    prompt = "A picture of two characters, a starry night scene with northern lights in background: Jinx_Arcane, a young woman with long blue hair in a loose braid and bright blue eyes, wearing a cropped halter top, gloves, striped pants with belts, and visible tattoos and Vi_Arcane, a young woman with short pink hair in an undercut swept to one side and blue eyes, wearing a red jacket over a fitted top, small 'VI' tattoo under her eye, nose ring"
+    # prompt = "A picture of two characters, a starry night scene with northern lights in background: Jinx_Arcane, a young woman with long blue hair in a loose braid and bright blue eyes, wearing a cropped halter top, gloves, striped pants with belts, and visible tattoos and Vi_Arcane, a young woman with short pink hair in an undercut swept to one side and blue eyes, wearing a red jacket over a fitted top, small 'VI' tattoo under her eye, nose ring"
+    prompt = "A picture of two characters, a starry night scene with northern lights in background: The first character is Jinx_Arcane, a young woman with long blue hair in a loose braid and bright blue eyes, wearing a cropped halter top, gloves, striped pants with belts, and visible tattoos and the second character is Skeletor in purple hooded cloak flexing muscular blue arms triumphantly, skull face grinning menacingly, cartoon animation style, Masters of the Universe character, vibrant purple and blue color scheme"
     negative_prompt = ""
 
     # ── 7. Find concept positions (Qwen3-aware) ──
@@ -280,7 +310,39 @@ def main():
     print(f"[Info] sim_map_block_idx = {sim_map_block_idx}  (out of {n_layers} layers)")
 
     # ── 9. Generate ──
-    seed = 42
+    seed = 77
+    image_no_freefuse = None
+    if compare:
+        print("\nGenerating without FreeFuse for comparison...")
+        
+        # Reset generator with same seed
+        generator = torch.Generator(device).manual_seed(seed)
+        
+        # Generate baseline (without attention bias)
+        image_no_freefuse = pipe(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            height=1024,
+            width=1024,
+            num_inference_steps=12,
+            guidance_scale=0.0,
+            generator=generator,
+            sim_map_block_idx=sim_map_block_idx,
+            aggreate_lora_score_step=3,
+            use_attention_bias=False,  # Disable FreeFuse attention bias
+            joint_attention_kwargs={
+                "freefuse_token_pos_maps": None,
+                "eos_token_index": eos_token_index,
+                "background_token_positions": None,
+                "top_k_ratio": 0.1,
+            },
+        ).images[0]
+        
+        no_ff_path = "z_image_no_freefuse_output.png"
+        image_no_freefuse.save(no_ff_path)
+        print(f"Baseline image saved to {no_ff_path}")
+
+    print("\nGenerating with FreeFuse...")
     generator = torch.Generator(device).manual_seed(seed)
 
     image = pipe(
@@ -311,6 +373,14 @@ def main():
     out_path = "z_image_freefuse_output.png"
     image.save(out_path)
     print(f"[Done] Image saved to {out_path}")
+    
+    # Generate comparison if enabled
+    if compare and image_no_freefuse is not None:
+        # Create comparison composite
+        composite = create_comparison_image(image_no_freefuse, image)
+        compare_path = "z_image_freefuse_compare.png"
+        composite.save(compare_path)
+        print(f"Comparison image saved to {compare_path}")
 
 
 if __name__ == "__main__":

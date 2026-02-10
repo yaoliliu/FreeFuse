@@ -131,6 +131,6 @@ python main_freefuse_z_image.py
 
 ## Acknowledgement
 
-Thanks for [Tekemo](https://civarchive.com/users/Tekemo)'s ZIT LoRAs, which are used in our Z-Image-turbo examples.
+Thanks for [Tekemo](https://civarchive.com/users/Tekemo) and [jrewingwannabe947](https://civitai.com/user/jrewingwannabe947)'s ZIT LoRAs, which are used in our Z-Image-turbo examples.
 
 

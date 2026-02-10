@@ -6,6 +6,7 @@ position maps, avoiding the token symmetry problem caused by separate encoding.
 """
 import os
 import torch
+from PIL import Image, ImageDraw, ImageFont
 from diffusers.models.transformers.transformer_flux import FluxTransformerBlock, FluxAttention
 from src.pipeline.freefuse_flux_direct_extract_attn_bais_background_except_pipeline import FreeFuseFluxDirectExtractAttnBaisBGExceptPipeline
 from src.attn_processor.freefuse_attn_processor import FreeFuseFluxAttnProcessor
@@ -268,7 +269,33 @@ def get_prompt_token_texts(pipe, prompt, max_sequence_length=512):
     return token_texts
 
 
+def create_comparison_image(before_image, after_image, 
+                            before_label="Before (No FreeFuse)", 
+                            after_label="After (FreeFuse)"):
+    """创建水平拼接的对比图像，带有标签"""
+    w, h = before_image.size
+    label_height = 40
+    composite = Image.new('RGB', (w * 2, h + label_height), color='white')
+    
+    composite.paste(before_image, (0, label_height))
+    composite.paste(after_image, (w, label_height))
+    
+    draw = ImageDraw.Draw(composite)
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 24)
+    except:
+        font = ImageFont.load_default()
+    
+    draw.text((w // 2, 10), before_label, fill='black', font=font, anchor='mt')
+    draw.text((w + w // 2, 10), after_label, fill='black', font=font, anchor='mt')
+    
+    return composite
+
+
 def main():
+    # Configuration
+    compare = True  # Generate comparison image
+    
     # Load pipeline
     quantization=False
     if quantization:
@@ -395,8 +422,40 @@ def main():
     
     seed = 42
 
+    # Generate comparison if enabled
+    image_no_freefuse = None
+    if compare:
+        print("\nGenerating without FreeFuse for comparison...")
+        
+        # Reset generator with same seed
+        generator = torch.Generator("cuda").manual_seed(seed)
+        
+        # Generate baseline (without attention bias)
+        image_no_freefuse = pipe(
+            prompt_embeds=prompt_embeds, 
+            pooled_prompt_embeds=pooled_prompt_embeds, 
+            negative_prompt_embeds=negative_prompt_embeds,
+            negative_pooled_prompt_embeds=pooled_negative_prompt_embeds,
+            concept_embeds_map=None,
+            height=1024, 
+            width=1024, 
+            generator=generator, 
+            joint_attention_kwargs={
+                'freefuse_token_pos_maps': None,
+                'concept_token_texts': concept_token_texts,
+                'eos_token_index': eos_token_index,
+                'background_token_positions': None,
+                'disable_freefuse': True,  # Disable FreeFuse masking
+            },
+            guidance_scale=7,
+            true_cfg_scale=0
+        ).images[0]
+        image_no_freefuse.save(f"flux_style_no_freefuse.png")
+        print(f"Baseline image saved to flux_style_no_freefuse.png")
+
     # Generate image
     # Note: We pass freefuse_token_pos_maps through joint_attention_kwargs
+    print("\nGenerating with FreeFuse...")
     generator = torch.Generator("cuda").manual_seed(seed)
     image = pipe(
         prompt_embeds=prompt_embeds, 
@@ -420,6 +479,12 @@ def main():
     ).images[0]
     image.save(f"flux_style.png")
     print(f"Image saved to flux_style.png")
+    
+    if compare and image_no_freefuse is not None:
+        # Create comparison composite
+        composite = create_comparison_image(image_no_freefuse, image)
+        composite.save(f"flux_style_compare.png")
+        print(f"Comparison image saved to flux_style_compare.png")
 
 
 if __name__ == "__main__":
