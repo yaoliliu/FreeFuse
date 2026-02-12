@@ -27,8 +27,8 @@ def stabilized_balanced_argmax(
     w, 
     target_count=None, 
     max_iter=15,
-    lr=0.01,
-    gravity_weight=0.00004,   # Match diffusers (was 0.00004)
+    lr=0.00001,
+    gravity_weight=0.00001,   # Match diffusers (was 0.00004)
     spatial_weight=0.00004,   # Match diffusers (was 0.00004)
     momentum=0.2,
     centroid_margin=0.0,

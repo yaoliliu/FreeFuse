@@ -74,6 +74,19 @@ import comfy.sample
 import comfy.model_management
 
 
+def _get_latent_shape(model, width, height, fallback_channels=16, fallback_downscale=8):
+    """Resolve latent shape from model if possible (Flux2 uses different latent format)."""
+    latent_format = getattr(getattr(model, "model", None), "latent_format", None)
+    if latent_format is not None:
+        latent_channels = getattr(latent_format, "latent_channels", fallback_channels)
+        downscale = getattr(latent_format, "spacial_downscale_ratio", fallback_downscale)
+    else:
+        latent_channels = fallback_channels
+        downscale = fallback_downscale
+    latent_h, latent_w = height // downscale, width // downscale
+    return latent_channels, latent_h, latent_w
+
+
 def run_freefuse_e2e_test():
     """Run complete FreeFuse pipeline test."""
     print("\n" + "="*70)
@@ -218,8 +231,8 @@ def run_freefuse_e2e_test():
     from freefuse_comfyui.nodes.sampler import FreeFusePhase1Sampler
     
     # Create latent
-    latent_h, latent_w = height // 8, width // 8
-    latent = torch.zeros([1, 16, latent_h, latent_w], device="cpu")
+    latent_channels, latent_h, latent_w = _get_latent_shape(model, width, height)
+    latent = torch.zeros([1, latent_channels, latent_h, latent_w], device="cpu")
     latent_dict = {"samples": latent}
     
     sampler = FreeFusePhase1Sampler()
@@ -412,8 +425,8 @@ def run_baseline_test():
     # Generate
     print("\n[Step 4] Generating...")
     
-    latent_h, latent_w = height // 8, width // 8
-    latent = torch.zeros([1, 16, latent_h, latent_w], device="cpu")
+    latent_channels, latent_h, latent_w = _get_latent_shape(model, width, height)
+    latent = torch.zeros([1, latent_channels, latent_h, latent_w], device="cpu")
     noise = comfy.sample.prepare_noise(latent, seed, None)
     
     start_time = time.time()
@@ -686,8 +699,8 @@ def run_quick_inference_test():
     # Generate
     print("\n[Step 4] Generating (quick test)...")
     
-    latent_h, latent_w = height // 8, width // 8
-    latent = torch.zeros([1, 16, latent_h, latent_w], device="cpu")
+    latent_channels, latent_h, latent_w = _get_latent_shape(model, width, height)
+    latent = torch.zeros([1, latent_channels, latent_h, latent_w], device="cpu")
     noise = comfy.sample.prepare_noise(latent, seed, None)
     
     start_time = time.time()

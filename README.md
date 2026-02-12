@@ -6,6 +6,7 @@ FreeFuse for ComfyUI: multi-concept LoRA composition with spatial awareness.
 
 - [workflows/flux_freefuse_complete.json](workflows/flux_freefuse_complete.json)
 - [workflows/sdxl_freefuse_complete.json](workflows/sdxl_freefuse_complete.json)
+- [workflows/zimage_freefuse_complete.json](workflows/zimage_freefuse_complete.json)
 
 ## Installation
 
@@ -20,10 +21,13 @@ ln -s /path/to/FreeFuse/comfyui ComfyUI/custom_nodes
 
 - Daiyu: https://huggingface.co/lsmpp/freefuse_community_loras/resolve/main/daiyu_lin.safetensors?download=true
 - Harry: https://huggingface.co/lsmpp/freefuse_community_loras/resolve/main/harry_potter.safetensors?download=true
+- Jinx (Z-Image-Turbo): https://huggingface.co/lsmpp/freefuse_example_loras/resolve/main/Jinx_Arcane_zit.safetensors?download=true
+- Skeletor (Z-Image-Turbo): https://huggingface.co/lsmpp/freefuse_example_loras/resolve/main/skeletor_zit.safetensors?download=true
 
 > The workflows expect these filenames by default:
 > - Flux: harry_potter_flux.safetensors, daiyu_lin_flux.safetensors
 > - SDXL: harry_potter_xl.safetensors, daiyu_lin_xl.safetensors
+> - Z-Image-Turbo: Jinx_Arcane_zit.safetensors, skeletor_zit.safetensors
 > If you use the downloads above, rename the files or update the workflow nodes.
 
 **Prompt**

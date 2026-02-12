@@ -72,6 +72,55 @@ import comfy.sample
 import comfy.model_management
 
 
+def _is_flux2_model(model) -> bool:
+    """Best-effort detection of Flux2 model."""
+    model_cfg = getattr(getattr(model, "model", None), "model_config", None)
+    unet_cfg = getattr(model_cfg, "unet_config", {}) if model_cfg is not None else {}
+    if unet_cfg.get("image_model") == "flux2":
+        return True
+    latent_format = getattr(getattr(model, "model", None), "latent_format", None)
+    if latent_format is not None and latent_format.__class__.__name__.lower() == "flux2":
+        return True
+    model_cls = getattr(getattr(model, "model", None), "__class__", None)
+    if model_cls is not None and model_cls.__name__.lower() == "flux2":
+        return True
+    return False
+
+
+def _get_flux_context_dim(model) -> Optional[int]:
+    dm = getattr(getattr(model, "model", None), "diffusion_model", None)
+    params = getattr(dm, "params", None)
+    return getattr(params, "context_in_dim", None)
+
+
+def _pick_flux2_text_encoder(clip_names: List[str], context_in_dim: Optional[int], unet_name: Optional[str]) -> Optional[str]:
+    def pick_by_patterns(patterns: List[str]) -> Optional[str]:
+        for pat in patterns:
+            for name in clip_names:
+                if pat in name.lower():
+                    return name
+        return None
+
+    unet_lower = (unet_name or "").lower()
+    if "mistral" in unet_lower:
+        name = pick_by_patterns(["mistral3", "mistral", "24b"])
+        if name:
+            return name
+    if "qwen" in unet_lower or "klein" in unet_lower:
+        name = pick_by_patterns(["qwen3_8b", "qwen3-8b", "qwen3_4b", "qwen3-4b", "qwen3", "klein"])
+        if name:
+            return name
+
+    if context_in_dim == 7680:
+        return pick_by_patterns(["qwen3_4b", "qwen3-4b", "qwen3", "klein"])
+    if context_in_dim == 12288:
+        return pick_by_patterns(["qwen3_8b", "qwen3-8b", "klein8b", "qwen3"])
+    if context_in_dim == 15360:
+        return pick_by_patterns(["mistral3", "mistral", "24b"])
+
+    return pick_by_patterns(["flux2", "mistral", "qwen", "klein"])
+
+
 @dataclass
 class TestConfig:
     """Configuration for a single test run."""
@@ -326,9 +375,9 @@ ZIMAGE_ASPECT_RATIO_TESTS = [
         name="zimg_square_1024",
         width=1024, height=1024,
         collect_block=18, temperature=0, top_k_ratio=0.1,
-        disable_lora_phase1=True, bg_scale=0.95,
-        use_morphological_cleaning=False, balance_iterations=15,
-        bias_scale=3.0, positive_bias_scale=1.0,
+        disable_lora_phase1=True, bg_scale=1.00,
+        use_morphological_cleaning=True, balance_iterations=15,
+        bias_scale=4.0, positive_bias_scale=2.0,
         description="Z-Image standard 1:1 square (baseline)"
     ),
     TestConfig(
@@ -336,8 +385,8 @@ ZIMAGE_ASPECT_RATIO_TESTS = [
         width=768, height=1024,
         collect_block=18, temperature=0, top_k_ratio=0.1,
         disable_lora_phase1=True, bg_scale=0.95,
-        use_morphological_cleaning=False, balance_iterations=15,
-        bias_scale=3.0, positive_bias_scale=1.0,
+        use_morphological_cleaning=True, balance_iterations=15,
+        bias_scale=4.0, positive_bias_scale=2.0,
         description="Z-Image portrait 3:4 aspect ratio"
     ),
     TestConfig(
@@ -345,8 +394,8 @@ ZIMAGE_ASPECT_RATIO_TESTS = [
         width=1024, height=768,
         collect_block=18, temperature=0, top_k_ratio=0.1,
         disable_lora_phase1=True, bg_scale=0.95,
-        use_morphological_cleaning=False, balance_iterations=15,
-        bias_scale=3.0, positive_bias_scale=1.0,
+        use_morphological_cleaning=True, balance_iterations=15,
+        bias_scale=4.0, positive_bias_scale=2.0,
         description="Z-Image landscape 4:3 aspect ratio"
     ),
 ]
@@ -357,8 +406,8 @@ ZIMAGE_BLOCK_TESTS = [
         width=1024, height=1024,
         collect_block=5, temperature=0, top_k_ratio=0.1,
         disable_lora_phase1=True, bg_scale=0.95,
-        use_morphological_cleaning=False, balance_iterations=15,
-        bias_scale=3.0, positive_bias_scale=1.0,
+        use_morphological_cleaning=True, balance_iterations=15,
+        bias_scale=4.0, positive_bias_scale=2.0,
         description="Z-Image early block"
     ),
     TestConfig(
@@ -366,8 +415,8 @@ ZIMAGE_BLOCK_TESTS = [
         width=1024, height=1024,
         collect_block=18, temperature=0, top_k_ratio=0.1,
         disable_lora_phase1=True, bg_scale=0.95,
-        use_morphological_cleaning=False, balance_iterations=15,
-        bias_scale=3.0, positive_bias_scale=1.0,
+        use_morphological_cleaning=True, balance_iterations=15,
+        bias_scale=4.0, positive_bias_scale=2.0,
         description="Z-Image default block (baseline)"
     ),
     TestConfig(
@@ -375,8 +424,8 @@ ZIMAGE_BLOCK_TESTS = [
         width=1024, height=1024,
         collect_block=24, temperature=0, top_k_ratio=0.1,
         disable_lora_phase1=True, bg_scale=0.95,
-        use_morphological_cleaning=False, balance_iterations=15,
-        bias_scale=3.0, positive_bias_scale=1.0,
+        use_morphological_cleaning=True, balance_iterations=15,
+        bias_scale=4.0, positive_bias_scale=2.0,
         description="Z-Image late block"
     ),
 ]
@@ -446,20 +495,21 @@ def load_flux_models():
     """Load Flux model and return components."""
     print("\n[Loading Flux Models]")
     
-    # Find model files
-    unet_name = None
-    for name in folder_paths.get_filename_list("diffusion_models"):
-        if "flux" in name.lower():
-            unet_name = name
-            break
+    # Find model files (prefer Flux1 if both exist)
+    diffusion_models = folder_paths.get_filename_list("diffusion_models")
+    flux_models = [n for n in diffusion_models if "flux" in n.lower()]
+    if not flux_models:
+        raise FileNotFoundError("No Flux model found in diffusion_models")
+
+    flux1_models = [n for n in flux_models if "flux1" in n.lower() or "flux-1" in n.lower() or "fluxdev" in n.lower()]
+    flux2_models = [n for n in flux_models if "flux2" in n.lower() or "klein" in n.lower()]
+
+    unet_name = flux1_models[0] if flux1_models else (flux2_models[0] if flux2_models else flux_models[0])
     
     if not unet_name:
         raise FileNotFoundError("No Flux model found in diffusion_models")
     
-    clip_names = []
-    for name in folder_paths.get_filename_list("text_encoders"):
-        if "clip" in name.lower() or "t5" in name.lower():
-            clip_names.append(name)
+    clip_names = folder_paths.get_filename_list("text_encoders")
     
     vae_name = None
     for name in folder_paths.get_filename_list("vae"):
@@ -468,17 +518,31 @@ def load_flux_models():
             break
     
     # Load models
-    from nodes import UNETLoader, DualCLIPLoader, VAELoader
+    from nodes import UNETLoader, DualCLIPLoader, CLIPLoader, VAELoader
     
     unet_loader = UNETLoader()
     model, = unet_loader.load_unet(unet_name, "default")
     print(f"  ✅ UNET loaded: {unet_name}")
-    
-    clip_loader = DualCLIPLoader()
-    clip_l = next((n for n in clip_names if "clip_l" in n.lower()), None)
-    t5 = next((n for n in clip_names if "t5" in n.lower()), None)
-    clip, = clip_loader.load_clip(clip_l, t5, "flux")
-    print(f"  ✅ CLIP loaded: {clip_l}, {t5}")
+    print(f"  Flux candidates: {flux_models}")
+
+    is_flux2 = _is_flux2_model(model)
+    if is_flux2:
+        context_in_dim = _get_flux_context_dim(model)
+        clip_name = _pick_flux2_text_encoder(clip_names, context_in_dim, unet_name)
+        if not clip_name:
+            raise FileNotFoundError(
+                "Flux2 detected but no suitable text encoder found. "
+                f"Available encoders: {clip_names}"
+            )
+        clip_loader = CLIPLoader()
+        clip, = clip_loader.load_clip(clip_name, type="flux2")
+        print(f"  ✅ CLIP loaded (flux2): {clip_name} (context_in_dim={context_in_dim})")
+    else:
+        clip_loader = DualCLIPLoader()
+        clip_l = next((n for n in clip_names if "clip_l" in n.lower()), None)
+        t5 = next((n for n in clip_names if "t5" in n.lower()), None)
+        clip, = clip_loader.load_clip(clip_l, t5, "flux")
+        print(f"  ✅ CLIP loaded: {clip_l}, {t5}")
     
     vae_loader = VAELoader()
     vae, = vae_loader.load_vae(vae_name)
@@ -589,7 +653,10 @@ def load_loras(model, clip, model_type: str):
     if not lora_a or not lora_b:
         print(f"  Warning: LoRAs not found for {model_type}")
         print(f"  Available: {lora_list}")
-        return model, clip, {"adapters": []}
+        freefuse_data = {"adapters": []}
+        if model_type == "flux":
+            freefuse_data["flux_variant"] = "flux2" if _is_flux2_model(model) else "flux"
+        return model, clip, freefuse_data
     
     loader = FreeFuseLoRALoader()
     
@@ -597,6 +664,9 @@ def load_loras(model, clip, model_type: str):
         model, clip, lora_a, adapter_a, strength, strength, None
     )
     print(f"  ✅ LoRA loaded: {adapter_a} ({lora_a}), strength={strength}")
+
+    if model_type == "flux":
+        freefuse_data["flux_variant"] = "flux2" if _is_flux2_model(model) else "flux"
     
     model, clip, freefuse_data = loader.load_lora(
         model, clip, lora_b, adapter_b, strength, strength, freefuse_data
@@ -672,7 +742,13 @@ def setup_concepts_and_conditioning(clip, freefuse_data, model_type: str):
     )
     
     # Create conditioning
-    if model_type == "flux":
+    if model_type == "flux" and freefuse_data.get("flux_variant") == "flux2":
+        tokens = clip.tokenize(prompt)
+        conditioning = clip.encode_from_tokens_scheduled(tokens, add_dict={"guidance": 3.5})
+
+        neg_tokens = clip.tokenize("")
+        neg_conditioning = clip.encode_from_tokens_scheduled(neg_tokens, add_dict={"guidance": 3.5})
+    elif model_type == "flux":
         from comfy_extras.nodes_flux import CLIPTextEncodeFlux
         encoder = CLIPTextEncodeFlux()
         conditioning, = encoder.encode(clip, prompt, prompt, 3.5)
@@ -735,14 +811,18 @@ def run_single_test(
     }
     
     try:
-        # Create latent
-        # Z-Image and Flux use 16 channels, SDXL uses 4
-        if model_type in ["flux", "z_image"]:
-            latent_h, latent_w = config.height // 8, config.width // 8
-            latent = torch.zeros([1, 16, latent_h, latent_w], device="cpu")
+        # Create latent (respect model latent format when available)
+        latent_format = getattr(getattr(model, "model", None), "latent_format", None)
+        if latent_format is not None:
+            latent_channels = getattr(latent_format, "latent_channels", 4)
+            downscale = getattr(latent_format, "spacial_downscale_ratio", 8)
         else:
-            latent_h, latent_w = config.height // 8, config.width // 8
-            latent = torch.zeros([1, 4, latent_h, latent_w], device="cpu")
+            # Fallbacks
+            latent_channels = 16 if model_type in ["flux", "z_image"] else 4
+            downscale = 8
+
+        latent_h, latent_w = config.height // downscale, config.width // downscale
+        latent = torch.zeros([1, latent_channels, latent_h, latent_w], device="cpu")
         
         latent_dict = {"samples": latent}
         
@@ -786,6 +866,7 @@ def run_single_test(
                 bg_scale=config.bg_scale,
                 use_morphological_cleaning=config.use_morphological_cleaning,
                 balance_iterations=config.balance_iterations,
+                # balance_iterations=0,
             )
         results["phase1_time"] = time.time() - start_time
         

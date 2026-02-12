@@ -74,13 +74,14 @@ class FreeFuseAttentionBias:
                     "tooltip": "Add positive bias for same-LoRA pairs in addition to negative bias. "
                               "Disable if you only want to suppress cross-LoRA attention."
                 }),
-                "bias_blocks": (["all", "double_stream_only", "single_stream_only", "last_half_double", "none"], {
+                "bias_blocks": (["all", "double_stream_only", "single_stream_only", "last_half_double", "last_half", "none"], {
                     "default": "double_stream_only",
                     "tooltip": "Which transformer blocks to apply attention bias:\n"
                               "- all: Apply to all blocks\n"
                               "- double_stream_only: Only double-stream blocks (Flux)\n"
                               "- single_stream_only: Only single-stream blocks (Flux)\n"
                               "- last_half_double: Last half of double blocks\n"
+                              "- last_half: Last half of layers (Z-Image)\n"
                               "- none: Disable attention bias"
                 }),
             }

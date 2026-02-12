@@ -10,6 +10,15 @@ CLIP tokenizer (SDXL): Uses sliding window token matching
 from typing import Dict, List, Union, Optional, Any
 
 
+# Default Lumina2 system prompt used by CLIPTextEncodeLumina2 in ComfyUI.
+# This must be prepended to the user prompt for Z-Image token position finding
+# so that positions align with the actual prompt_embeds tensor.
+LUMINA2_SYSTEM_PROMPT = (
+    "You are an assistant designed to generate superior images with the superior "
+    "degree of image-text alignment based on textual prompts or user prompts."
+)
+
+
 # Stopwords and punctuation to filter (shared between both methods)
 STOPWORDS = {
     # Articles
@@ -39,8 +48,10 @@ MEANINGLESS_TOKENS = STOPWORDS | PUNCTUATION
 
 def clean_token_text(token_text: str) -> str:
     """Clean token text by removing special prefixes/suffixes."""
-    # Remove T5's ▁ prefix, CLIP's </w> suffix, and other markers
-    cleaned = token_text.replace('▁', '').replace('_', '')
+    # Remove T5's ▁ prefix (U+2581), CLIP's </w> suffix, and GPT-2's Ġ marker.
+    # NOTE: Do NOT strip ASCII '_' (U+005F) — it is real content in tokens
+    # like '_A' (Qwen3 tokenization of "Jinx_Arcane").
+    cleaned = token_text.replace('▁', '')
     cleaned = cleaned.replace('</w>', '').replace('Ġ', '')
     return cleaned.strip().lower()
 
@@ -405,18 +416,22 @@ def find_concept_positions_qwen3(
     concepts: Dict[str, str],
     filter_meaningless: bool = True,
     filter_single_char: bool = True,
+    system_prompt: Optional[str] = None,
 ) -> Dict[str, List[List[int]]]:
     """
     Find token positions for Z-Image (Qwen3) models.
     
     Z-Image uses Qwen3 tokenizer with chat template wrapping. This function:
-    1. Applies the chat template to the prompt (matching ComfyUI's actual processing)
-    2. Tokenizes the wrapped text
+    1. Optionally prepends the Lumina2 system prompt (to match CLIPTextEncodeLumina2)
+    2. Passes the text through clip.tokenize() which applies the llama chat template
     3. Builds a concat_text by decoding each token and tracks positions
     4. Finds concept text in concat_text and maps back to token positions
     
-    The key insight is that ComfyUI's Z-Image tokenizer uses llama_template:
-    "<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+    IMPORTANT - Embedding alignment:
+    In ComfyUI, CLIPTextEncodeLumina2 prepends a system prompt before calling
+    clip.tokenize(). If system_prompt is provided, this function prepends it
+    in the same way so that the returned token positions correspond to the
+    correct positions in the prompt_embeds tensor.
     
     Args:
         clip: ComfyUI CLIP object
@@ -425,6 +440,10 @@ def find_concept_positions_qwen3(
         concepts: Dict mapping concept name to concept text
         filter_meaningless: Whether to filter stopwords/punctuation
         filter_single_char: Whether to filter single-char tokens
+        system_prompt: System prompt to prepend (for ComfyUI Lumina2 alignment).
+                       When provided, constructs "{system_prompt} <Prompt Start> {prompt}"
+                       to match CLIPTextEncodeLumina2 behavior.
+                       Use LUMINA2_SYSTEM_PROMPT for the standard Lumina2 prompt.
         
     Returns:
         Dict mapping concept name to list of position lists (one per prompt)
@@ -435,15 +454,23 @@ def find_concept_positions_qwen3(
     # Build prompt data with template wrapping (matching ZImageTokenizer behavior)
     prompt_data_list = []
     for prompt in prompts:
+        # For ComfyUI Z-Image: CLIPTextEncodeLumina2 prepends a system prompt
+        # before calling clip.tokenize(). We must do the same so that token
+        # positions align with the actual prompt_embeds tensor.
+        if system_prompt:
+            tokenize_prompt = f"{system_prompt} <Prompt Start> {prompt}"
+        else:
+            tokenize_prompt = prompt
+        
         # Apply Z-Image's llama template (from comfy/text_encoders/z_image.py)
-        # Template: "<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+        # Template: "<|im_start|>user\n{text}<|im_end|>\n<|im_start|>assistant\n"
         llama_template = "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
-        wrapped_text = llama_template.format(prompt)
+        wrapped_text = llama_template.format(tokenize_prompt)
         
         # Tokenize using the ComfyUI clip's tokenize method
         # This gives us the actual token sequence used during generation
         try:
-            token_weight_pairs = clip.tokenize(prompt)
+            token_weight_pairs = clip.tokenize(tokenize_prompt)
             # For Z-Image, the tokens are directly in qwen3_4b key
             if 'qwen3_4b' in token_weight_pairs:
                 chunks = token_weight_pairs['qwen3_4b']
@@ -549,6 +576,7 @@ def find_concept_positions(
     filter_meaningless: bool = True,
     filter_single_char: bool = True,
     model_type: str = None,
+    system_prompt: Optional[str] = None,
 ) -> Dict[str, List[List[int]]]:
     """
     Unified function to find concept token positions for any supported model.
@@ -563,6 +591,8 @@ def find_concept_positions(
         filter_meaningless: Whether to filter stopwords/punctuation tokens
         filter_single_char: Whether to filter single-character tokens
         model_type: Optional override ('flux', 'sdxl', 'sd1')
+        system_prompt: System prompt for Z-Image/Lumina2 alignment (see
+                       find_concept_positions_qwen3 for details).
         
     Returns:
         Dict with structure:
@@ -587,7 +617,8 @@ def find_concept_positions(
         return find_concept_positions_qwen3(
             clip, tokenizer, prompts, concepts,
             filter_meaningless=filter_meaningless,
-            filter_single_char=filter_single_char
+            filter_single_char=filter_single_char,
+            system_prompt=system_prompt,
         )
     elif model_type == 'flux':
         return find_concept_positions_t5(
@@ -651,6 +682,7 @@ def find_background_positions(
     prompt: str,
     background_text: str = None,
     model_type: str = None,
+    system_prompt: Optional[str] = None,
 ) -> List[int]:
     """
     Find token positions for background region.
@@ -663,6 +695,7 @@ def find_background_positions(
         prompt: The prompt string
         background_text: Optional background description text
         model_type: Optional model type override
+        system_prompt: System prompt for Z-Image/Lumina2 alignment
         
     Returns:
         List of token positions for background
@@ -676,7 +709,8 @@ def find_background_positions(
             clip, prompt, {'__bg__': background_text},
             filter_meaningless=True,
             filter_single_char=True,
-            model_type=model_type
+            model_type=model_type,
+            system_prompt=system_prompt,
         )
         return pos_map.get('__bg__', [[]])[0]
     
@@ -696,6 +730,7 @@ def compute_token_position_maps(
     concepts: Dict[str, str],
     enable_background: bool = True,
     background_text: str = None,
+    system_prompt: Optional[str] = None,
 ) -> Dict[str, List[List[int]]]:
     """
     Compute token position maps for FreeFuse, ready to use in sampling.
@@ -708,16 +743,21 @@ def compute_token_position_maps(
         concepts: Dict mapping adapter names to concept descriptions
         enable_background: Whether to include background positions
         background_text: Optional background description (for explicit background)
+        system_prompt: System prompt for Z-Image/Lumina2 alignment
         
     Returns:
         freefuse_token_pos_maps: Dict ready for FreeFuse sampling
     """
     # Compute concept positions
-    token_pos_maps = find_concept_positions(clip, prompt, concepts)
+    token_pos_maps = find_concept_positions(
+        clip, prompt, concepts, system_prompt=system_prompt,
+    )
     
     # Add background if enabled
     if enable_background:
-        bg_positions = find_background_positions(clip, prompt, background_text)
+        bg_positions = find_background_positions(
+            clip, prompt, background_text, system_prompt=system_prompt,
+        )
         if bg_positions:
             token_pos_maps['__background__'] = [bg_positions]
     

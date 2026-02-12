@@ -25,6 +25,7 @@ from .attention_replace import (
     compute_flux_similarity_maps_from_outputs,
     compute_flux_similarity_maps_with_qkv,
     compute_z_image_similarity_maps,
+    compute_z_image_similarity_maps_with_qkv,
 )
 
 from .mask_utils import (
@@ -43,6 +44,7 @@ from .token_utils import (
     detect_model_type,
     get_tokenizer_for_model,
     compute_token_position_maps,
+    LUMINA2_SYSTEM_PROMPT,
 )
 
 from .lora_mask_hook import (

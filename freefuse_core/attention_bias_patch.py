@@ -17,6 +17,12 @@ import torch
 import torch.nn.functional as F
 from typing import Dict, Any, Optional, Callable, List, Tuple
 import logging
+import os
+
+# Z-Image (Lumina2 / NextDiT) helpers
+import comfy.ops
+from comfy.ldm.flux.math import apply_rope
+from comfy.ldm.lumina.model import modulate, apply_gate, clamp_fp16
 
 from .attention_bias import (
     construct_attention_bias,
@@ -121,6 +127,7 @@ class FreeFuseFluxBiasBlockReplace:
             vec = args["vec"]
             pe = args["pe"]
             attn_mask = args.get("attn_mask")
+            transformer_options = args.get("transformer_options", {})
             
             original_block = extra_args["original_block"]
             # block is captured from self.block, not from extra_args
@@ -138,6 +145,10 @@ class FreeFuseFluxBiasBlockReplace:
             # Get actual sequence lengths
             txt_len = txt.shape[1]
             img_len = img.shape[1]
+
+            # Expose exact txt_len for downstream single blocks (no guessing)
+            if isinstance(transformer_options, dict) and "txt_len" not in transformer_options:
+                transformer_options["txt_len"] = txt_len
             
             # Dynamically build bias for actual dimensions
             attention_bias = bias_builder._get_or_build_bias(
@@ -151,127 +162,47 @@ class FreeFuseFluxBiasBlockReplace:
                 return original_block(args)
             
             try:
-                # Import ComfyUI's attention utilities
-                from comfy.ldm.flux.math import attention, apply_rope
-                from comfy.ldm.flux.layers import apply_mod
-                
-                # Get modulation values
-                if hasattr(block, 'modulation') and block.modulation:
-                    img_mod1, img_mod2 = block.img_mod(vec)
-                    txt_mod1, txt_mod2 = block.txt_mod(vec)
-                else:
-                    (img_mod1, img_mod2), (txt_mod1, txt_mod2) = vec
-                
-                # === Compute img QKV ===
-                img_modulated = block.img_norm1(img)
-                img_modulated = apply_mod(img_modulated, (1 + img_mod1.scale), img_mod1.shift, None)
-                img_qkv = block.img_attn.qkv(img_modulated)
-                img_q, img_k, img_v = img_qkv.view(
-                    img_qkv.shape[0], img_qkv.shape[1], 3, block.num_heads, -1
-                ).permute(2, 0, 3, 1, 4)
-                img_q, img_k = block.img_attn.norm(img_q, img_k, img_v)
-                
-                # === Compute txt QKV ===
-                txt_modulated = block.txt_norm1(txt)
-                txt_modulated = apply_mod(txt_modulated, (1 + txt_mod1.scale), txt_mod1.shift, None)
-                txt_qkv = block.txt_attn.qkv(txt_modulated)
-                txt_q, txt_k, txt_v = txt_qkv.view(
-                    txt_qkv.shape[0], txt_qkv.shape[1], 3, block.num_heads, -1
-                ).permute(2, 0, 3, 1, 4)
-                txt_q, txt_k = block.txt_attn.norm(txt_q, txt_k, txt_v)
-                
-                # === Concatenate based on flipped_img_txt flag ===
-                if getattr(block, 'flipped_img_txt', False):
-                    q = torch.cat((img_q, txt_q), dim=2)
-                    k = torch.cat((img_k, txt_k), dim=2)
-                    v = torch.cat((img_v, txt_v), dim=2)
-                    txt_first = False
-                else:
-                    q = torch.cat((txt_q, img_q), dim=2)
-                    k = torch.cat((txt_k, img_k), dim=2)
-                    v = torch.cat((txt_v, img_v), dim=2)
-                    txt_first = True
-                
-                # === Apply RoPE ===
-                if pe is not None:
-                    q, k = apply_rope(q, k, pe)
-                
-                # === Compute attention with bias ===
-                B, heads, seq_len, head_dim = q.shape
-                scale = head_dim ** -0.5
-                
-                # Compute attention scores
-                attn_weights = torch.einsum('bhid,bhjd->bhij', q, k) * scale
-                
-                # Apply attention bias
                 bias_for_attn = attention_bias
-                if bias_for_attn.device != attn_weights.device:
-                    bias_for_attn = bias_for_attn.to(attn_weights.device)
-                if bias_for_attn.dtype != attn_weights.dtype:
-                    bias_for_attn = bias_for_attn.to(attn_weights.dtype)
-                
-                # Expand bias for heads dimension: (B, seq, seq) -> (B, 1, seq, seq)
-                if bias_for_attn.dim() == 3:
-                    bias_for_attn = bias_for_attn.unsqueeze(1)
-                
-                # Handle sequence order (txt_first or img_first)
-                if not txt_first:
-                    # Need to reorder bias from (txt, img) to (img, txt)
+                if bias_for_attn.device != img.device:
+                    bias_for_attn = bias_for_attn.to(img.device)
+                if bias_for_attn.dtype != img.dtype:
+                    bias_for_attn = bias_for_attn.to(img.dtype)
+
+                # If block expects [img, txt], reorder bias accordingly
+                if getattr(block, 'flipped_img_txt', False):
                     img_len = img.shape[1]
                     txt_len = txt.shape[1]
-                    # Create permutation indices
                     perm = torch.cat([
-                        torch.arange(txt_len, txt_len + img_len),
-                        torch.arange(txt_len)
-                    ]).to(bias_for_attn.device)
-                    # Reorder both dimensions
-                    bias_for_attn = bias_for_attn[:, :, perm][:, :, :, perm]
-                
-                attn_weights = attn_weights + bias_for_attn
-                
-                # Apply attention mask if provided
+                        torch.arange(txt_len, txt_len + img_len, device=bias_for_attn.device),
+                        torch.arange(txt_len, device=bias_for_attn.device),
+                    ])
+                    bias_for_attn = bias_for_attn[:, perm][:, :, perm]
+
+                # Ensure bias has heads dimension
+                if bias_for_attn.dim() == 3:
+                    bias_for_attn = bias_for_attn.unsqueeze(1)
+
+                # Combine with attention mask if provided
                 if attn_mask is not None:
-                    attn_weights = attn_weights + attn_mask
-                
-                # Softmax and compute output
-                attn_weights = F.softmax(attn_weights, dim=-1)
-                attn_output = torch.einsum('bhij,bhjd->bhid', attn_weights, v)
-                
-                # Reshape output
-                attn_output = attn_output.transpose(1, 2).reshape(B, seq_len, heads * head_dim)
-                
-                # Split back to txt and img
-                if txt_first:
-                    txt_attn_out = attn_output[:, :txt_len, :]
-                    img_attn_out = attn_output[:, txt_len:, :]
-                else:
-                    img_attn_out = attn_output[:, :img_len, :]
-                    txt_attn_out = attn_output[:, img_len:, :]
-                
-                # Apply output projections
-                img_attn_out = block.img_attn.proj(img_attn_out)
-                txt_attn_out = block.txt_attn.proj(txt_attn_out)
-                
-                # Apply modulation and residual
-                # Note: apply_mod(tensor, m_mult, m_add, modulation_dims)
-                # For gated residual: m_mult=gate, m_add=None
-                img_out = img + apply_mod(img_attn_out, img_mod1.gate, None, None)
-                txt_out = txt + apply_mod(txt_attn_out, txt_mod1.gate, None, None)
-                
-                # FFN for img
-                img_ffn = block.img_norm2(img_out)
-                img_ffn = apply_mod(img_ffn, (1 + img_mod2.scale), img_mod2.shift, None)
-                img_ffn = block.img_mlp(img_ffn)
-                img_out = img_out + apply_mod(img_ffn, img_mod2.gate, None, None)
-                
-                # FFN for txt
-                txt_ffn = block.txt_norm2(txt_out)
-                txt_ffn = apply_mod(txt_ffn, (1 + txt_mod2.scale), txt_mod2.shift, None)
-                txt_ffn = block.txt_mlp(txt_ffn)
-                txt_out = txt_out + apply_mod(txt_ffn, txt_mod2.gate, None, None)
-                
-                return {"img": img_out, "txt": txt_out}
-                
+                    mask = attn_mask
+                    if mask.dtype == torch.bool:
+                        float_mask = torch.zeros_like(mask, dtype=img.dtype)
+                        float_mask.masked_fill_(~mask, torch.finfo(img.dtype).min)
+                        mask = float_mask
+                    if mask.dim() == 2:
+                        mask = mask.unsqueeze(1).unsqueeze(1)
+                    elif mask.dim() == 3:
+                        mask = mask.unsqueeze(1)
+                    if mask.device != bias_for_attn.device:
+                        mask = mask.to(bias_for_attn.device)
+                    if mask.dtype != bias_for_attn.dtype:
+                        mask = mask.to(bias_for_attn.dtype)
+                    bias_for_attn = bias_for_attn + mask
+
+                new_args = dict(args)
+                new_args["attn_mask"] = bias_for_attn
+                return original_block(new_args)
+
             except Exception as e:
                 logging.warning(f"[FreeFuse] Failed to apply attention bias at block {block_index}: {e}")
                 import traceback
@@ -358,20 +289,41 @@ class FreeFuseFluxBiasSingleBlockReplace:
                 return original_block(args)
             
             try:
-                from comfy.ldm.flux.math import apply_rope
-                from comfy.ldm.flux.layers import apply_mod
-                
                 B, total_seq_len, _ = x.shape
-                
-                # Infer img_seq_len from masks
-                # Masks are flattened: (B, img_seq_len)
+
+                # Require exact txt_len passed via transformer_options (no guessing).
+                txt_len = transformer_options.get("txt_len") if isinstance(transformer_options, dict) else None
+
+                if txt_len is None:
+                    logging.warning(
+                        f"[FreeFuse] Single block {block_index} missing txt_len in transformer_options; "
+                        "skipping bias to avoid guessing."
+                    )
+                    return original_block(args)
+
+                img_seq_len = total_seq_len - txt_len
+                if img_seq_len <= 0:
+                    logging.warning(
+                        f"[FreeFuse] Single block {block_index} invalid lengths "
+                        f"(total_seq_len={total_seq_len}, txt_len={txt_len}). Skipping bias."
+                    )
+                    return original_block(args)
+
+                # Optional sanity check: log if mask length doesn't match derived img length
                 first_mask = next(iter(lora_masks.values()))
+                mask_seq_len = None
                 if first_mask.dim() == 2:
-                    img_seq_len = first_mask.shape[1]
-                else:
-                    img_seq_len = first_mask.numel()
-                txt_len = total_seq_len - img_seq_len
-                
+                    mask_seq_len = first_mask.shape[1]
+                elif first_mask.dim() == 1:
+                    mask_seq_len = first_mask.shape[0]
+                elif first_mask.dim() == 3:
+                    mask_seq_len = first_mask.shape[1] * first_mask.shape[2]
+                if mask_seq_len is not None and mask_seq_len != img_seq_len and block_index == 0:
+                    logging.info(
+                        f"[FreeFuse] Single block {block_index} mask len {mask_seq_len} "
+                        f"!= img_seq_len {img_seq_len}; masks will be resized in bias construction."
+                    )
+
                 # Construct attention bias dynamically
                 cache_key = (total_seq_len, txt_len, img_seq_len)
                 if cache_key not in bias_cache:
@@ -384,6 +336,8 @@ class FreeFuseFluxBiasSingleBlockReplace:
                         positive_bias_scale=config.positive_bias_scale if config.use_positive_bias else 0.0,
                         bidirectional=config.bidirectional,
                         use_positive_bias=config.use_positive_bias,
+                        device=x.device,
+                        dtype=x.dtype,
                     )
                     if attention_bias is not None:
                         bias_cache[cache_key] = attention_bias
@@ -391,96 +345,50 @@ class FreeFuseFluxBiasSingleBlockReplace:
                             logging.info(f"[FreeFuse] Single block bias: shape={attention_bias.shape}")
                     else:
                         bias_cache[cache_key] = None
-                
+
                 attention_bias = bias_cache.get(cache_key)
-                
                 if attention_bias is None:
                     return original_block(args)
-                
-                # Get modulation
-                if block.modulation:
-                    mod, _ = block.modulation(vec)
-                else:
-                    mod = vec
-                
-                # Apply pre-norm and modulation
-                x_normed = block.pre_norm(x)
-                x_mod = apply_mod(x_normed, (1 + mod.scale), mod.shift, None)
-                
-                # Split QKV and MLP
-                qkv, mlp = torch.split(
-                    block.linear1(x_mod),
-                    [3 * block.hidden_size, block.mlp_hidden_dim_first],
-                    dim=-1
-                )
-                
-                # Reshape QKV
-                q, k, v = qkv.view(B, total_seq_len, 3, block.num_heads, -1).permute(2, 0, 3, 1, 4)
-                del qkv
-                
-                # Normalize Q and K
-                q, k = block.norm(q, k, v)
-                
-                # Apply RoPE if present
-                if pe is not None:
-                    q, k = apply_rope(q, k, pe)
-                
-                # Compute attention with bias
-                head_dim = q.shape[-1]
-                scale = head_dim ** -0.5
-                
-                attn_weights = torch.einsum('bhid,bhjd->bhij', q, k) * scale
-                del q, k
-                
-                # Apply attention bias
+
                 bias_for_attn = attention_bias
-                if bias_for_attn.device != attn_weights.device:
-                    bias_for_attn = bias_for_attn.to(attn_weights.device)
-                if bias_for_attn.dtype != attn_weights.dtype:
-                    bias_for_attn = bias_for_attn.to(attn_weights.dtype)
-                
+                if bias_for_attn.device != x.device:
+                    bias_for_attn = bias_for_attn.to(x.device)
+                if bias_for_attn.dtype != x.dtype:
+                    bias_for_attn = bias_for_attn.to(x.dtype)
+
+                # Handle size mismatch: pad or crop to total_seq_len
+                if bias_for_attn.shape[-1] != total_seq_len:
+                    if bias_for_attn.shape[-1] < total_seq_len:
+                        pad_s = total_seq_len - bias_for_attn.shape[-1]
+                        bias_for_attn = F.pad(bias_for_attn, (0, pad_s, 0, pad_s), value=0.0)
+                    else:
+                        bias_for_attn = bias_for_attn[:, :total_seq_len, :total_seq_len]
+
+                # Ensure bias has heads dimension for broadcasting
                 if bias_for_attn.dim() == 3:
                     bias_for_attn = bias_for_attn.unsqueeze(1)
-                
-                # Handle size mismatch
-                if bias_for_attn.shape[-1] != attn_weights.shape[-1]:
-                    # Bias was constructed for different size, skip
-                    logging.warning(f"[FreeFuse] Single block {block_index} bias size mismatch: "
-                                  f"bias={bias_for_attn.shape}, attn={attn_weights.shape}")
-                    return original_block(args)
-                
-                attn_weights = attn_weights + bias_for_attn
-                
-                # Apply attention mask if provided
+
+                # Combine with attention mask if provided (keep additive semantics)
                 if attn_mask is not None:
-                    attn_weights = attn_weights + attn_mask
-                
-                # Softmax and compute output
-                attn_weights = F.softmax(attn_weights, dim=-1)
-                attn_out = torch.einsum('bhij,bhjd->bhid', attn_weights, v)
-                del v, attn_weights
-                
-                attn_out = attn_out.transpose(1, 2).reshape(B, total_seq_len, -1)
-                
-                # MLP activation
-                if block.yak_mlp:
-                    mlp = block.mlp_act(mlp[..., block.mlp_hidden_dim_first // 2:]) * mlp[..., :block.mlp_hidden_dim_first // 2]
-                else:
-                    mlp = block.mlp_act(mlp)
-                
-                # Combine attention and MLP through linear2
-                output = block.linear2(torch.cat((attn_out, mlp), 2))
-                
-                # Apply gating and residual
-                x = x + apply_mod(output, mod.gate, None, None)
-                
-                # Handle fp16 overflow
-                if x.dtype == torch.float16:
-                    x = torch.nan_to_num(x, nan=0.0, posinf=65504, neginf=-65504)
-                
-                # Return in expected format for ComfyUI Flux single block
-                return {"img": x}
-                
+                    mask = attn_mask
+                    if mask.dtype == torch.bool:
+                        float_mask = torch.zeros_like(mask, dtype=x.dtype)
+                        float_mask.masked_fill_(~mask, torch.finfo(x.dtype).min)
+                        mask = float_mask
+                    if mask.dim() == 2:
+                        mask = mask.unsqueeze(1).unsqueeze(1)
+                    elif mask.dim() == 3:
+                        mask = mask.unsqueeze(1)
+                    if mask.device != bias_for_attn.device:
+                        mask = mask.to(bias_for_attn.device)
+                    if mask.dtype != bias_for_attn.dtype:
+                        mask = mask.to(bias_for_attn.dtype)
+                    bias_for_attn = bias_for_attn + mask
+
+                new_args = dict(args)
+                new_args["attn_mask"] = bias_for_attn
+                return original_block(new_args)
+
             except Exception as e:
                 logging.warning(f"[FreeFuse] Failed to apply bias to single block {block_index}: {e}")
                 import traceback
@@ -694,9 +602,9 @@ class FreeFuseZImageBiasBlockReplace:
     """
     Block replace patch for Z-Image (Lumina2/NextDiT) that applies attention bias.
     
-    Z-Image uses a unified [img, txt] sequence (image FIRST, then text).
-    We construct bias using the standard construct_attention_bias (which outputs
-    [txt, img] layout) and then permute to [img, txt] layout.
+    In ComfyUI's NextDiT, the unified sequence is [txt, img] (text FIRST, then image).
+    This matches the standard construct_attention_bias output layout [txt, img],
+    so NO permutation is needed.
     """
     
     def __init__(
@@ -721,14 +629,19 @@ class FreeFuseZImageBiasBlockReplace:
         device: torch.device,
         dtype: torch.dtype,
     ) -> Optional[torch.Tensor]:
-        """Get cached bias or build new one, permuted to [img, txt] layout."""
+        """Get cached bias or build new one in [txt, img] layout.
+        
+        In ComfyUI's NextDiT, the unified sequence is [txt, img] (text FIRST),
+        which matches construct_attention_bias's output layout directly.
+        No permutation is needed.
+        """
         cache_key = (img_len, cap_len)
         if cache_key in self._bias_cache:
             bias = self._bias_cache[cache_key]
             return bias.to(device=device, dtype=dtype)
         
-        # Build in [txt, img] layout first
-        bias_txt_img = construct_attention_bias(
+        # Build in [txt, img] layout — matches ComfyUI's NextDiT sequence order
+        bias = construct_attention_bias(
             lora_masks=self.lora_masks,
             token_pos_maps=self.token_pos_maps,
             txt_seq_len=cap_len,
@@ -741,23 +654,113 @@ class FreeFuseZImageBiasBlockReplace:
             dtype=dtype,
         )
         
-        if bias_txt_img is None:
+        if bias is None:
             self._bias_cache[cache_key] = None
             return None
         
-        # Permute from [txt, img] to [img, txt] layout
-        # bias_txt_img shape: (B, txt+img, txt+img)
-        # Create permutation: [txt_indices, img_indices] -> [img_indices, txt_indices]
-        perm = torch.cat([
-            torch.arange(cap_len, cap_len + img_len),  # img indices first
-            torch.arange(cap_len),                      # txt indices second
-        ]).to(device)
-        
-        # Reorder both dimensions
-        bias_img_txt = bias_txt_img[:, perm][:, :, perm]
-        
-        self._bias_cache[cache_key] = bias_img_txt
-        return bias_img_txt
+        # No permutation needed: ComfyUI's NextDiT uses [txt, img] order
+        # which matches construct_attention_bias's output layout directly
+        self._bias_cache[cache_key] = bias
+
+        if os.environ.get("FREEFUSE_DEBUG_ZIMAGE") == "1":
+            try:
+                print(
+                    "[FreeFuse Z-Image Debug] attention_bias "
+                    f"(cap_len={cap_len}, img_len={img_len}) "
+                    f"min={bias.min().item():.4f} max={bias.max().item():.4f} "
+                    f"mean={bias.mean().item():.4f}"
+                )
+            except Exception:
+                pass
+        return bias
+
+    def _attention_with_bias(
+        self,
+        attention,
+        x: torch.Tensor,
+        x_mask: Optional[torch.Tensor],
+        freqs_cis: Optional[torch.Tensor],
+        transformer_options: Dict[str, Any],
+        attention_bias: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """
+        Compute JointAttention with additive bias, mirroring ComfyUI's Lumina2 implementation.
+
+        This reproduces:
+          - qkv projection
+          - q_norm / k_norm
+          - complex RoPE (apply_rope)
+          - GQA expansion
+          - scaled dot-product attention with optional additive bias + key mask
+          - out projection
+        """
+        bsz, seqlen, _ = x.shape
+
+        # QKV
+        qkv = attention.qkv(x)
+        n_heads = attention.n_local_heads
+        n_kv_heads = attention.n_local_kv_heads
+        head_dim = attention.head_dim
+
+        xq, xk, xv = torch.split(
+            qkv,
+            [n_heads * head_dim, n_kv_heads * head_dim, n_kv_heads * head_dim],
+            dim=-1,
+        )
+        xq = xq.view(bsz, seqlen, n_heads, head_dim)
+        xk = xk.view(bsz, seqlen, n_kv_heads, head_dim)
+        xv = xv.view(bsz, seqlen, n_kv_heads, head_dim)
+
+        # QK norm
+        xq = attention.q_norm(xq)
+        xk = attention.k_norm(xk)
+
+        # RoPE (complex-valued)
+        if freqs_cis is not None:
+            xq, xk = apply_rope(xq, xk, freqs_cis)
+
+        # GQA expansion
+        n_rep = n_heads // n_kv_heads
+        if n_rep >= 1:
+            xk = xk.unsqueeze(3).repeat(1, 1, 1, n_rep, 1).flatten(2, 3)
+            xv = xv.unsqueeze(3).repeat(1, 1, 1, n_rep, 1).flatten(2, 3)
+
+        # (B, heads, seq, head_dim)
+        q = xq.transpose(1, 2)
+        k = xk.transpose(1, 2)
+        v = xv.transpose(1, 2)
+
+        # Build attention mask: additive bias (+ optional key mask)
+        attn_mask = None
+        if attention_bias is not None:
+            bias = attention_bias
+            if bias.dim() == 3:
+                bias = bias.unsqueeze(1)
+            bias = bias.to(device=q.device, dtype=q.dtype)
+            attn_mask = bias
+
+        if x_mask is not None:
+            # key mask: (B, seq) -> (B, 1, 1, seq) with -inf for padding
+            key_mask = torch.zeros(
+                bsz, 1, 1, seqlen, device=q.device, dtype=q.dtype
+            )
+            key_mask.masked_fill_(
+                ~x_mask.bool().unsqueeze(1).unsqueeze(1),
+                torch.finfo(q.dtype).min,
+            )
+            attn_mask = key_mask if attn_mask is None else attn_mask + key_mask
+
+        # Use SDPA with additive mask (float)
+        attn_out = comfy.ops.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=attn_mask,
+            dropout_p=0.0,
+            is_causal=False,
+        )
+
+        # (B, seq, dim)
+        attn_out = attn_out.transpose(1, 2).reshape(bsz, seqlen, n_heads * head_dim)
+        return attention.out(attn_out)
     
     def create_block_replace(self) -> Callable:
         """Create a block replace function for Z-Image JointTransformerBlock."""
@@ -770,10 +773,11 @@ class FreeFuseZImageBiasBlockReplace:
             """
             Replace function for Z-Image JointTransformerBlock with attention bias.
             """
-            x = args["x"]  # (B, seq_len, dim) = [img + cap]
+            x = args["x"]  # (B, seq_len, dim) = [txt + img] in ComfyUI Lumina2
             x_mask = args.get("x_mask")
             freqs_cis = args["freqs_cis"]
             adaln_input = args.get("adaln_input")
+            timestep_zero_index = args.get("timestep_zero_index")
             transformer_options = args.get("transformer_options", {})
             
             original_block = extra_args["original_block"]
@@ -810,7 +814,7 @@ class FreeFuseZImageBiasBlockReplace:
                 if cap_seq_len <= 0:
                     return original_block(args)
                 
-                # Build attention bias in [img, txt] layout
+                # Build attention bias in [txt, img] layout (matches ComfyUI's NextDiT sequence order)
                 attention_bias = bias_builder._get_or_build_bias(
                     img_len=img_seq_len,
                     cap_len=cap_seq_len,
@@ -821,97 +825,36 @@ class FreeFuseZImageBiasBlockReplace:
                 if attention_bias is None:
                     return original_block(args)
                 
-                # === Execute block with modified attention ===
+                # === Execute block with modified attention (match ComfyUI Lumina2) ===
                 attention = block.attention
-                
-                # Apply modulation
-                if block.modulation and adaln_input is not None:
+
+                if block.modulation:
+                    if adaln_input is None:
+                        return original_block(args)
                     scale_msa, gate_msa, scale_mlp, gate_mlp = block.adaLN_modulation(adaln_input).chunk(4, dim=1)
-                    x_normed = block.attention_norm1(x)
-                    x_modulated = x_normed * (1 + scale_msa.unsqueeze(1))
+
+                    attn_in = modulate(block.attention_norm1(x), scale_msa, timestep_zero_index=timestep_zero_index)
+                    attn_out = self._attention_with_bias(
+                        attention, attn_in, x_mask, freqs_cis, transformer_options, attention_bias
+                    )
+                    attn_out = block.attention_norm2(clamp_fp16(attn_out))
+                    x = x + apply_gate(gate_msa.unsqueeze(1).tanh(), attn_out, timestep_zero_index=timestep_zero_index)
+
+                    ff_in = modulate(block.ffn_norm1(x), scale_mlp, timestep_zero_index=timestep_zero_index)
+                    ff_out = block.feed_forward(ff_in)
+                    ff_out = block.ffn_norm2(clamp_fp16(ff_out))
+                    x = x + apply_gate(gate_mlp.unsqueeze(1).tanh(), ff_out, timestep_zero_index=timestep_zero_index)
                 else:
-                    x_modulated = block.attention_norm1(x)
-                    gate_msa = None
-                    scale_mlp = None
-                    gate_mlp = None
-                
-                # Compute QKV
-                qkv = attention.qkv(x_modulated)
-                num_heads = attention.num_heads
-                head_dim = dim // num_heads
-                qkv = qkv.view(bsz, seqlen, 3, num_heads, head_dim)
-                q, k, v = qkv.unbind(dim=2)  # Each: (B, seq, heads, head_dim)
-                q = q.transpose(1, 2)  # (B, heads, seq, head_dim)
-                k = k.transpose(1, 2)
-                v = v.transpose(1, 2)
-                
-                # Apply RoPE if available
-                if freqs_cis is not None and hasattr(attention, 'apply_rotary_emb'):
-                    q, k = attention.apply_rotary_emb(q, k, freqs_cis)
-                elif freqs_cis is not None:
-                    # Manual RoPE application
-                    q_img = q[:, :, :img_seq_len]
-                    k_img = k[:, :, :img_seq_len]
-                    # Only apply to image portion if freqs_cis is for image
-                    if freqs_cis.shape[0] == img_seq_len:
-                        q_real = q_img.float().reshape(*q_img.shape[:-1], -1, 2)
-                        k_real = k_img.float().reshape(*k_img.shape[:-1], -1, 2)
-                        freqs = freqs_cis.unsqueeze(0).unsqueeze(0)  # (1, 1, seq, dim/2, 2)
-                        q_rot = torch.stack([
-                            q_real[..., 0] * freqs[..., 0] - q_real[..., 1] * freqs[..., 1],
-                            q_real[..., 0] * freqs[..., 1] + q_real[..., 1] * freqs[..., 0],
-                        ], dim=-1).reshape(q_img.shape).to(q.dtype)
-                        k_rot = torch.stack([
-                            k_real[..., 0] * freqs[..., 0] - k_real[..., 1] * freqs[..., 1],
-                            k_real[..., 0] * freqs[..., 1] + k_real[..., 1] * freqs[..., 0],
-                        ], dim=-1).reshape(k_img.shape).to(k.dtype)
-                        q = torch.cat([q_rot, q[:, :, img_seq_len:]], dim=2)
-                        k = torch.cat([k_rot, k[:, :, img_seq_len:]], dim=2)
-                
-                # Compute attention with bias
-                scale = head_dim ** -0.5
-                attn_weights = torch.einsum('bhid,bhjd->bhij', q, k) * scale
-                
-                # Apply attention bias
-                bias_for_attn = attention_bias.to(device=attn_weights.device, dtype=attn_weights.dtype)
-                if bias_for_attn.dim() == 3:
-                    bias_for_attn = bias_for_attn.unsqueeze(1)  # (B, 1, seq, seq)
-                
-                attn_weights = attn_weights + bias_for_attn
-                
-                # Apply attention mask
-                if x_mask is not None:
-                    if x_mask.dim() == 2:
-                        x_mask_expanded = x_mask.unsqueeze(1).unsqueeze(2)  # (B, 1, 1, seq)
-                        attn_weights = attn_weights.masked_fill(~x_mask_expanded.bool(), float('-inf'))
-                
-                attn_weights = F.softmax(attn_weights, dim=-1)
-                attn_output = torch.einsum('bhij,bhjd->bhid', attn_weights, v)
-                
-                # Reshape
-                attn_output = attn_output.transpose(1, 2).reshape(bsz, seqlen, dim)
-                
-                # Output projection
-                attn_output = attention.out_proj(attn_output)
-                
-                # Apply gate and residual
-                if gate_msa is not None:
-                    x = x + gate_msa.unsqueeze(1) * attn_output
-                else:
-                    x = x + attn_output
-                
-                # FFN
-                if hasattr(block, 'feed_forward'):
-                    if scale_mlp is not None:
-                        ff_input = block.ffn_norm1(x) * (1 + scale_mlp.unsqueeze(1))
-                    else:
-                        ff_input = block.ffn_norm1(x)
-                    ff_output = block.feed_forward(ff_input)
-                    if gate_mlp is not None:
-                        x = x + gate_mlp.unsqueeze(1) * ff_output
-                    else:
-                        x = x + ff_output
-                
+                    # No modulation: match original non-modulated path
+                    attn_in = block.attention_norm1(x)
+                    attn_out = self._attention_with_bias(
+                        attention, attn_in, x_mask, freqs_cis, transformer_options, attention_bias
+                    )
+                    x = x + block.attention_norm2(clamp_fp16(attn_out))
+
+                    ff_out = block.feed_forward(block.ffn_norm1(x))
+                    x = x + block.ffn_norm2(clamp_fp16(ff_out))
+
                 return {"x": x}
                 
             except Exception as e:
@@ -1104,6 +1047,40 @@ def _apply_z_image_bias_patches(
     except AttributeError:
         logging.warning("[FreeFuse] Could not access Z-Image model structure")
         return
+
+    # Resolve Z-Image-specific block presets
+    # ComfyUI Lumina2 blocks are named: layers.{i}
+    apply_to_blocks = config.apply_to_blocks
+    if isinstance(apply_to_blocks, str):
+        preset = apply_to_blocks
+        # Flux/SDXL presets don't apply to Z-Image; map to last_half by default
+        if preset in ("double_stream_only", "single_stream_only", "last_half_double"):
+            preset = "last_half"
+        if preset == "all":
+            apply_to_blocks = None
+        elif preset == "last_half":
+            apply_to_blocks = [f"layers.{i}" for i in range(num_layers // 2, num_layers)]
+        else:
+            apply_to_blocks = [preset]
+        config = AttentionBiasConfig(
+            enabled=config.enabled,
+            bias_scale=config.bias_scale,
+            positive_bias_scale=config.positive_bias_scale,
+            bidirectional=config.bidirectional,
+            use_positive_bias=config.use_positive_bias,
+            apply_to_blocks=apply_to_blocks,
+        )
+    elif isinstance(apply_to_blocks, list):
+        if "last_half" in apply_to_blocks:
+            apply_to_blocks = [f"layers.{i}" for i in range(num_layers // 2, num_layers)]
+            config = AttentionBiasConfig(
+                enabled=config.enabled,
+                bias_scale=config.bias_scale,
+                positive_bias_scale=config.positive_bias_scale,
+                bidirectional=config.bidirectional,
+                use_positive_bias=config.use_positive_bias,
+                apply_to_blocks=apply_to_blocks,
+            )
     
     patches_applied = 0
     

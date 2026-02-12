@@ -19,6 +19,7 @@ Future: This fix should be submitted as a PR to ComfyUI core.
 
 import logging
 import copy
+import os
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
@@ -263,8 +264,8 @@ class MultiAdapterBypassForwardHook:
         - ff.net: YES
         
         For Z-Image (Lumina2/NextDiT):
-        - layers.N.attention.qkv, out_proj -> YES (img_with_text, unified [img, txt] sequence)
-        - layers.N.feed_forward -> YES (img_with_text)
+        - layers.N.attention.qkv, out_proj -> YES (z_image_unified, [txt, img] sequence)
+        - layers.N.feed_forward -> YES (z_image_unified)
         - layers.N.adaLN_modulation -> NO (global, not per-token)
         
         Returns:
@@ -310,6 +311,12 @@ class MultiAdapterBypassForwardHook:
         
         if not result:
             logging.debug(f"[OffsetBypass] Skipping spatial mask for layer: {self.module_key}")
+
+        # Debug summary for Z-Image layer mask decisions
+        if is_z_image and os.environ.get("FREEFUSE_DEBUG_ZIMAGE") == "1":
+            if not hasattr(self, "_debug_zimage_mask_logged"):
+                self._debug_zimage_mask_logged = True
+                print(f"[FreeFuse Z-Image Debug] mask_apply={result} mask_type={mask_type} layer={self.module_key}")
         
         return result
     
@@ -392,7 +399,9 @@ class MultiAdapterBypassForwardHook:
         """
         Check if a Z-Image (Lumina2/NextDiT) layer should have spatial mask applied.
         
-        Z-Image uses a unified [img, txt] sequence (image FIRST, then text).
+        Z-Image uses a unified [txt, img] sequence in ComfyUI (text FIRST, then image).
+        Note: In diffusers, the order is [img, txt], but ComfyUI's NextDiT concatenates
+        as torch.cat(feats + (x,), dim=1) where feats=(cap_feats,) and x=img.
         All transformer layers process this unified sequence.
         
         Returns:
@@ -435,9 +444,9 @@ class MultiAdapterBypassForwardHook:
         - 'img_with_text': For Flux single stream blocks where txt+img are concatenated.
                           Returns mask with txt portion = 1.0 and img portion = spatial mask.
                           Layout: [txt_tokens, img_tokens]
-        - 'z_image_unified': For Z-Image unified sequence where img comes FIRST.
-                            Returns mask with img portion = spatial mask and txt portion = 1.0.
-                            Layout: [img_tokens, txt_tokens]
+        - 'z_image_unified': For Z-Image unified sequence where txt comes FIRST.
+                            Returns mask with txt portion = 1.0 and img portion = spatial mask.
+                            Layout: [txt_tokens, img_tokens]
         - 'img_only': For Flux double stream (img path) and SDXL layers.
                       Returns mask for image sequence only (no text portion).
         
@@ -467,8 +476,9 @@ class MultiAdapterBypassForwardHook:
                 # This might be a txt-only layer, don't apply mask
                 return None
         elif mask_type == 'z_image_unified':
-            # Z-Image unified: seq_len = img_len + cap_len
-            # img comes first, text second
+            # Z-Image unified: seq_len = cap_len + img_len
+            # In ComfyUI's NextDiT, TEXT comes FIRST, then IMAGE
+            # (padded_full_embed = torch.cat(feats + (x,), dim=1))
             # Infer img_len from mask shape
             if mask.dim() == 2:
                 img_len = mask.shape[0] * mask.shape[1]
@@ -544,10 +554,11 @@ class MultiAdapterBypassForwardHook:
         
         # Build final mask based on mask_type
         if mask_type == 'z_image_unified':
-            # Z-Image unified: img tokens come FIRST, then text tokens
-            # Layout: [img_tokens(spatial mask), txt_tokens(1.0)]
+            # Z-Image unified in ComfyUI: TEXT tokens come FIRST, then IMAGE tokens
+            # Layout: [txt_tokens(1.0), img_tokens(spatial mask)]
+            # (ComfyUI's NextDiT: padded_full_embed = torch.cat(feats + (x,), dim=1))
             full_mask = torch.ones(seq_len, device=device, dtype=dtype)
-            full_mask[:img_len] = mask_flat[:img_len].to(device=device, dtype=dtype)
+            full_mask[cap_len:cap_len + img_len] = mask_flat[:img_len].to(device=device, dtype=dtype)
         elif mask_type == 'img_with_text':
             # Flux single stream: txt tokens come first, then img tokens
             # Layout: [txt_tokens(1.0), img_tokens(spatial mask)]
@@ -556,6 +567,16 @@ class MultiAdapterBypassForwardHook:
         else:
             # img_only: mask covers entire sequence (which is only image tokens)
             full_mask = mask_flat.to(device=device, dtype=dtype)
+
+        # Debug: log resolved lengths for Z-Image once per adapter
+        if mask_type == 'z_image_unified' and os.environ.get("FREEFUSE_DEBUG_ZIMAGE") == "1":
+            debug_key = f"_debug_zimage_mask_shape_{adapter_name}"
+            if not hasattr(self, debug_key):
+                setattr(self, debug_key, True)
+                print(
+                    f"[FreeFuse Z-Image Debug] seq_len={seq_len} cap_len={cap_len} img_len={img_len} "
+                    f"mask_shape={tuple(mask.shape)} adapter={adapter_name} layer={self.module_key}"
+                )
         
         return full_mask
     
@@ -863,6 +884,25 @@ class OffsetBypassInjectionManager:
             self.hooks.append(hook)
         
         logging.debug(f"[OffsetBypass] Created {len(self.hooks)} hooks")
+
+        if os.environ.get("FREEFUSE_DEBUG_ZIMAGE") == "1":
+            # Summarize Z-Image mask application across hooked modules
+            total = 0
+            apply_count = 0
+            mask_type_counts: Dict[str, int] = {}
+            sample = []
+            for hook in self.hooks:
+                total += 1
+                apply = hook._should_apply_spatial_mask()
+                if apply:
+                    apply_count += 1
+                mask_type = hook._mask_type_cached or "none"
+                mask_type_counts[mask_type] = mask_type_counts.get(mask_type, 0) + 1
+                if len(sample) < 10:
+                    sample.append((hook.module_key, mask_type, apply))
+            print(f"[FreeFuse Z-Image Debug] hooks={total} apply={apply_count} mask_types={mask_type_counts}")
+            for mk, mt, ap in sample:
+                print(f"[FreeFuse Z-Image Debug] sample layer={mk} mask_type={mt} apply={ap}")
         
         # IMPORTANT: Don't capture self in closures!
         # When model is cloned, model_options is deepcopied creating new manager,

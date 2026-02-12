@@ -501,85 +501,6 @@
       ]
     },
     {
-      "id": 11,
-      "type": "CLIPTextEncodeFlux",
-      "pos": [
-        1320,
-        450
-      ],
-      "size": [
-        340,
-        166
-      ],
-      "flags": {},
-      "order": 10,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "clip",
-          "type": "CLIP",
-          "link": 9
-        }
-      ],
-      "outputs": [
-        {
-          "name": "CONDITIONING",
-          "type": "CONDITIONING",
-          "slot_index": 0,
-          "links": [
-            38,
-            39
-          ]
-        }
-      ],
-      "title": "Negative Conditioning",
-      "properties": {
-        "Node name for S&R": "CLIPTextEncodeFlux"
-      },
-      "widgets_values": [
-        "",
-        "",
-        3.5
-      ]
-    },
-    {
-      "id": 10,
-      "type": "EmptySD3LatentImage",
-      "pos": [
-        1320,
-        600
-      ],
-      "size": [
-        340,
-        106
-      ],
-      "flags": {},
-      "order": 5,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "LATENT",
-          "type": "LATENT",
-          "slot_index": 0,
-          "links": [
-            17,
-            22,
-            50
-          ]
-        }
-      ],
-      "title": "Latent Image Size",
-      "properties": {
-        "Node name for S&R": "EmptySD3LatentImage"
-      },
-      "widgets_values": [
-        1024,
-        1024,
-        1
-      ]
-    },
-    {
       "id": 13,
       "type": "PreviewImage",
       "pos": [
@@ -917,7 +838,7 @@
         2200
       ],
       "flags": {},
-      "order": 6,
+      "order": 5,
       "mode": 0,
       "inputs": [],
       "outputs": [],
@@ -1026,6 +947,85 @@
         0,
         0,
         1.3
+      ]
+    },
+    {
+      "id": 10,
+      "type": "EmptySD3LatentImage",
+      "pos": [
+        1320,
+        651.2468911968602
+      ],
+      "size": [
+        340,
+        106
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "slot_index": 0,
+          "links": [
+            17,
+            22,
+            50
+          ]
+        }
+      ],
+      "title": "Latent Image Size",
+      "properties": {
+        "Node name for S&R": "EmptySD3LatentImage"
+      },
+      "widgets_values": [
+        1024,
+        1024,
+        1
+      ]
+    },
+    {
+      "id": 11,
+      "type": "CLIPTextEncodeFlux",
+      "pos": [
+        1320.78017412197,
+        478.0312149293347
+      ],
+      "size": [
+        340,
+        166
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 9
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "slot_index": 0,
+          "links": [
+            38,
+            39
+          ]
+        }
+      ],
+      "title": "Negative Conditioning",
+      "properties": {
+        "Node name for S&R": "CLIPTextEncodeFlux"
+      },
+      "widgets_values": [
+        "",
+        "",
+        3.5
       ]
     }
   ],
@@ -1370,10 +1370,10 @@
   "config": {},
   "extra": {
     "ds": {
-      "scale": 1.0545881759845481,
+      "scale": 0.6288129863327355,
       "offset": [
-        -1085.0607983605973,
-        -431.4968639018068
+        -1025.4246527754556,
+        -144.5362040523662
       ]
     },
     "info": {

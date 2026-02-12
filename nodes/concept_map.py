@@ -10,6 +10,7 @@ from ..freefuse_core.token_utils import (
     find_background_positions,
     detect_model_type,
     compute_token_position_maps,
+    LUMINA2_SYSTEM_PROMPT,
 )
 
 
@@ -135,6 +136,10 @@ class FreeFuseTokenPositions:
         model_type = detect_model_type(clip)
         print(f"[FreeFuseTokenPositions] Detected model type: {model_type}")
         
+        # For Z-Image (Lumina2), pass system prompt so token positions
+        # align with the conditioning produced by CLIPTextEncodeLumina2
+        system_prompt = LUMINA2_SYSTEM_PROMPT if model_type == 'z_image' else None
+        
         # Compute token positions for each concept
         token_pos_maps = find_concept_positions(
             clip=clip,
@@ -143,6 +148,7 @@ class FreeFuseTokenPositions:
             filter_meaningless=filter_meaningless,
             filter_single_char=filter_single_char,
             model_type=model_type,
+            system_prompt=system_prompt,
         )
         
         # Handle background
@@ -155,6 +161,7 @@ class FreeFuseTokenPositions:
                 prompt=prompt,
                 background_text=background_text if background_text else None,
                 model_type=model_type,
+                system_prompt=system_prompt,
             )
             if bg_positions:
                 token_pos_maps["__background__"] = [bg_positions]
@@ -246,6 +253,10 @@ class FreeFuseConceptMapSimple:
         model_type = detect_model_type(clip)
         print(f"[FreeFuseConceptMapSimple] Detected model type: {model_type}")
         
+        # For Z-Image (Lumina2), pass system prompt so token positions
+        # align with the conditioning produced by CLIPTextEncodeLumina2
+        system_prompt = LUMINA2_SYSTEM_PROMPT if model_type == 'z_image' else None
+        
         # Compute token positions
         token_pos_maps = find_concept_positions(
             clip=clip,
@@ -254,6 +265,7 @@ class FreeFuseConceptMapSimple:
             filter_meaningless=filter_meaningless,
             filter_single_char=filter_single_char,
             model_type=model_type,
+            system_prompt=system_prompt,
         )
         
         # Handle background
@@ -263,6 +275,7 @@ class FreeFuseConceptMapSimple:
                 prompt=prompt,
                 background_text=background_text.strip() if background_text else None,
                 model_type=model_type,
+                system_prompt=system_prompt,
             )
             if bg_positions:
                 token_pos_maps["__background__"] = [bg_positions]

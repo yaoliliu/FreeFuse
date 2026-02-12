@@ -36,6 +36,19 @@ import comfy.samplers
 import comfy.sample
 
 
+def _get_latent_shape(model, width, height, fallback_channels=16, fallback_downscale=8):
+    """Resolve latent shape from model if possible (Flux2 uses different latent format)."""
+    latent_format = getattr(getattr(model, "model", None), "latent_format", None)
+    if latent_format is not None:
+        latent_channels = getattr(latent_format, "latent_channels", fallback_channels)
+        downscale = getattr(latent_format, "spacial_downscale_ratio", fallback_downscale)
+    else:
+        latent_channels = fallback_channels
+        downscale = fallback_downscale
+    latent_h, latent_w = height // downscale, width // downscale
+    return latent_channels, latent_h, latent_w
+
+
 def check_models_available():
     """Check if required models are available."""
     print("\n" + "="*60)
@@ -271,11 +284,12 @@ def test_phase1_sampling(model, clip, freefuse_data, prompt):
     print(f"   cond shape: {cond.shape}")
     print(f"   pooled shape: {pooled.shape}")
     
-    # Create latent
+    # Create latent (respect model latent format when available)
     batch_size = 1
     height = 1024
     width = 1024
-    latent = torch.zeros([batch_size, 16, height // 8, width // 8], device="cpu")
+    latent_channels, latent_h, latent_w = _get_latent_shape(model, width, height)
+    latent = torch.zeros([batch_size, latent_channels, latent_h, latent_w], device="cpu")
     latent_dict = {"samples": latent}
     
     print(f"\n✅ Latent created: {latent.shape}")
@@ -382,7 +396,8 @@ def main():
             return False
         
         # 5. Mask application
-        latent = {"samples": torch.zeros([1, 16, 128, 128])}
+        latent_channels, latent_h, latent_w = _get_latent_shape(model, 1024, 1024)
+        latent = {"samples": torch.zeros([1, latent_channels, latent_h, latent_w])}
         model_final = test_mask_applicator(model_out, masks, freefuse_data, latent)
         
         # Summary

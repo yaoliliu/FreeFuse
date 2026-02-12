@@ -89,7 +89,7 @@ class FreeFuseMaskApplicator:
                     "default": True,
                     "tooltip": "Add positive bias for same-LoRA pairs in addition to negative bias"
                 }),
-                "bias_blocks": (["all", "double_stream_only", "single_stream_only", "last_half_double", "none"], {
+                "bias_blocks": (["all", "double_stream_only", "single_stream_only", "last_half_double", "last_half", "none"], {
                     "default": "double_stream_only",
                     "tooltip": "Which transformer blocks to apply attention bias"
                 }),
