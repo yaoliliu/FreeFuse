@@ -60,14 +60,6 @@ This paper proposes **FreeFuse**, a training-free framework for multi-subject te
 
 ### Installation with ComfyUI
 
-<p align="center">
-  <img src="assets/compare_all.png" alt="Architecture" width="100%">
-</p>
-
-<p align="center">
-  <em>FreeFuse solves feature conflicts between multiple subject LoRAs without additional training in flux1.dev, sdxl, z-image and more.</em>
-</p>
-
 ```shell
 # use comfy-cli
 pip install comfy-cli
@@ -142,5 +134,13 @@ python main_freefuse_z_image.py
 ## Acknowledgement
 
 Thanks for [Tekemo](https://civarchive.com/users/Tekemo) and [jrewingwannabe947](https://civitai.com/user/jrewingwannabe947)'s ZIT LoRAs, which are used in our Z-Image-turbo examples.
+
+<p align="center">
+  <img src="assets/compare_all.png" alt="Architecture" width="100%">
+</p>
+
+<p align="center">
+  <em>FreeFuse solves feature conflicts between multiple subject LoRAs without additional training in flux1.dev, sdxl, z-image and more.</em>
+</p>
 
 
