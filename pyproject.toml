@@ -1,7 +1,7 @@
 [project]
 name = "freefuse"
 description = "FreeFuse: Easily multi LoRA multi subject Generation! 🤗"
-version = "1.0.1"
+version = "1.0.4"
 license = {file = "LICENSE"} 
 # classifiers = [
 #     # For OS-independent nodes (works on all operating systems)
@@ -31,7 +31,7 @@ Documentation = "https://github.com/yaoliliu/FreeFuse/"
 [tool.comfy]
 PublisherId = "yaoliliu"  
 DisplayName = "FreeFuse"
-Icon = ""
+Icon = "https://files.lsmcloud.top/blogd91406255515e5d522f326db2c1b85d8.png"
 includes = [] 
 # "requires-comfyui" = ">=1.0.0"  # ComfyUI version compatibility
 
