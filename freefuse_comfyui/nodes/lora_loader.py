@@ -23,6 +23,7 @@ import comfy.lora_convert
 
 # Use our fixed bypass loader instead of ComfyUI's buggy version
 from ..freefuse_core.bypass_lora_loader import load_bypass_lora_for_models_fixed
+from ..freefuse_core.token_utils import detect_model_type
 
 
 class FreeFuseLoRALoader:
@@ -146,6 +147,16 @@ Example workflow:
         if "transformer_options" not in model_lora.model_options:
             model_lora.model_options["transformer_options"] = {}
         model_lora.model_options["transformer_options"]["freefuse_data"] = freefuse_data
+
+        # Persist model_type from model/UNet side (not from text encoder side).
+        # This prevents qwen3 tokenizer ambiguity (e.g. Z-Image vs Flux2-Klein).
+        model_type = detect_model_type(
+            clip=clip_lora,
+            model=model_lora,
+            model_type_hint=freefuse_data.get("model_type"),
+        )
+        if model_type != "unknown":
+            freefuse_data["model_type"] = model_type
         
         logging.info(f"[FreeFuse] Loaded LoRA '{adapter_name}' with {len(loaded)} keys")
         
@@ -234,6 +245,14 @@ will be applied via attention modulation instead."""
             "strength_model": strength_model,
             "strength_clip": strength_clip,
         })
+
+        model_type = detect_model_type(
+            clip=clip_lora,
+            model=model_lora,
+            model_type_hint=freefuse_data.get("model_type"),
+        )
+        if model_type != "unknown":
+            freefuse_data["model_type"] = model_type
         
         logging.info(f"[FreeFuse] Loaded LoRA '{adapter_name}' (merged mode)")
         

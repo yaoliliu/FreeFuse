@@ -132,8 +132,9 @@ class FreeFuseTokenPositions:
             data["token_pos_maps"] = {}
             return (data,)
         
-        # Detect model type
-        model_type = detect_model_type(clip)
+        # Detect model type (prefer model-side hint stored in freefuse_data)
+        model_type_hint = data.get("model_type")
+        model_type = detect_model_type(clip=clip, model_type_hint=model_type_hint)
         print(f"[FreeFuseTokenPositions] Detected model type: {model_type}")
         
         # For Z-Image (Lumina2), pass system prompt so token positions
@@ -249,8 +250,8 @@ class FreeFuseConceptMapSimple:
                 "token_pos_maps": {},
             },)
         
-        # Detect model type
-        model_type = detect_model_type(clip)
+        # Detect model type (clip-only fallback for simple workflow node)
+        model_type = detect_model_type(clip=clip)
         print(f"[FreeFuseConceptMapSimple] Detected model type: {model_type}")
         
         # For Z-Image (Lumina2), pass system prompt so token positions

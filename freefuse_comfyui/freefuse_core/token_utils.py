@@ -66,35 +66,201 @@ def is_meaningless_token(token_text: str, check_single_char: bool = True) -> boo
     return cleaned in MEANINGLESS_TOKENS
 
 
-def detect_model_type(clip) -> str:
+def _normalize_model_type(model_type: Optional[str]) -> Optional[str]:
+    """Normalize user-provided model type aliases."""
+    if not isinstance(model_type, str):
+        return None
+
+    value = model_type.strip().lower()
+    if not value or value in {"auto", "unknown", "none", "null"}:
+        return None
+
+    aliases = {
+        "zimage": "z_image",
+        "z-image": "z_image",
+        "lumina2": "z_image",
+        "nextdit": "z_image",
+        "flux1": "flux",
+        "flux2.klein": "flux2",
+        "flux2_klein": "flux2",
+        "sd1.5": "sd1",
+        "sd2": "sd1",
+        "sd2.x": "sd1",
+    }
+    return aliases.get(value, value)
+
+
+def _extract_model_core(model):
+    """Extract inner model object from a ComfyUI model patcher."""
+    if model is None:
+        return None
+    return getattr(model, "model", model)
+
+
+def detect_model_type_from_model(model) -> str:
     """
-    Detect whether the CLIP model is for Flux (T5), SDXL, or Z-Image (Qwen3).
+    Detect model type from UNet/model object instead of text encoder.
+
+    Args:
+        model: ComfyUI model patcher or inner model object
+
+    Returns:
+        'flux', 'flux2', 'sdxl', 'z_image', or 'unknown'
+    """
+    core_model = _extract_model_core(model)
+    if core_model is None:
+        return "unknown"
+
+    model_cls = core_model.__class__.__name__.lower()
+    if "nextdit" in model_cls or "lumina" in model_cls:
+        return "z_image"
+    if "flux2" in model_cls:
+        return "flux2"
+    if "flux" in model_cls:
+        return "flux"
+
+    dm = getattr(core_model, "diffusion_model", None)
+    if dm is not None:
+        dm_cls = dm.__class__.__name__.lower()
+        if "nextdit" in dm_cls or "lumina" in dm_cls:
+            return "z_image"
+        if "flux2" in dm_cls:
+            return "flux2"
+        if "flux" in dm_cls:
+            return "flux"
+        if hasattr(dm, "double_blocks") and hasattr(dm, "single_blocks"):
+            return "flux"
+        # Lumina2/NextDiT style: layered stack without Flux double/single blocks
+        if hasattr(dm, "layers") and not hasattr(dm, "double_blocks"):
+            return "z_image"
+
+    model_cfg = getattr(core_model, "model_config", None)
+    unet_cfg = getattr(model_cfg, "unet_config", None)
+    if isinstance(unet_cfg, dict):
+        image_model = str(unet_cfg.get("image_model", "")).lower()
+        if image_model == "flux2":
+            return "flux2"
+        if image_model == "flux":
+            return "flux"
+        if image_model == "lumina2":
+            return "z_image"
+
+    return "unknown"
+
+
+def detect_model_type(clip=None, model=None, model_type_hint: Optional[str] = None) -> str:
+    """
+    Detect model type using model-first strategy.
     
     Args:
-        clip: ComfyUI CLIP object
+        clip: ComfyUI CLIP object (fallback only)
+        model: ComfyUI model patcher or model object (preferred)
+        model_type_hint: Explicit override or hint from workflow data
         
     Returns:
-        'flux', 'sdxl', 'z_image', or 'unknown'
+        'flux', 'flux2', 'sdxl', 'z_image', 'qwen3', 'sd1', or 'unknown'
     """
-    tokenizer = clip.tokenizer
-    
-    # Check for Z-Image (Qwen3) tokenizer
-    if hasattr(tokenizer, 'qwen3_4b'):
-        return 'z_image'
-    
-    # Check for Flux tokenizer (has t5xxl attribute)
-    if hasattr(tokenizer, 't5xxl'):
-        return 'flux'
-    
-    # Check for SDXL tokenizer (has clip_l and clip_g, or just clip_l)
-    if hasattr(tokenizer, 'clip_l') or hasattr(tokenizer, 'clip_g'):
-        return 'sdxl'
-    
-    # Fallback: check for single clip attribute (SD1.x style)
-    if hasattr(tokenizer, 'clip'):
-        return 'sd1'
-    
-    return 'unknown'
+    normalized_hint = _normalize_model_type(model_type_hint)
+    if normalized_hint is not None:
+        return normalized_hint
+
+    model_type = detect_model_type_from_model(model)
+    if model_type != "unknown":
+        return model_type
+
+    if clip is None:
+        return "unknown"
+
+    cond_stage_model = getattr(clip, "cond_stage_model", None)
+    cond_stage_name = cond_stage_model.__class__.__name__.lower() if cond_stage_model is not None else ""
+    if "nextdit" in cond_stage_name or "zimage" in cond_stage_name or "lumina" in cond_stage_name:
+        return "z_image"
+    if "flux2" in cond_stage_name:
+        return "flux2"
+    if "flux" in cond_stage_name:
+        return "flux"
+
+    tokenizer = getattr(clip, "tokenizer", None)
+    if tokenizer is None:
+        return "unknown"
+
+    clip_name = str(getattr(tokenizer, "clip_name", "")).lower()
+    clip_key = getattr(tokenizer, "clip", None)
+    clip_key_lower = clip_key.lower() if isinstance(clip_key, str) else ""
+
+    # Qwen3 tokenizer family can be used by both Z-Image and Flux2-Klein.
+    # Without model context, treat it as generic qwen3.
+    tokenizer_attr_names = set(vars(tokenizer).keys())
+    if (
+        any("qwen3" in name.lower() for name in tokenizer_attr_names)
+        or "qwen3" in clip_name
+        or "qwen3" in clip_key_lower
+    ):
+        return "qwen3"
+
+    if hasattr(tokenizer, "t5xxl"):
+        return "flux"
+    if hasattr(tokenizer, "clip_g"):
+        return "sdxl"
+    if hasattr(tokenizer, "clip_l"):
+        if clip_name in {"l", "clip_l"} or clip_key_lower in {"l", "clip_l"}:
+            return "sd1"
+        return "sdxl"
+
+    # SD1-style dynamic clip key, e.g. tokenizer.clip="clip_l"
+    if isinstance(clip_key, str) and hasattr(tokenizer, clip_key):
+        return "sd1"
+
+    if hasattr(tokenizer, "tokenizer"):
+        return "sd1"
+
+    return "unknown"
+
+
+def _extract_nested_tokenizer(tokenizer_obj):
+    """
+    Return underlying HF tokenizer from wrapper objects when available.
+    """
+    if tokenizer_obj is None:
+        return None
+    if hasattr(tokenizer_obj, "tokenizer"):
+        return tokenizer_obj.tokenizer
+    return tokenizer_obj
+
+
+def _resolve_sd1_subtokenizer(tokenizer):
+    """
+    Resolve SD1-style dynamic tokenizer wrapper:
+    tokenizer.clip is a string key to the actual sub-tokenizer object.
+    """
+    clip_key = getattr(tokenizer, "clip", None)
+    if isinstance(clip_key, str) and hasattr(tokenizer, clip_key):
+        return _extract_nested_tokenizer(getattr(tokenizer, clip_key))
+    return None
+
+
+def _resolve_qwen3_tokenizer(tokenizer):
+    """
+    Resolve qwen3 tokenizer from multiple ComfyUI wrappers.
+    """
+    for key in ("qwen3_4b", "qwen3_8b"):
+        if hasattr(tokenizer, key):
+            resolved = _extract_nested_tokenizer(getattr(tokenizer, key))
+            if resolved is not None:
+                return resolved
+
+    clip_name = str(getattr(tokenizer, "clip_name", "")).lower()
+    clip_key = getattr(tokenizer, "clip", None)
+    if "qwen3" in clip_name and hasattr(tokenizer, clip_name):
+        resolved = _extract_nested_tokenizer(getattr(tokenizer, clip_name))
+        if resolved is not None:
+            return resolved
+    if isinstance(clip_key, str) and "qwen3" in clip_key.lower() and hasattr(tokenizer, clip_key):
+        resolved = _extract_nested_tokenizer(getattr(tokenizer, clip_key))
+        if resolved is not None:
+            return resolved
+
+    return None
 
 
 def get_tokenizer_for_model(clip, model_type: str = None):
@@ -103,39 +269,61 @@ def get_tokenizer_for_model(clip, model_type: str = None):
     
     Args:
         clip: ComfyUI CLIP object
-        model_type: Optional override ('flux', 'sdxl', 'sd1', 'z_image')
+        model_type: Optional override ('flux', 'flux2', 'sdxl', 'sd1', 'z_image', 'qwen3')
         
     Returns:
         The underlying tokenizer object
     """
     if model_type is None:
-        model_type = detect_model_type(clip)
-    
-    tokenizer = clip.tokenizer
-    
-    if model_type == 'z_image':
-        # Z-Image uses Qwen3 tokenizer
-        return tokenizer.qwen3_4b.tokenizer
-    elif model_type == 'flux':
-        # Flux uses T5 tokenizer for the main text encoding
-        return tokenizer.t5xxl.tokenizer
-    elif model_type == 'sdxl':
-        # SDXL uses CLIP-L tokenizer
-        if hasattr(tokenizer, 'clip_l'):
-            return tokenizer.clip_l.tokenizer
-        elif hasattr(tokenizer, 'clip'):
-            return tokenizer.clip.tokenizer
-    elif model_type == 'sd1':
-        if hasattr(tokenizer, 'clip'):
-            return tokenizer.clip.tokenizer
-        elif hasattr(tokenizer, 'clip_l'):
-            return tokenizer.clip_l.tokenizer
-    
-    # Direct access fallback
-    if hasattr(tokenizer, 'tokenizer'):
-        return tokenizer.tokenizer
-    
-    raise ValueError(f"Could not find tokenizer for model type: {model_type}")
+        model_type = detect_model_type(clip=clip)
+    else:
+        model_type = _normalize_model_type(model_type) or "unknown"
+
+    tokenizer = getattr(clip, "tokenizer", None)
+    if tokenizer is None:
+        raise ValueError("Could not find clip.tokenizer on CLIP object.")
+
+    if model_type in ("z_image", "flux2", "qwen3"):
+        resolved = _resolve_qwen3_tokenizer(tokenizer)
+        if resolved is not None:
+            return resolved
+
+    if model_type == "flux":
+        if hasattr(tokenizer, "t5xxl"):
+            resolved = _extract_nested_tokenizer(tokenizer.t5xxl)
+            if resolved is not None:
+                return resolved
+
+    if model_type in ("sdxl", "sd1"):
+        if hasattr(tokenizer, "clip_l"):
+            resolved = _extract_nested_tokenizer(tokenizer.clip_l)
+            if resolved is not None:
+                return resolved
+        resolved = _resolve_sd1_subtokenizer(tokenizer)
+        if resolved is not None:
+            return resolved
+
+    # Best-effort fallback chain
+    for key in ("t5xxl", "clip_l", "clip_g"):
+        if hasattr(tokenizer, key):
+            resolved = _extract_nested_tokenizer(getattr(tokenizer, key))
+            if resolved is not None:
+                return resolved
+
+    resolved = _resolve_sd1_subtokenizer(tokenizer)
+    if resolved is not None:
+        return resolved
+
+    direct = _extract_nested_tokenizer(tokenizer)
+    if direct is not tokenizer and direct is not None:
+        return direct
+
+    available_attrs = sorted(vars(tokenizer).keys()) if hasattr(tokenizer, "__dict__") else []
+    raise ValueError(
+        "Could not resolve tokenizer for model_type='{}' (tokenizer_class='{}', attrs={}).".format(
+            model_type, tokenizer.__class__.__name__, available_attrs
+        )
+    )
 
 
 def find_concept_positions_t5(
@@ -590,7 +778,7 @@ def find_concept_positions(
                  Example: {'lora_a': 'a woman with red hair', 'lora_b': 'a man in suit'}
         filter_meaningless: Whether to filter stopwords/punctuation tokens
         filter_single_char: Whether to filter single-character tokens
-        model_type: Optional override ('flux', 'sdxl', 'sd1')
+        model_type: Optional override ('flux', 'flux2', 'sdxl', 'sd1', 'z_image', 'qwen3')
         system_prompt: System prompt for Z-Image/Lumina2 alignment (see
                        find_concept_positions_qwen3 for details).
         
@@ -609,11 +797,13 @@ def find_concept_positions(
         >>> # pos_maps['char2'][0] = [token indices for 'Ron Weasley']
     """
     if model_type is None:
-        model_type = detect_model_type(clip)
+        model_type = detect_model_type(clip=clip)
+    else:
+        model_type = _normalize_model_type(model_type) or model_type
     
     tokenizer = get_tokenizer_for_model(clip, model_type)
     
-    if model_type == 'z_image':
+    if model_type in ('z_image', 'flux2', 'qwen3'):
         return find_concept_positions_qwen3(
             clip, tokenizer, prompts, concepts,
             filter_meaningless=filter_meaningless,
@@ -633,7 +823,10 @@ def find_concept_positions(
             filter_single_char=filter_single_char
         )
     else:
-        raise ValueError(f"Unsupported model type: {model_type}. Use 'flux', 'sdxl', 'z_image', or 'sd1'.")
+        raise ValueError(
+            f"Unsupported model type: {model_type}. "
+            "Use 'flux', 'flux2', 'sdxl', 'z_image', 'qwen3', or 'sd1'."
+        )
 
 
 def find_eos_position_t5(
@@ -701,7 +894,7 @@ def find_background_positions(
         List of token positions for background
     """
     if model_type is None:
-        model_type = detect_model_type(clip)
+        model_type = detect_model_type(clip=clip)
     
     if background_text:
         # Use provided background text
