@@ -130,6 +130,12 @@ class FreeFuseBypassForwardHook(BypassForwardHook):
         
         # Default FreeFuse bypass: g(f(x) + mask * h(x))
         base_out = self.original_forward(x, *args, **kwargs)
+
+        # Low-VRAM/offload can move modules between CPU/GPU after hook injection.
+        # Ensure adapter tensors follow the current activation device before h(x).
+        if self._adapter_needs_device_move(x.device):
+            self._move_adapter_weights_to_device(x.device)
+
         h_out = self.adapter.h(x, base_out)
         
         # === FreeFuse: Apply spatial mask to LoRA output ===
@@ -141,6 +147,55 @@ class FreeFuseBypassForwardHook(BypassForwardHook):
             h_out = self._apply_token_position_masking(h_out)
         
         return self.adapter.g(base_out + h_out)
+
+    def _iter_adapter_tensors(self):
+        """Yield tensors owned by this hook's adapter."""
+        adapter = self.adapter
+        if isinstance(adapter, nn.Module):
+            for p in adapter.parameters():
+                yield p
+            for b in adapter.buffers():
+                yield b
+            return
+
+        if not hasattr(adapter, "weights") or adapter.weights is None:
+            return
+
+        weights = adapter.weights
+        if isinstance(weights, (list, tuple)):
+            for w in weights:
+                if isinstance(w, torch.Tensor):
+                    yield w
+        elif isinstance(weights, torch.Tensor):
+            yield weights
+
+    def _adapter_needs_device_move(self, device: torch.device) -> bool:
+        for t in self._iter_adapter_tensors():
+            if t.device != device:
+                return True
+        return False
+
+    def _move_adapter_weights_to_device(self, device: torch.device):
+        """Move adapter tensors to device while keeping their current dtype."""
+        adapter = self.adapter
+        if isinstance(adapter, nn.Module):
+            adapter.to(device=device)
+            return
+
+        if not hasattr(adapter, "weights") or adapter.weights is None:
+            return
+
+        weights = adapter.weights
+        if isinstance(weights, (list, tuple)):
+            new_weights = []
+            for w in weights:
+                if isinstance(w, torch.Tensor):
+                    new_weights.append(w.to(device=device))
+                else:
+                    new_weights.append(w)
+            adapter.weights = tuple(new_weights) if isinstance(weights, tuple) else new_weights
+        elif isinstance(weights, torch.Tensor):
+            adapter.weights = weights.to(device=device)
     
     def _apply_spatial_mask(self, h_out: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
         """

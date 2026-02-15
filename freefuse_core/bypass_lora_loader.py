@@ -89,6 +89,12 @@ class OffsetBypassForwardHook(BypassForwardHook):
         
         # Default bypass: g(f(x) + h(x))
         base_out = self.original_forward(x, *args, **kwargs)
+
+        # Runtime device can differ from inject-time device under low-vram offload.
+        # Keep adapter tensors on the same device as activations.
+        if self._adapter_needs_device_move(self.adapter, x.device):
+            self._move_adapter_weights_to_device(x.device, dtype=None)
+
         h_out = self.adapter.h(x, base_out)
         
         # Apply offset if specified (for fused weights like Flux QKV)
@@ -107,6 +113,32 @@ class OffsetBypassForwardHook(BypassForwardHook):
             h_out = h_out_full
         
         return self.adapter.g(base_out + h_out)
+
+    def _iter_adapter_tensors(self):
+        adapter = self.adapter
+        if isinstance(adapter, nn.Module):
+            for p in adapter.parameters():
+                yield p
+            for b in adapter.buffers():
+                yield b
+            return
+
+        if not hasattr(adapter, "weights") or adapter.weights is None:
+            return
+
+        weights = adapter.weights
+        if isinstance(weights, (list, tuple)):
+            for w in weights:
+                if isinstance(w, torch.Tensor):
+                    yield w
+        elif isinstance(weights, torch.Tensor):
+            yield weights
+
+    def _adapter_needs_device_move(self, adapter, device: torch.device) -> bool:
+        for t in self._iter_adapter_tensors():
+            if t.device != device:
+                return True
+        return False
 
 
 class MultiAdapterBypassForwardHook:
@@ -632,7 +664,14 @@ class MultiAdapterBypassForwardHook:
             adapter = adapter_info['adapter']
             offset = adapter_info['offset']
             adapter_name = adapter_info['adapter_name']
-            
+
+            # Low-VRAM mode can keep this hook alive while module/device placement changes
+            # across sampling steps. Ensure adapter tensors follow the current activation
+            # device before calling adapter.h(...), otherwise F.linear/F.conv can hit
+            # cpu-vs-cuda mismatches.
+            if self._adapter_needs_device_move(adapter, x.device):
+                self._move_adapter_weights_to_device(adapter, x.device, dtype=None)
+
             h_out = adapter.h(x, base_out)
             
             # Apply FreeFuse mask if available AND this layer should have mask applied
@@ -700,6 +739,38 @@ class MultiAdapterBypassForwardHook:
         if self.adapters:
             return self.adapters[0]['adapter'].g(base_out + total_h)
         return base_out + total_h
+
+    def _iter_adapter_tensors(self, adapter):
+        """Yield tensors owned by an adapter (weights/params/buffers)."""
+        if isinstance(adapter, nn.Module):
+            for p in adapter.parameters():
+                yield p
+            for b in adapter.buffers():
+                yield b
+            return
+
+        if not hasattr(adapter, "weights") or adapter.weights is None:
+            return
+
+        weights = adapter.weights
+        if isinstance(weights, (list, tuple)):
+            for w in weights:
+                if isinstance(w, torch.Tensor):
+                    yield w
+        elif isinstance(weights, torch.Tensor):
+            yield weights
+
+    def _adapter_needs_device_move(self, adapter, device: torch.device) -> bool:
+        """
+        Return True if any adapter tensor is not on the requested device.
+
+        In low-vram/offload scenarios, module and adapter placement can diverge:
+        module activations run on CUDA while adapter tensors remain on CPU.
+        """
+        for t in self._iter_adapter_tensors(adapter):
+            if t.device != device:
+                return True
+        return False
     
     def inject(self):
         """Replace module forward with bypass version."""

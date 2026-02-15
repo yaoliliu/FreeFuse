@@ -289,7 +289,13 @@ class FreeFuseMaskedBypassHook:
         """
         # Compute base output
         base_out = self.original_forward(x, *args, **kwargs)
-        
+
+        # Under low-vram offload, adapter tensors can remain on CPU while
+        # activations are on CUDA. Align before adapter.h(...) to avoid
+        # cpu-vs-cuda matmul errors.
+        if self._adapter_needs_device_move(x.device):
+            self._move_adapter_weights(x.device, dtype=None)
+
         # Compute LoRA output using adapter's h function
         lora_out = self.adapter.h(x, base_out)
         
@@ -300,6 +306,31 @@ class FreeFuseMaskedBypassHook:
         
         # Apply adapter's g function (usually identity) and combine
         return self.adapter.g(base_out + lora_out)
+
+    def _iter_adapter_tensors(self):
+        if isinstance(self.adapter, nn.Module):
+            for p in self.adapter.parameters():
+                yield p
+            for b in self.adapter.buffers():
+                yield b
+            return
+
+        if not hasattr(self.adapter, "weights") or self.adapter.weights is None:
+            return
+
+        weights = self.adapter.weights
+        if isinstance(weights, (list, tuple)):
+            for w in weights:
+                if isinstance(w, torch.Tensor):
+                    yield w
+        elif isinstance(weights, torch.Tensor):
+            yield weights
+
+    def _adapter_needs_device_move(self, device: torch.device) -> bool:
+        for t in self._iter_adapter_tensors():
+            if t.device != device:
+                return True
+        return False
     
     def inject(self):
         """Replace module forward with FreeFuse bypass version."""
