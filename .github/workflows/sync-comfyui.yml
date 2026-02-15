@@ -1,0 +1,30 @@
+name: Sync comfyui branch
+
+on:
+  push:
+    branches: [master] 
+    paths:
+      - "freefuse_comfyui/**"
+      - ".github/workflows/sync-comfyui.yml"
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: sync-comfyui
+      cancel-in-progress: true
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Split subtree and force-push comfyui
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git subtree split --prefix=freefuse_comfyui -b comfyui-tmp
+          git push --force origin comfyui-tmp:comfyui
