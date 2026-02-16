@@ -66,8 +66,8 @@ pip install comfy-cli
 comfy node install freefuse
 
 # or manual installation
-git clone https://github.com/yaoliliu/FreeFuse.git
-ln -s /path/to/FreeFuse/freefuse_comfyui <your ComfyUI path>/custom_nodes
+cd <your ComfyUI path>/custom_nodes
+git clone --depth 1 --branch comfyui https://github.com/yaoliliu/FreeFuse.git freefuse_comfyui
 ```
 
 You can find workflows for flux.dev and SDXL in the `freefuse_comfyui/workflows` folder. (*^▽^*)
