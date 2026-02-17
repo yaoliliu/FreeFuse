@@ -44,6 +44,15 @@ low quality, blurry, deformed, ugly, bad anatomy
 - daiyu: daiyu_lin, a young East Asian photorealistic style woman in traditional Chinese hanfu dress, elaborate black updo hairstyle adorned with delicate white floral hairpins and ornaments, dangling red tassel earrings, soft pink and red color palette, gentle smile with knowing expression
 - background_text: autumn leaves blurred in the background
 
+## Important Prompt Rule
+
+- Every **subject** `concept_text` (adapter trigger phrase) must appear verbatim in the **main prompt**.
+- If any subject concept is missing from the main prompt, `FreeFuseTokenPositions` / `FreeFuseConceptMapSimple` now raises an error in ComfyUI.
+- `background_text` is optional for runtime safety: if provided but not found in the main prompt, FreeFuse only prints a warning and continues.
+
+Example:
+- `concept_text = "harry potter"` means your main prompt must contain `"harry potter"`.
+
 ## Hyperparameters
 
 ### Phase 1 (FreeFuse Phase1 Sampler)

@@ -5,13 +5,108 @@ Maps adapter names to concept text and computes token positions for similarity m
 Supports both Flux (T5 tokenizer) and SDXL (CLIP tokenizer) models.
 """
 
+from typing import Dict, List, Union
+
 from ..freefuse_core.token_utils import (
     find_concept_positions,
     find_background_positions,
     detect_model_type,
-    compute_token_position_maps,
     LUMINA2_SYSTEM_PROMPT,
 )
+
+
+def _format_prompt_preview(prompt: Union[str, List[str]], max_len: int = 220) -> str:
+    """Format prompt for error/warning messages."""
+    if isinstance(prompt, list):
+        prompt_text = " | ".join(str(p) for p in prompt)
+    else:
+        prompt_text = str(prompt)
+    prompt_text = prompt_text.replace("\n", " ").strip()
+    if len(prompt_text) <= max_len:
+        return prompt_text
+    return prompt_text[:max_len] + "..."
+
+
+def _format_concept_preview(text: str, max_len: int = 90) -> str:
+    """Format concept text preview for compact error messages."""
+    text = str(text).replace("\n", " ").strip()
+    if len(text) <= max_len:
+        return text
+    return text[:max_len] + "..."
+
+
+def _normalize_positions_list(positions_data) -> List[List[int]]:
+    """Normalize token position payload to a list-of-lists format."""
+    if not isinstance(positions_data, list):
+        return []
+    if positions_data and all(isinstance(x, int) for x in positions_data):
+        # Backward compatibility for flat list format.
+        return [positions_data]
+    return [pos for pos in positions_data if isinstance(pos, list)]
+
+
+def _raise_if_subject_positions_empty(
+    concepts: Dict[str, str],
+    token_pos_maps: Dict[str, List[List[int]]],
+    prompt: Union[str, List[str]],
+) -> None:
+    """
+    Enforce FreeFuse requirement:
+    each subject concept (adapter) must map to at least one prompt token.
+    """
+    missing = []
+
+    for adapter_name, concept_text in concepts.items():
+        positions_per_prompt = _normalize_positions_list(token_pos_maps.get(adapter_name, []))
+        missing_prompt_indices = []
+
+        if not positions_per_prompt:
+            missing_prompt_indices = ["all"]
+        else:
+            for idx, positions in enumerate(positions_per_prompt):
+                if not positions:
+                    missing_prompt_indices.append(str(idx + 1))
+
+        if missing_prompt_indices:
+            missing.append((adapter_name, concept_text, ",".join(missing_prompt_indices)))
+
+    if not missing:
+        return
+
+    missing_lines = "\n".join(
+        f"  - {name} (concept_text='{_format_concept_preview(text)}', prompt_index={indices})"
+        for name, text, indices in missing
+    )
+    prompt_preview = _format_prompt_preview(prompt)
+    raise ValueError(
+        "[FreeFuse] Subject adapter token positions are empty.\n"
+        "Each subject concept_text must appear verbatim in the main prompt.\n"
+        "You must ensure the subject prompt appears in the main prompt.\n"
+        f"Missing subject adapters:\n{missing_lines}\n"
+        "Example:\n"
+        "  concept_text A: \"<detailed A>\"\n"
+        "  concept_text B: \"<detailed B>\"\n"
+        "  main prompt: \"<detailed A> is hugging <detailed B>\"\n"
+        f"Main prompt preview: \"{prompt_preview}\""
+    )
+
+
+def _warn_if_background_text_missing(
+    background_text: str,
+    bg_positions: List[int],
+    prompt: Union[str, List[str]],
+    source: str,
+) -> None:
+    """Warn only when explicit background_text is configured but not detected."""
+    bg_text = (background_text or "").strip()
+    if not bg_text or bg_positions:
+        return
+
+    print(
+        f"[{source}] Warning: background_text was provided but no token positions were detected. "
+        "FreeFuse can still run, but background separation may be weaker. "
+        f"background_text='{bg_text}', main prompt preview='{_format_prompt_preview(prompt)}'"
+    )
 
 
 class FreeFuseConceptMap:
@@ -151,6 +246,20 @@ class FreeFuseTokenPositions:
             model_type=model_type,
             system_prompt=system_prompt,
         )
+
+        # Only enforce hard error for subject LoRAs.
+        # If adapter list is unavailable, fall back to all concept entries.
+        adapter_names = {
+            adapter.get("name")
+            for adapter in data.get("adapters", [])
+            if isinstance(adapter, dict) and adapter.get("name")
+        }
+        subject_concepts = {
+            name: text
+            for name, text in concepts.items()
+            if (not adapter_names) or (name in adapter_names)
+        }
+        _raise_if_subject_positions_empty(subject_concepts, token_pos_maps, prompt)
         
         # Handle background
         enable_background = settings.get("enable_background", True)
@@ -167,6 +276,13 @@ class FreeFuseTokenPositions:
             if bg_positions:
                 token_pos_maps["__background__"] = [bg_positions]
                 print(f"[FreeFuseTokenPositions] Background positions: {bg_positions}")
+            else:
+                _warn_if_background_text_missing(
+                    background_text=background_text,
+                    bg_positions=bg_positions,
+                    prompt=prompt,
+                    source="FreeFuseTokenPositions",
+                )
         
         # Log results
         for name, positions_list in token_pos_maps.items():
@@ -268,19 +384,29 @@ class FreeFuseConceptMapSimple:
             model_type=model_type,
             system_prompt=system_prompt,
         )
+
+        _raise_if_subject_positions_empty(concepts, token_pos_maps, prompt)
         
         # Handle background
         if enable_background:
+            bg_text = background_text.strip() if background_text else ""
             bg_positions = find_background_positions(
                 clip=clip,
                 prompt=prompt,
-                background_text=background_text.strip() if background_text else None,
+                background_text=bg_text if bg_text else None,
                 model_type=model_type,
                 system_prompt=system_prompt,
             )
             if bg_positions:
                 token_pos_maps["__background__"] = [bg_positions]
                 print(f"[FreeFuseConceptMapSimple] Background positions: {bg_positions}")
+            else:
+                _warn_if_background_text_missing(
+                    background_text=bg_text,
+                    bg_positions=bg_positions,
+                    prompt=prompt,
+                    source="FreeFuseConceptMapSimple",
+                )
         
         # Log results
         for name, positions_list in token_pos_maps.items():
