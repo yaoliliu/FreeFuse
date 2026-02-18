@@ -24,6 +24,7 @@ from ..freefuse_core.attention_replace import (
     compute_z_image_similarity_maps,
 )
 from ..freefuse_core.mask_utils import generate_masks
+from ..freefuse_core.token_utils import detect_model_type
 
 # SDXL UNet region → ComfyUI (block_name, block_num) mapping
 # Each region contains N transformer blocks with cross-attention (attn2).
@@ -74,10 +75,11 @@ class FreeFusePhase1Sampler:
                 "scheduler": (comfy.samplers.KSampler.SCHEDULERS,),
             },
             "optional": {
+                "sigmas": ("SIGMAS",),
                 # Block selection — Flux
                 "collect_block": ("INT", {
                     "default": 18, "min": 0, "max": 56,
-                    "tooltip": "[Flux only] Which double_block to collect attention from (0-56). Ignored for SDXL."
+                    "tooltip": "[Flux/Flux2 only] Flux uses transformer_blocks.<idx>; Flux2 uses single_transformer_blocks.<idx>. Ignored for SDXL."
                 }),
                 # Block selection — SDXL
                 "collect_region": (list(SDXL_COLLECT_REGION_MAP.keys()), {
@@ -158,7 +160,8 @@ Uses full sigma schedule (e.g., 28 steps) but stops early after collecting
 attention at collect_step. This ensures correct noise levels while saving time.
 
 Block Selection (model-type aware):
-- Flux: Use 'collect_block' (INT 0-56) to pick a double_block.
+- Flux: Use 'collect_block' (INT 0-56) to pick transformer_blocks.<idx>.
+- Flux2: Use 'collect_block' (INT 0-56) to pick single_transformer_blocks.<idx>.
 - SDXL: Use 'collect_region' + 'collect_tf_index' to pick a UNet cross-attention block.
   The recommended default is output_early (region) + 3 (tf_index).
   Other parameters for the non-active model type are simply ignored.
@@ -183,7 +186,7 @@ Mask Balancing Parameters (Advanced):
 After this node, connect the model output to a standard KSampler
 for Phase 2 generation with the same seed and steps."""
     
-    def collect_masks(self, model, conditioning, neg_conditioning, latent, 
+    def collect_masks(self, model, conditioning, neg_conditioning, latent,
                       freefuse_data, seed, steps, collect_step, cfg, sampler_name, scheduler,
                       collect_block=18, 
                       collect_region="output_early ★ (recommended)", collect_tf_index=3,
@@ -192,7 +195,7 @@ for Phase 2 generation with the same seed and steps."""
                       use_morphological_cleaning=True, balance_iterations=15,
                       balance_lr=0.01, gravity_weight=0.00004, spatial_weight=0.00004,
                       momentum=0.2, centroid_margin=0.0, border_penalty=0.0,
-                      anisotropy=1.3):
+                      anisotropy=1.3, sigmas=None):
         
         concepts = freefuse_data.get("concepts", {})
         settings = freefuse_data.get("settings", {})
@@ -212,7 +215,7 @@ for Phase 2 generation with the same seed and steps."""
             # Create fallback uniform masks
             latent_image = latent["samples"]
             latent_h, latent_w = latent_image.shape[2], latent_image.shape[3]
-            img_h, img_w = latent_h * 8, latent_w * 8
+            img_h, img_w = self._latent_to_image_size(model, latent_h, latent_w)
             
             masks = {name: torch.ones(latent_h, latent_w) for name in concepts}
             preview = self._create_preview(masks, img_w, img_h)
@@ -240,22 +243,26 @@ for Phase 2 generation with the same seed and steps."""
         freefuse_state.token_pos_maps = token_pos_maps
         freefuse_state.include_background = include_background
         
-        # Detect model type first (needed for default temperature and block routing)
-        model_type = "auto"
-        model_name = model_clone.model.__class__.__name__.lower()
-        if "nextdit" in model_name or "lumina" in model_name:
-            model_type = "z_image"
-        elif "flux" in model_name:
-            model_type = "flux"
-        else:
+        # Detect model type first (needed for default temperature and block routing).
+        model_type = detect_model_type(
+            model=model_clone,
+            model_type_hint=freefuse_data.get("model_type"),
+        )
+        if model_type == "unknown":
             model_type = "sdxl"
+
+        # Internal patch route aliases.
+        if model_type == "qwen3":
+            patch_model_type = "z_image"
+        else:
+            patch_model_type = model_type
         
         # Use user-provided parameters, with auto-detection for temperature=0
         # Default temperature differs by model type: Flux=4000, SDXL=300, Z-Image=4000
         if temperature == 0.0:
-            if model_type == "z_image":
+            if patch_model_type == "z_image":
                 auto_temperature = 4000.0   # matches reference FreeFuseZImageAttnProcessor
-            elif model_type == "flux":
+            elif patch_model_type in ("flux", "flux2"):
                 auto_temperature = 4000.0
             else:
                 auto_temperature = 300.0
@@ -267,7 +274,7 @@ for Phase 2 generation with the same seed and steps."""
         
         # Build SDXL collect_blocks from region + tf_index (only used for SDXL)
         sdxl_collect_blocks = None
-        if model_type == "sdxl":
+        if patch_model_type == "sdxl":
             region_info = SDXL_COLLECT_REGION_MAP.get(collect_region)
             if region_info is None:
                 # Fallback to recommended default
@@ -285,7 +292,7 @@ for Phase 2 generation with the same seed and steps."""
             
         apply_freefuse_replace_patches(
             model_clone, freefuse_state, 
-            model_type=model_type,
+            model_type=patch_model_type,
             sdxl_collect_blocks=sdxl_collect_blocks,
         )
         
@@ -295,10 +302,14 @@ for Phase 2 generation with the same seed and steps."""
         
         # Calculate image dimensions
         latent_h, latent_w = latent_image.shape[2], latent_image.shape[3]
-        img_h, img_w = latent_h * 8, latent_w * 8
+        img_h, img_w = self._latent_to_image_size(model_clone, latent_h, latent_w)
+
+        # For Flux2 single-stream extraction, cache img sequence length for txt_len resolution.
+        if patch_model_type == "flux2":
+            freefuse_state.collected_outputs["img_seq_len"] = latent_h * latent_w
         
         # For Z-Image: store sequence lengths in state so block_replace can access them
-        if model_type == "z_image":
+        if patch_model_type == "z_image":
             z_img_seq_len = latent_h * latent_w
             # Estimate cap_seq_len from token positions map
             z_cap_seq_len = 256  # Default
@@ -312,11 +323,23 @@ for Phase 2 generation with the same seed and steps."""
             freefuse_state.collected_outputs["latent_w"] = latent_w
             print(f"[FreeFuse] Z-Image sequence info: img_seq_len={z_img_seq_len}, cap_seq_len={z_cap_seq_len}")
         
-        block_info = f"double_block {collect_block}" if model_type == "flux" else f"{collect_region} tf={collect_tf_index}"
+        block_info = (
+            f"double_block {collect_block}"
+            if patch_model_type == "flux"
+            else (
+                f"single_transformer_blocks.{collect_block}"
+                if patch_model_type == "flux2"
+                else (
+                    f"layer {collect_block}"
+                    if patch_model_type == "z_image"
+                    else f"{collect_region} tf={collect_tf_index}"
+                )
+            )
+        )
         print(f"[FreeFuse] Phase 1: {steps} total steps, collecting at step {collect_step}, {block_info}")
         print(f"[FreeFuse] Concepts: {list(concepts.keys())}")
         print(f"[FreeFuse] Token positions: {token_pos_maps}")
-        print(f"[FreeFuse] Model type: {model_type}")
+        print(f"[FreeFuse] Model type: {model_type} (patch route: {patch_model_type})")
         print(f"[FreeFuse] Settings: temperature={auto_temperature}, top_k_ratio={top_k_ratio}, disable_lora={disable_lora_phase1}")
         
         # Optionally disable LoRA during Phase 1 to get clean base model attention patterns
@@ -358,6 +381,7 @@ for Phase 2 generation with the same seed and steps."""
                 last_step=steps,
                 force_full_denoise=False,
                 noise_mask=None,
+                sigmas=sigmas,
                 callback=step_callback,
                 seed=seed,
             )
@@ -381,7 +405,7 @@ for Phase 2 generation with the same seed and steps."""
         similarity_maps = freefuse_state.similarity_maps
 
         # Optional debug dump for Z-Image
-        if os.environ.get("FREEFUSE_DEBUG_ZIMAGE") == "1" and model_type == "z_image":
+        if os.environ.get("FREEFUSE_DEBUG_ZIMAGE") == "1" and patch_model_type == "z_image":
             debug_dir = os.path.join(os.getcwd(), "debug_z_image_comfyui")
             os.makedirs(debug_dir, exist_ok=True)
             try:
@@ -444,7 +468,7 @@ for Phase 2 generation with the same seed and steps."""
                 masks["_background_"] = torch.zeros(latent_h, latent_w, device=latent_image.device)
 
         # Optional debug dump for masks
-        if os.environ.get("FREEFUSE_DEBUG_ZIMAGE") == "1" and model_type == "z_image":
+        if os.environ.get("FREEFUSE_DEBUG_ZIMAGE") == "1" and patch_model_type == "z_image":
             try:
                 debug_dir = os.path.join(os.getcwd(), "debug_z_image_comfyui")
                 os.makedirs(debug_dir, exist_ok=True)
@@ -482,6 +506,29 @@ for Phase 2 generation with the same seed and steps."""
             {"masks": masks, "similarity_maps": similarity_maps}, 
             preview
         )
+
+    @staticmethod
+    def _get_latent_downscale_ratio(model_patcher, fallback_ratio: int = 8) -> int:
+        """Resolve latent->image downscale ratio from model latent_format."""
+        latent_format = None
+        try:
+            latent_format = model_patcher.get_model_object("latent_format")
+        except Exception:
+            latent_format = getattr(getattr(model_patcher, "model", None), "latent_format", None)
+
+        ratio = getattr(latent_format, "spacial_downscale_ratio", fallback_ratio)
+        try:
+            ratio = int(ratio)
+            if ratio > 0:
+                return ratio
+        except Exception:
+            pass
+        return fallback_ratio
+
+    @classmethod
+    def _latent_to_image_size(cls, model_patcher, latent_h: int, latent_w: int) -> tuple:
+        ratio = cls._get_latent_downscale_ratio(model_patcher)
+        return latent_h * ratio, latent_w * ratio
     
     @staticmethod
     def _infer_spatial_size_from_latent(

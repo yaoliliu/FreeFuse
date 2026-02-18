@@ -884,7 +884,7 @@ def apply_attention_bias_patches(
         attention_bias: Pre-computed attention bias for Flux (ignored - use lora_masks instead)
         config: Attention bias configuration
         txt_seq_len: Text sequence length estimate (not used for Flux, actual length determined at runtime)
-        model_type: "flux" or "sdxl"
+        model_type: "flux", "flux2", "z_image", or "sdxl"
         lora_masks: Spatial masks for each LoRA (flattened to img_seq_len)
         token_pos_maps: Token positions for each LoRA
         latent_size: Required for SDXL - (H, W) of latent space
@@ -893,7 +893,7 @@ def apply_attention_bias_patches(
         logging.info("[FreeFuse] Attention bias disabled, skipping patches")
         return
     
-    if model_type == "flux":
+    if model_type in ("flux", "flux2"):
         _apply_flux_bias_patches(model_patcher, lora_masks, token_pos_maps, config)
     elif model_type == "z_image":
         if lora_masks is None or token_pos_maps is None:

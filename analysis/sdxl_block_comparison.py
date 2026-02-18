@@ -240,14 +240,26 @@ def main():
     
     # ========== Create Comprehensive Comparison Grid ==========
     print(f"\n{'='*60}")
-    print("Creating comprehensive comparison grid (masks + results)...")
+    print("Creating comprehensive comparison grid (sim_maps + masks + results)...")
     
     from PIL import ImageDraw, ImageFont
     import glob
     
-    # Collect all successful results with their masks
+    # Collect all successful results with their sim maps and masks
     comparison_data = []
     concept_names = list(concepts.keys())  # e.g., ['shalnark', 'conan']
+
+    def open_first_matching_image(path_patterns):
+        """Open the first existing image from a list of path patterns."""
+        for pattern in path_patterns:
+            if '*' in pattern:
+                matches = sorted(glob.glob(pattern))
+                if matches:
+                    # Use the last one for step-based patterns (e.g., step09 > step00)
+                    return Image.open(matches[-1])
+            elif os.path.exists(pattern):
+                return Image.open(pattern)
+        return None
     
     for block_name, status, output_dir in results:
         if status == "success":
@@ -255,33 +267,33 @@ def main():
             if os.path.exists(result_path):
                 result_img = Image.open(result_path)
                 
-                # Find mask images for each concept
+                # Find sim-map and mask images for each concept
                 mask_images = {}
+                sim_images = {}
                 for concept_name in concept_names:
+                    sim_img = open_first_matching_image([
+                        os.path.join(output_dir, f"phase1_final_sim_{concept_name}.png"),
+                        os.path.join(output_dir, f"final_sim_{concept_name}.png"),
+                        os.path.join(output_dir, f"phase*_final_sim_{concept_name}.png"),
+                        os.path.join(output_dir, f"phase1_step*_sim_{concept_name}.png"),
+                        os.path.join(output_dir, f"sim_{concept_name}.png"),
+                    ])
+                    if sim_img is not None:
+                        sim_images[concept_name] = sim_img
+
                     # Look for mask files like "mask_shalnark.png" or similar
-                    mask_patterns = [
+                    mask_img = open_first_matching_image([
                         os.path.join(output_dir, f"mask_{concept_name}.png"),
                         os.path.join(output_dir, f"{concept_name}_mask.png"),
                         os.path.join(output_dir, f"mask_{concept_name}_*.png"),
-                    ]
-                    
-                    mask_path = None
-                    for pattern in mask_patterns:
-                        if '*' in pattern:
-                            matches = glob.glob(pattern)
-                            if matches:
-                                mask_path = matches[0]
-                                break
-                        elif os.path.exists(pattern):
-                            mask_path = pattern
-                            break
-                    
-                    if mask_path and os.path.exists(mask_path):
-                        mask_images[concept_name] = Image.open(mask_path)
+                    ])
+                    if mask_img is not None:
+                        mask_images[concept_name] = mask_img
                 
                 comparison_data.append({
                     'block_name': block_name,
                     'result_img': result_img,
+                    'sim_images': sim_images,
                     'mask_images': mask_images,
                 })
     
@@ -296,8 +308,8 @@ def main():
         header_height = 40  # Height for column headers
         row_height = thumb_size + padding
         
-        # Number of columns: label + masks + result
-        num_image_cols = num_concepts + 1  # masks + result
+        # Number of columns: label + sim_maps + masks + result
+        num_image_cols = 2 * num_concepts + 1
         total_width = label_width + num_image_cols * (thumb_size + padding) + padding
         total_height = header_height + num_blocks * row_height + padding
         
@@ -317,8 +329,12 @@ def main():
         draw.text((padding, 10), "Block Name", fill='black', font=header_font)
         for i, concept_name in enumerate(concept_names):
             x = x_offset + i * (thumb_size + padding) + thumb_size // 4
+            draw.text((x, 10), f"SimMap: {concept_name}", fill='black', font=header_font)
+        mask_offset = x_offset + num_concepts * (thumb_size + padding)
+        for i, concept_name in enumerate(concept_names):
+            x = mask_offset + i * (thumb_size + padding) + thumb_size // 4
             draw.text((x, 10), f"Mask: {concept_name}", fill='black', font=header_font)
-        result_x = x_offset + num_concepts * (thumb_size + padding) + thumb_size // 4
+        result_x = x_offset + (2 * num_concepts) * (thumb_size + padding) + thumb_size // 4
         draw.text((result_x, 10), "Result", fill='black', font=header_font)
         
         # Draw horizontal line under header
@@ -338,8 +354,22 @@ def main():
             # Draw vertical separator
             draw.line([(label_width, y), (label_width, y + thumb_size)], fill='lightgray', width=1)
             
-            # Draw mask images
+            # Draw sim-map images
             x = label_width + padding
+            for concept_name in concept_names:
+                if concept_name in data['sim_images']:
+                    sim_img = data['sim_images'][concept_name]
+                    sim_resized = sim_img.resize((thumb_size, thumb_size), Image.LANCZOS)
+                    if sim_resized.mode != 'RGB':
+                        sim_resized = sim_resized.convert('RGB')
+                    grid_img.paste(sim_resized, (x, y))
+                else:
+                    # Draw placeholder for missing sim-map
+                    draw.rectangle([(x, y), (x + thumb_size, y + thumb_size)], outline='lightgray', fill='#f0f0f0')
+                    draw.text((x + thumb_size // 5, y + thumb_size // 2), "No SimMap", fill='gray', font=font)
+                x += thumb_size + padding
+
+            # Draw mask images
             for concept_name in concept_names:
                 if concept_name in data['mask_images']:
                     mask_img = data['mask_images'][concept_name]
@@ -370,7 +400,7 @@ def main():
         grid_img.save(grid_path, quality=95)
         print(f"Saved comprehensive comparison grid to: {grid_path}")
         print(f"  Grid size: {total_width} x {total_height} pixels")
-        print(f"  Showing {num_blocks} blocks x ({num_concepts} masks + 1 result)")
+        print(f"  Showing {num_blocks} blocks x ({num_concepts} sim_maps + {num_concepts} masks + 1 result)")
     
     # Also create the original simple comparison grid (results only)
     print("\nCreating simple comparison grid (results only)...")
@@ -422,7 +452,7 @@ def main():
         print(f"  {status_icon} {block_name}: {status}")
     
     print(f"\nAll results saved to: {output_base_dir}")
-    print("Compare the mask quality and final image quality in each folder.")
+    print("Compare sim-map / mask quality and final image quality in each folder.")
     print("Done!")
 
 

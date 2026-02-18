@@ -18,7 +18,8 @@
 - [x] Supports Z-Image-turbo in diffusers
 - [x] Supports Z-Image-turbo in ComfyUI
 - [x] Supports FLUX.2-klein-4B/9B  in diffusers
-- [ ] Supports FLUX.2-klein-4B/9B in ComfyUI
+- [x] Supports FLUX.2-klein-4B/9B in ComfyUI
+- [ ] Exploring FreeFuse in text2video model
 
 ## 📖 Abstract
 

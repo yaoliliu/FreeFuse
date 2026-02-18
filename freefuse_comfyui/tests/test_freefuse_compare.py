@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-ComfyUI-only comparison: Flux1.dev, Z-Image, SDXL (baseline vs FreeFuse).
+ComfyUI-only comparison: Flux1.dev / Flux2.Klein / Z-Image / SDXL (baseline vs FreeFuse).
 
 This script runs entirely through ComfyUI APIs for each model:
 1) Baseline: load model + two LoRAs, generate image (no FreeFuse).
@@ -60,7 +60,10 @@ import comfy.sample
 import comfy.model_management
 
 
-MODEL_ORDER = ["flux", "z_image", "sdxl"]
+MODEL_ORDER = ["flux", "z_image", "klein9b", "klein4b", "sdxl"]
+
+KLEIN_NO_THINK_TEMPLATE = "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
+KLEIN_GUIDANCE = None
 
 MODEL_DEFAULTS = {
     "flux": {
@@ -101,6 +104,42 @@ MODEL_DEFAULTS = {
         "bidirectional": True,
         "use_morphological_cleaning": True,
     },
+    "klein4b": {
+        "steps": 4,
+        "cfg": 1.0,
+        "seed": 77,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "collect_step": 2,
+        "collect_block": 6,
+        "collect_region": "output_early ★ (recommended)",
+        "collect_tf_index": 3,
+        "top_k_ratio": 0.1,
+        "temperature": 0.0,
+        "bias_scale": 3.0,
+        "positive_bias_scale": 1.0,
+        "bias_blocks": "all",
+        "bidirectional": True,
+        "use_morphological_cleaning": True,
+    },
+    "klein9b": {
+        "steps": 4,
+        "cfg": 1.0,
+        "seed": 0,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "collect_step": 2,
+        "collect_block": 3,
+        "collect_region": "output_early ★ (recommended)",
+        "collect_tf_index": 3,
+        "top_k_ratio": 0.1,
+        "temperature": 0.0,
+        "bias_scale": 3.0,
+        "positive_bias_scale": 1.0,
+        "bias_blocks": "all",
+        "bidirectional": True,
+        "use_morphological_cleaning": True,
+    },
     "sdxl": {
         "steps": 30,
         "cfg": 7.0,
@@ -120,6 +159,57 @@ MODEL_DEFAULTS = {
         "use_morphological_cleaning": True,
     },
 }
+
+
+def _pick_name_by_patterns(candidates: List[str], patterns: List[str]) -> Optional[str]:
+    for pattern in patterns:
+        p = pattern.lower()
+        for name in candidates:
+            if p in name.lower():
+                return name
+    return None
+
+
+def _filter_out_base_variants(candidates: List[str]) -> List[str]:
+    return [name for name in candidates if "base" not in name.lower()]
+
+
+def _set_klein_no_think_template(clip) -> int:
+    root = getattr(clip, "tokenizer", None)
+    if root is None:
+        return 0
+
+    updated = 0
+    seen = set()
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        if current is None:
+            continue
+        obj_id = id(current)
+        if obj_id in seen:
+            continue
+        seen.add(obj_id)
+
+        if hasattr(current, "llama_template"):
+            setattr(current, "llama_template", KLEIN_NO_THINK_TEMPLATE)
+            updated += 1
+
+        for attr in ("clip", "qwen3_4b", "qwen3_8b", "clip_l", "clip_g", "t5xxl"):
+            child = getattr(current, attr, None)
+            if isinstance(child, str) and hasattr(current, child):
+                child = getattr(current, child)
+            if child is not None and not isinstance(child, (str, int, float, bool)):
+                stack.append(child)
+
+    return updated
+
+
+def _build_flux2_sigmas(steps: int, width: int, height: int):
+    from comfy_extras.nodes_flux import get_schedule
+
+    image_seq_len = round((width * height) / (16 * 16))
+    return get_schedule(steps, image_seq_len)
 
 
 def _get_latent_shape(model, width, height, fallback_channels=16, fallback_downscale=8):
@@ -291,6 +381,64 @@ def load_zimage_models():
     return model, clip, vae
 
 
+def load_flux2_klein_models(variant: str):
+    if variant not in ("4b", "9b"):
+        raise ValueError(f"Unsupported Klein variant: {variant}")
+
+    print(f"\n[Loading Flux2.Klein {variant.upper()} Models]")
+
+    diffusion_models = folder_paths.get_filename_list("diffusion_models")
+    unet_patterns = (
+        ["flux-2-klein-4b", "flux2-klein-4b", "klein_4b", "klein-4b", "klein4b"]
+        if variant == "4b"
+        else ["flux-2-klein-9b", "flux2-klein-9b", "klein_9b", "klein-9b", "klein9b", "9b-fp8"]
+    )
+    non_base_diffusion_models = _filter_out_base_variants(diffusion_models)
+    unet_name = _pick_name_by_patterns(non_base_diffusion_models, unet_patterns)
+    if not unet_name and variant == "4b":
+        unet_name = _pick_name_by_patterns(
+            non_base_diffusion_models, [f"klein-{variant}", f"klein{variant}", "klein"]
+        )
+    if not unet_name:
+        raise FileNotFoundError(
+            f"No non-base Flux2.Klein {variant} UNET found in diffusion_models. Available: {diffusion_models}"
+        )
+
+    clip_names = folder_paths.get_filename_list("text_encoders")
+    non_base_clip_names = _filter_out_base_variants(clip_names)
+    clip_patterns = (
+        ["qwen_3_4b", "qwen3_4b", "qwen3-4b", "qwen_4b", "4b"]
+        if variant == "4b"
+        else ["qwen_3_8b_fp8mixed", "qwen3_8b_fp8mixed", "qwen_3_8b", "qwen3_8b", "qwen3-8b", "8b", "fp8"]
+    )
+    clip_name = _pick_name_by_patterns(non_base_clip_names, clip_patterns)
+    if not clip_name:
+        clip_name = _pick_name_by_patterns(non_base_clip_names, ["qwen3", "qwen"])
+    if not clip_name:
+        raise FileNotFoundError(
+            f"No suitable non-base Flux2.Klein {variant} text encoder found. Available: {clip_names}"
+        )
+
+    vae_names = folder_paths.get_filename_list("vae")
+    vae_name = _pick_name_by_patterns(vae_names, ["flux2-vae", "flux2_vae", "flux2", "ae"])
+    if not vae_name:
+        raise FileNotFoundError(f"No suitable Flux2 VAE found. Available: {vae_names}")
+
+    from nodes import UNETLoader, CLIPLoader, VAELoader
+
+    model, = UNETLoader().load_unet(unet_name, "default")
+    print(f"  ✅ UNET loaded: {unet_name}")
+    context_in_dim = _get_flux_context_dim(model)
+    print(f"  Flux2 context_in_dim: {context_in_dim}")
+
+    clip, = CLIPLoader().load_clip(clip_name, type="flux2")
+    print(f"  ✅ CLIP loaded (flux2): {clip_name}")
+
+    vae, = VAELoader().load_vae(vae_name)
+    print(f"  ✅ VAE loaded: {vae_name}")
+    return model, clip, vae
+
+
 def load_sdxl_models():
     print("\n[Loading SDXL Models]")
     checkpoint_name = None
@@ -319,6 +467,16 @@ def _find_loras_for_model(model_type: str) -> Tuple[str, str, str, str, float]:
         lora_a = next((l for l in lora_list if "harry" in l.lower() and "flux" in l.lower()), None)
         lora_b = next((l for l in lora_list if "daiyu" in l.lower() and "flux" in l.lower()), None)
         adapter_a, adapter_b = "harry", "daiyu"
+        strength = 1.0
+    elif model_type in ("klein4b", "klein9b"):
+        variant = "4b" if model_type == "klein4b" else "9b"
+        lora_a = next((l for l in lora_list if "harry" in l.lower() and "klein" in l.lower() and variant in l.lower()), None)
+        lora_b = next((l for l in lora_list if "shalnark" in l.lower() and "klein" in l.lower() and variant in l.lower()), None)
+        if not lora_a:
+            lora_a = next((l for l in lora_list if "harry" in l.lower() and "klein" in l.lower()), None)
+        if not lora_b:
+            lora_b = next((l for l in lora_list if "shalnark" in l.lower() and "klein" in l.lower()), None)
+        adapter_a, adapter_b = "harry_klein", "shalnark_klein"
         strength = 1.0
     else:
         lora_a = next((l for l in lora_list if "harry" in l.lower() and "xl" in l.lower()), None)
@@ -372,6 +530,26 @@ def _default_prompt_config(model_type: str) -> Tuple[str, str, Dict[str, str], s
         }
         background_text = "a starry night scene with northern lights"
         adapter_a, adapter_b = "jinx", "skeleton"
+    elif model_type in ("klein4b", "klein9b"):
+        concept_map = {
+            "harry_klein": (
+                "harry potter, an European photorealistic style teenage wizard boy with "
+                "messy black hair, round wire-frame glasses, and bright green eyes, "
+                "wearing a white shirt, burgundy and gold striped tie, and dark robes"
+            ),
+            "shalnark_klein": (
+                "shalnark, an anime boy with blonde bob haircut and turquoise eyes, "
+                "wearing purple and teal futuristic uniform, determined expression, "
+                "digital anime art style"
+            ),
+        }
+        adapter_a, adapter_b = "harry_klein", "shalnark_klein"
+        prompt = (
+            "A picture of two characters, a starry night scene with northern lights: "
+            + " and ".join(concept_map[name] for name in (adapter_a, adapter_b))
+        )
+        negative_prompt = ""
+        background_text = "a starry night scene with northern lights"
     elif model_type == "sdxl":
         prompt = (
             "Realistic photography, an European man wearing Hogwarts uniform hugging an Asian woman "
@@ -428,6 +606,10 @@ def setup_concepts_and_conditioning(
 ):
     from freefuse_comfyui.nodes.concept_map import FreeFuseConceptMap, FreeFuseTokenPositions
 
+    if model_type in ("klein4b", "klein9b"):
+        updated = _set_klein_no_think_template(clip)
+        print(f"[Klein] Applied no-think tokenizer template to {updated} object(s)")
+
     concept_mapper = FreeFuseConceptMap()
     freefuse_data, = concept_mapper.create_map(
         adapter_name_1=adapter_a,
@@ -447,6 +629,10 @@ def setup_concepts_and_conditioning(
         filter_meaningless=True,
         filter_single_char=True,
     )
+
+    if model_type in ("klein4b", "klein9b"):
+        freefuse_data["model_type"] = "flux2"
+        freefuse_data["flux_variant"] = "flux2"
 
     if model_type == "z_image":
         system_prompt = (
@@ -468,6 +654,15 @@ def setup_concepts_and_conditioning(
 
         neg_tokens = clip.tokenize("")
         neg_conditioning = clip.encode_from_tokens_scheduled(neg_tokens, add_dict={"guidance": guidance})
+    elif model_type in ("klein4b", "klein9b"):
+        tokens = clip.tokenize(prompt, llama_template=KLEIN_NO_THINK_TEMPLATE)
+        conditioning = clip.encode_from_tokens_scheduled(
+            tokens, add_dict={"guidance": KLEIN_GUIDANCE}
+        )
+        neg_tokens = clip.tokenize("", llama_template=KLEIN_NO_THINK_TEMPLATE)
+        neg_conditioning = clip.encode_from_tokens_scheduled(
+            neg_tokens, add_dict={"guidance": KLEIN_GUIDANCE}
+        )
     elif model_type == "flux":
         from comfy_extras.nodes_flux import CLIPTextEncodeFlux
         encoder = CLIPTextEncodeFlux()
@@ -615,6 +810,12 @@ def run_model_compare(model_type: str, width: int, height: int, out_dir: str) ->
 
     if model_type == "flux":
         model, clip, vae, flux_variant = load_flux_models()
+    elif model_type == "klein4b":
+        model, clip, vae = load_flux2_klein_models("4b")
+        flux_variant = "flux2"
+    elif model_type == "klein9b":
+        model, clip, vae = load_flux2_klein_models("9b")
+        flux_variant = "flux2"
     elif model_type == "z_image":
         model, clip, vae = load_zimage_models()
         flux_variant = None
@@ -624,8 +825,10 @@ def run_model_compare(model_type: str, width: int, height: int, out_dir: str) ->
 
     lora_a, lora_b, adapter_a, adapter_b, strength = _find_loras_for_model(model_type)
     model, clip, freefuse_data = load_loras(model, clip, lora_a, lora_b, adapter_a, adapter_b, strength)
-    if model_type == "flux":
+    if model_type in ("flux", "klein4b", "klein9b"):
         freefuse_data["flux_variant"] = flux_variant
+    if model_type in ("klein4b", "klein9b"):
+        freefuse_data["model_type"] = "flux2"
 
     prompt, negative_prompt, concept_map, background_text, adapter_a, adapter_b = _default_prompt_config(model_type)
     conditioning_guidance = 3.5 if model_type == "flux" else defaults["cfg"]
@@ -643,7 +846,7 @@ def run_model_compare(model_type: str, width: int, height: int, out_dir: str) ->
         conditioning_guidance,
     )
 
-    fallback_channels = 16 if model_type in ["flux", "z_image"] else 4
+    fallback_channels = 16 if model_type in ["flux", "z_image", "klein4b", "klein9b"] else 4
     latent_channels, latent_h, latent_w = _get_latent_shape(
         model, width, height, fallback_channels=fallback_channels
     )
@@ -652,6 +855,9 @@ def run_model_compare(model_type: str, width: int, height: int, out_dir: str) ->
 
     model_out_dir = os.path.join(out_dir, model_type)
     os.makedirs(model_out_dir, exist_ok=True)
+
+    use_flux2_sigmas = model_type in ("klein4b", "klein9b")
+    model_sigmas = _build_flux2_sigmas(defaults["steps"], width, height) if use_flux2_sigmas else None
 
     # Baseline
     print(f"\n[{model_type}] Baseline generating...")
@@ -673,6 +879,7 @@ def run_model_compare(model_type: str, width: int, height: int, out_dir: str) ->
             last_step=defaults["steps"],
             force_full_denoise=True,
             noise_mask=None,
+            sigmas=model_sigmas,
             callback=None,
             seed=defaults["seed"],
         )
@@ -709,6 +916,7 @@ def run_model_compare(model_type: str, width: int, height: int, out_dir: str) ->
             bg_scale=0.95,
             use_morphological_cleaning=defaults["use_morphological_cleaning"],
             balance_iterations=15,
+            sigmas=model_sigmas,
         )
 
     preview_np = (preview[0].numpy() * 255).astype(np.uint8)
@@ -750,6 +958,7 @@ def run_model_compare(model_type: str, width: int, height: int, out_dir: str) ->
             last_step=defaults["steps"],
             force_full_denoise=True,
             noise_mask=None,
+            sigmas=model_sigmas,
             callback=None,
             seed=defaults["seed"],
         )
@@ -772,7 +981,11 @@ def run_model_compare(model_type: str, width: int, height: int, out_dir: str) ->
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--models", default="all", help="Comma-separated: flux,z_image,sdxl or 'all'")
+    parser.add_argument(
+        "--models",
+        default="all",
+        help="Comma-separated: flux,klein4b,klein9b,z_image,sdxl or 'all'",
+    )
     parser.add_argument("--width", type=int, default=1024)
     parser.add_argument("--height", type=int, default=1024)
     parser.add_argument("--out_dir", default="test_outputs_multimodel_compare")

@@ -42,6 +42,88 @@ from comfy.patcher_extension import PatcherInjection
 BypassAdapter = Union[WeightAdapterBase, WeightAdapterTrainBase]
 
 
+def _is_float8_dtype(dtype: Optional[torch.dtype]) -> bool:
+    """Return True if dtype is a float8 variant supported by this torch build."""
+    if dtype is None:
+        return False
+
+    float8_names = (
+        "float8_e4m3fn",
+        "float8_e5m2",
+        "float8_e4m3fnuz",
+        "float8_e5m2fnuz",
+    )
+    for name in float8_names:
+        dt = getattr(torch, name, None)
+        if dt is not None and dtype == dt:
+            return True
+    return False
+
+
+def _sanitize_adapter_dtype(dtype: Optional[torch.dtype]) -> Optional[torch.dtype]:
+    """
+    Avoid casting LoRA adapter tensors to float8.
+
+    Keeping LoRA at bf16/fp16 preserves adapter signal when base UNET weights are fp8.
+    """
+    # Debug/ablation switch: opt back into original behavior when needed.
+    if os.environ.get("FREEFUSE_ALLOW_FP8_ADAPTER_CAST", "0") == "1":
+        return dtype
+
+    if _is_float8_dtype(dtype):
+        return None
+    return dtype
+
+
+def _unwrap_model_key(mapped_key: Union[str, Tuple[Any, ...]]) -> Optional[str]:
+    """Extract model state_dict key string from a mapped key entry."""
+    if isinstance(mapped_key, str):
+        return mapped_key
+    if isinstance(mapped_key, tuple) and mapped_key and isinstance(mapped_key[0], str):
+        return mapped_key[0]
+    return None
+
+
+def _key_group(key: Union[str, Tuple[Any, ...]]) -> str:
+    """Classify key into single/double/other groups for debug summary."""
+    key_str = _unwrap_model_key(key) or str(key)
+    key_lower = key_str.lower()
+    if "single_blocks." in key_lower or "single_transformer_blocks." in key_lower:
+        return "single"
+    if "double_blocks." in key_lower or "transformer_blocks." in key_lower:
+        return "double"
+    return "other"
+
+
+def _expand_flux_lora_aliases(key_map: Dict[str, Any]) -> None:
+    """
+    Add robust alias keys for Flux/Flux2 LoRAs.
+
+    Some LoRAs use `diffusion_model.single_transformer_blocks.*` or
+    `diffusion_model.transformer_blocks.*` prefixes while Comfy model keys use
+    `diffusion_model.single_blocks.*` and `diffusion_model.double_blocks.*`.
+    """
+    additions: Dict[str, Any] = {}
+    for lora_key, mapped in key_map.items():
+        model_key = _unwrap_model_key(mapped)
+        if model_key is None:
+            continue
+
+        if model_key.startswith("diffusion_model.single_blocks."):
+            suffix = model_key[len("diffusion_model.single_blocks."):]
+            alias = f"diffusion_model.single_transformer_blocks.{suffix}"
+            if alias not in key_map:
+                additions[alias] = mapped
+
+        if model_key.startswith("diffusion_model.double_blocks."):
+            suffix = model_key[len("diffusion_model.double_blocks."):]
+            alias = f"diffusion_model.transformer_blocks.{suffix}"
+            if alias not in key_map:
+                additions[alias] = mapped
+
+    key_map.update(additions)
+
+
 class OffsetBypassForwardHook(BypassForwardHook):
     """
     Extended BypassForwardHook that supports offset for fused weights.
@@ -788,7 +870,11 @@ class MultiAdapterBypassForwardHook:
         dtype = None
         if hasattr(self.module, "weight") and self.module.weight is not None:
             device = self.module.weight.device
-            dtype = self.module.weight.dtype
+            dtype = _sanitize_adapter_dtype(self.module.weight.dtype)
+            if _is_float8_dtype(self.module.weight.dtype):
+                logging.info(
+                    "[OffsetBypass] Detected fp8 module weight; keeping LoRA adapter dtype as source precision."
+                )
         
         if device is not None:
             for adapter_info in self.adapters:
@@ -801,8 +887,13 @@ class MultiAdapterBypassForwardHook:
     
     def _move_adapter_weights_to_device(self, adapter, device, dtype=None):
         """Move adapter weights to specified device."""
+        dtype = _sanitize_adapter_dtype(dtype)
+
         if isinstance(adapter, nn.Module):
-            adapter.to(device=device)
+            if dtype is not None:
+                adapter.to(device=device, dtype=dtype)
+            else:
+                adapter.to(device=device)
             return
         
         if not hasattr(adapter, "weights") or adapter.weights is None:
@@ -1170,6 +1261,7 @@ def load_bypass_lora_for_models_fixed(
     
     if model is not None:
         key_map = comfy.lora.model_lora_keys_unet(model.model, key_map)
+        _expand_flux_lora_aliases(key_map)
     
     if clip is not None:
         key_map = comfy.lora.model_lora_keys_clip(clip.cond_stage_model, key_map)
@@ -1192,6 +1284,14 @@ def load_bypass_lora_for_models_fixed(
     
     logging.debug(f"[FixedBypassLoRA] {len(bypass_patches)} bypass adapters, "
                  f"{len(regular_patches)} regular patches")
+    if bypass_patches:
+        single_count = sum(1 for k in bypass_patches if _key_group(k) == "single")
+        double_count = sum(1 for k in bypass_patches if _key_group(k) == "double")
+        other_count = len(bypass_patches) - single_count - double_count
+        logging.info(
+            f"[FixedBypassLoRA] Bypass adapter groups: "
+            f"single={single_count}, double={double_count}, other={other_count}"
+        )
     
     k = set()  # Loaded model keys
     k1 = set()  # Loaded clip keys
@@ -1213,6 +1313,9 @@ def load_bypass_lora_for_models_fixed(
         # Create new manager that will hold ALL adapters (existing + new)
         manager = OffsetBypassInjectionManager()
         model_sd_keys = set(new_modelpatcher.model.state_dict().keys())
+        loaded_model_group = {"single": 0, "double": 0, "other": 0}
+        missing_model_group = {"single": 0, "double": 0, "other": 0}
+        missing_model_keys: List[str] = []
         
         # First, collect existing adapters from previous manager
         if existing_manager is not None:
@@ -1250,8 +1353,12 @@ def load_bypass_lora_for_models_fixed(
                     adapter_name=adapter_name,
                 )
                 k.add(key)
+                loaded_model_group[_key_group(actual_key)] += 1
             else:
                 logging.warning(f"[FixedBypassLoRA] Adapter key not in model: {actual_key}")
+                missing_model_group[_key_group(actual_key)] += 1
+                if len(missing_model_keys) < 12:
+                    missing_model_keys.append(actual_key)
         
         # Create unified injections with ALL adapters
         injections = manager.create_injections(new_modelpatcher.model)
@@ -1277,6 +1384,23 @@ def load_bypass_lora_for_models_fixed(
             
             logging.info(f"[FixedBypassLoRA] Model: {manager.get_total_adapter_count()} adapters "
                         f"in {manager.get_hook_count()} hooks (merged)")
+            logging.info(
+                "[FixedBypassLoRA] Model adapter load summary: "
+                f"single={loaded_model_group['single']}, "
+                f"double={loaded_model_group['double']}, "
+                f"other={loaded_model_group['other']}"
+            )
+            if missing_model_keys:
+                logging.warning(
+                    "[FixedBypassLoRA] Model missing adapter keys sample: "
+                    + ", ".join(missing_model_keys)
+                )
+                logging.warning(
+                    "[FixedBypassLoRA] Model missing adapter key groups: "
+                    f"single={missing_model_group['single']}, "
+                    f"double={missing_model_group['double']}, "
+                    f"other={missing_model_group['other']}"
+                )
     else:
         new_modelpatcher = None
     

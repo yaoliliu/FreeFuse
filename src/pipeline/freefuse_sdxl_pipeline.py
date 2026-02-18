@@ -211,8 +211,8 @@ class FreeFuseSDXLPipeline(StableDiffusionXLPipeline):
     
     def stabilized_balanced_argmax(self, logits, h, w, target_count=None, max_iter=15, 
                                   lr=0.01,           
-                                  gravity_weight=0.0003, 
-                                  spatial_weight=0.0003,
+                                  gravity_weight=0.00003, 
+                                  spatial_weight=0.00003,
                                   momentum=0.2,
                                   centroid_margin=0.0,
                                   border_penalty=0.0,

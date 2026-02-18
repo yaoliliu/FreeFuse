@@ -5,6 +5,8 @@ FreeFuse for ComfyUI: multi-concept LoRA composition with spatial awareness.
 ## Workflows (Complete only)
 
 - [workflows/flux_freefuse_complete.json](workflows/flux_freefuse_complete.json)
+- [workflows/flux2_klein_4b_freefuse_complete.json](workflows/flux2_klein_4b_freefuse_complete.json)
+- [workflows/flux2_klein_9b_freefuse_complete.json](workflows/flux2_klein_9b_freefuse_complete.json)
 - [workflows/sdxl_freefuse_complete.json](workflows/sdxl_freefuse_complete.json)
 - [workflows/zimage_freefuse_complete.json](workflows/zimage_freefuse_complete.json)
 
@@ -26,6 +28,8 @@ ln -s /path/to/FreeFuse/comfyui ComfyUI/custom_nodes
 
 > The workflows expect these filenames by default:
 > - Flux: harry_potter_flux.safetensors, daiyu_lin_flux.safetensors
+> - Flux2.Klein 4B: flux-2-klein-4b.safetensors + qwen_3_4b.safetensors + flux2-vae.safetensors
+> - Flux2.Klein 9B: flux-2-klein-9b-fp8.safetensors + qwen_3_8b_fp8mixed.safetensors + flux2-vae.safetensors
 > - SDXL: harry_potter_xl.safetensors, daiyu_lin_xl.safetensors
 > - Z-Image-Turbo: Jinx_Arcane_zit.safetensors, skeletor_zit.safetensors
 > If you use the downloads above, rename the files or update the workflow nodes.
@@ -59,8 +63,8 @@ Example:
 
 - `steps`: Total steps for Phase 2 (keep consistent for the same noise schedule)
 - `collect_step`: Which step to collect attention and early-stop
-- `collect_block`: Transformer block to extract attention (Flux: 0-56; SDXL: usually ≤20)
-- `temperature`: Softmax temperature for similarity; 0 = auto (Flux=4000, SDXL=300)
+- `collect_block`: Transformer block to extract attention (Flux: `transformer_blocks.<idx>`, Flux2: `single_transformer_blocks.<idx>`, SDXL ignored)
+- `temperature`: Softmax temperature for similarity; 0 = auto (Flux/Flux2=4000, SDXL=300)
 - `top_k_ratio`: Ratio of top-k tokens used for similarity
 - `disable_lora_phase1`: Disable LoRA in Phase 1 (recommended for cleaner attention)
 - `bg_scale`: Background similarity scale (higher = more background)
@@ -73,13 +77,14 @@ Example:
 - `enable_attention_bias`: Enable attention bias
 - `bias_scale`: Negative bias strength (suppresses wrong concepts)
 - `positive_bias_scale`: Positive bias strength (enhances correct concepts)
-- `bidirectional`: Flux-only bidirectional bias (text↔image)
+- `bidirectional`: Flux/Flux2 bidirectional bias (text↔image)
 - `use_positive_bias`: Enable positive bias
 - `bias_blocks`: Which blocks to apply bias (recommended all or double_stream_only)
 
 ### Sampling (KSampler / FluxGuidance)
 
 - Flux uses FluxGuidance for CFG; set KSampler CFG to 1.0
+- Flux2.Klein uses CLIPTextEncode + CLIPLoader(type=`flux2`); keep KSampler CFG at 1.0 as a safe default
 - SDXL uses KSampler CFG directly (recommended 7.0)
 
 ## Preview Image

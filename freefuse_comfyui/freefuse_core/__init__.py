@@ -18,6 +18,7 @@ from .attention import (
 from .attention_replace import (
     FreeFuseState,
     FreeFuseFluxBlockReplace,
+    FreeFuseFluxSingleBlockReplace,
     FreeFuseFluxAttentionReplace,
     FreeFuseSDXLAttnReplace,
     FreeFuseZImageBlockReplace,
@@ -97,6 +98,7 @@ __all__ = [
     # New replace patch based hooks (recommended)
     "FreeFuseState",
     "FreeFuseFluxBlockReplace",
+    "FreeFuseFluxSingleBlockReplace",
     "FreeFuseFluxAttentionReplace",
     "FreeFuseSDXLAttnReplace",
     "FreeFuseZImageBlockReplace",
@@ -143,4 +145,3 @@ __all__ = [
     "FreeFuseSDXLBiasAttnReplace",
     "apply_attention_bias_patches",
 ]
-
