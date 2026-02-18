@@ -12,6 +12,8 @@ Comprehensive tests for various parameters on Flux, SDXL, and Z-Image-Turbo mode
 
 Run from repository root:
     python freefuse_comfyui/tests/test_parameters.py --flux
+    python freefuse_comfyui/tests/test_parameters.py --klein4b
+    python freefuse_comfyui/tests/test_parameters.py --klein9b
     python freefuse_comfyui/tests/test_parameters.py --sdxl
     python freefuse_comfyui/tests/test_parameters.py --zimage
     python freefuse_comfyui/tests/test_parameters.py --all
@@ -93,6 +95,21 @@ def _get_flux_context_dim(model) -> Optional[int]:
     return getattr(params, "context_in_dim", None)
 
 
+def _pick_name_by_patterns(candidates: List[str], patterns: List[str]) -> Optional[str]:
+    """Pick first filename whose lowercase name contains one of patterns."""
+    for pattern in patterns:
+        p = pattern.lower()
+        for name in candidates:
+            if p in name.lower():
+                return name
+    return None
+
+
+def _filter_out_base_variants(candidates: List[str]) -> List[str]:
+    """Exclude filenames that contain 'base' to prefer full Klein variants."""
+    return [name for name in candidates if "base" not in name.lower()]
+
+
 def _pick_flux2_text_encoder(clip_names: List[str], context_in_dim: Optional[int], unet_name: Optional[str]) -> Optional[str]:
     def pick_by_patterns(patterns: List[str]) -> Optional[str]:
         for pat in patterns:
@@ -119,6 +136,55 @@ def _pick_flux2_text_encoder(clip_names: List[str], context_in_dim: Optional[int
         return pick_by_patterns(["mistral3", "mistral", "24b"])
 
     return pick_by_patterns(["flux2", "mistral", "qwen", "klein"])
+
+
+KLEIN_NO_THINK_TEMPLATE = "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
+KLEIN_GUIDANCE = None
+
+
+def _set_klein_no_think_template(clip) -> int:
+    """
+    Force Klein/Qwen tokenizer chat template to match diffusers enable_thinking=False.
+
+    Returns number of tokenizer objects updated.
+    """
+    root = getattr(clip, "tokenizer", None)
+    if root is None:
+        return 0
+
+    updated = 0
+    seen = set()
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        if current is None:
+            continue
+        obj_id = id(current)
+        if obj_id in seen:
+            continue
+        seen.add(obj_id)
+
+        if hasattr(current, "llama_template"):
+            setattr(current, "llama_template", KLEIN_NO_THINK_TEMPLATE)
+            updated += 1
+
+        # Traverse common Comfy tokenizer wrapper links.
+        for attr in ("clip", "qwen3_4b", "qwen3_8b", "clip_l", "clip_g", "t5xxl"):
+            child = getattr(current, attr, None)
+            if isinstance(child, str) and hasattr(current, child):
+                child = getattr(current, child)
+            if child is not None and not isinstance(child, (str, int, float, bool)):
+                stack.append(child)
+
+    return updated
+
+
+def _build_flux2_sigmas(steps: int, width: int, height: int):
+    """Build Flux2 (mu-shifted) sigma schedule like diffusers/Flux2Scheduler."""
+    from comfy_extras.nodes_flux import get_schedule
+
+    image_seq_len = round((width * height) / (16 * 16))
+    return get_schedule(steps, image_seq_len)
 
 
 @dataclass
@@ -365,6 +431,281 @@ ATTN_BIAS_TESTS = [
     ),
 ]
 
+
+def _make_klein_test(
+    name: str,
+    width: int,
+    height: int,
+    collect_block: int,
+    description: str,
+    *,
+    temperature: float = 0.0,
+    top_k_ratio: float = 0.1,
+    disable_lora_phase1: bool = True,
+    bg_scale: float = 0.95,
+    use_morphological_cleaning: bool = False,
+    balance_iterations: int = 15,
+    bias_scale: float = 1.0,
+    positive_bias_scale: float = 1.0,
+) -> TestConfig:
+    return TestConfig(
+        name=name,
+        width=width,
+        height=height,
+        collect_block=collect_block,
+        temperature=temperature,
+        top_k_ratio=top_k_ratio,
+        disable_lora_phase1=disable_lora_phase1,
+        bg_scale=bg_scale,
+        use_morphological_cleaning=use_morphological_cleaning,
+        balance_iterations=balance_iterations,
+        bias_scale=bias_scale,
+        positive_bias_scale=positive_bias_scale,
+        description=description,
+    )
+
+
+# ── Flux2.Klein 4B specific test configurations ────────────────────────
+# Parameters aligned with main_freefuse_flux2_klein_4b.py:
+#   - steps=4, collect_step=2, cfg=1.0, seed=77
+#   - collect_block=single_transformer_blocks.6
+#   - top_k_ratio=0.1
+#   - attention bias: neg=4.0, pos=2.0
+
+KLEIN4B_ASPECT_RATIO_TESTS = [
+    _make_klein_test(
+        "klein4b_square_1024", 1024, 1024, 6,
+        "Klein4B baseline square",
+        top_k_ratio=0.1, bias_scale=4.0, positive_bias_scale=2.0,
+    ),
+    _make_klein_test(
+        "klein4b_portrait_768x1024", 768, 1024, 6,
+        "Klein4B portrait 3:4",
+        top_k_ratio=0.1, bias_scale=4.0, positive_bias_scale=2.0,
+    ),
+    _make_klein_test(
+        "klein4b_landscape_1024x768", 1024, 768, 6,
+        "Klein4B landscape 4:3",
+        top_k_ratio=0.1, bias_scale=4.0, positive_bias_scale=2.0,
+    ),
+]
+
+KLEIN4B_BLOCK_TESTS = [
+    _make_klein_test(
+        "klein4b_block_3", 1024, 1024, 3,
+        "Klein4B earlier single-stream block",
+        top_k_ratio=0.1, bias_scale=4.0, positive_bias_scale=2.0,
+    ),
+    _make_klein_test(
+        "klein4b_block_6", 1024, 1024, 6,
+        "Klein4B script-aligned extraction block",
+        top_k_ratio=0.1, bias_scale=4.0, positive_bias_scale=2.0,
+    ),
+    _make_klein_test(
+        "klein4b_block_9", 1024, 1024, 9,
+        "Klein4B later single-stream block",
+        top_k_ratio=0.1, bias_scale=4.0, positive_bias_scale=2.0,
+    ),
+]
+
+KLEIN4B_SIMMAP_PARAM_TESTS = [
+    _make_klein_test(
+        "klein4b_temp_100", 1024, 1024, 6,
+        "Klein4B low temperature",
+        temperature=100.0, top_k_ratio=0.1, bias_scale=4.0, positive_bias_scale=2.0,
+    ),
+    _make_klein_test(
+        "klein4b_temp_10000", 1024, 1024, 6,
+        "Klein4B high temperature",
+        temperature=10000.0, top_k_ratio=0.1, bias_scale=4.0, positive_bias_scale=2.0,
+    ),
+    _make_klein_test(
+        "klein4b_topk_0.05", 1024, 1024, 6,
+        "Klein4B sparse top-k",
+        top_k_ratio=0.05, bias_scale=4.0, positive_bias_scale=2.0,
+    ),
+    _make_klein_test(
+        "klein4b_topk_0.2", 1024, 1024, 6,
+        "Klein4B dense top-k",
+        top_k_ratio=0.2, bias_scale=4.0, positive_bias_scale=2.0,
+    ),
+]
+
+KLEIN4B_MASK_PARAM_TESTS = [
+    _make_klein_test(
+        "klein4b_bg_scale_0.8", 1024, 1024, 6,
+        "Klein4B low background scale",
+        top_k_ratio=0.1, bg_scale=0.8, bias_scale=4.0, positive_bias_scale=2.0,
+    ),
+    _make_klein_test(
+        "klein4b_bg_scale_1.2", 1024, 1024, 6,
+        "Klein4B high background scale",
+        top_k_ratio=0.1, bg_scale=1.2, bias_scale=4.0, positive_bias_scale=2.0,
+    ),
+    _make_klein_test(
+        "klein4b_morph_on", 1024, 1024, 6,
+        "Klein4B morphology cleaning enabled",
+        top_k_ratio=0.1, use_morphological_cleaning=True, bias_scale=4.0, positive_bias_scale=2.0,
+    ),
+    _make_klein_test(
+        "klein4b_balance_iter_30", 1024, 1024, 6,
+        "Klein4B more balancing iterations",
+        top_k_ratio=0.1, balance_iterations=30, bias_scale=4.0, positive_bias_scale=2.0,
+    ),
+]
+
+KLEIN4B_LORA_PHASE1_TESTS = [
+    _make_klein_test(
+        "klein4b_lora_disabled_phase1", 1024, 1024, 6,
+        "Klein4B LoRA disabled in phase-1",
+        top_k_ratio=0.1, disable_lora_phase1=True, bias_scale=4.0, positive_bias_scale=2.0,
+    ),
+    _make_klein_test(
+        "klein4b_lora_enabled_phase1", 1024, 1024, 6,
+        "Klein4B LoRA enabled in phase-1",
+        top_k_ratio=0.1, disable_lora_phase1=False, bias_scale=4.0, positive_bias_scale=2.0,
+    ),
+]
+
+KLEIN4B_ATTN_BIAS_TESTS = [
+    _make_klein_test(
+        "klein4b_bias_0", 1024, 1024, 6,
+        "Klein4B no attention bias baseline",
+        top_k_ratio=0.1, bias_scale=0.0, positive_bias_scale=0.0,
+    ),
+    _make_klein_test(
+        "klein4b_bias_4_2", 1024, 1024, 6,
+        "Klein4B script-aligned attention bias",
+        top_k_ratio=0.1, bias_scale=4.0, positive_bias_scale=2.0,
+    ),
+    _make_klein_test(
+        "klein4b_bias_8_3", 1024, 1024, 6,
+        "Klein4B stronger attention bias",
+        top_k_ratio=0.1, bias_scale=8.0, positive_bias_scale=3.0,
+    ),
+]
+
+
+# ── Flux2.Klein 9B specific test configurations ────────────────────────
+# Parameters aligned with main_freefuse_flux2_klein_9b.py:
+#   - steps=4, collect_step=2, cfg=1.0, seed=0
+#   - collect_block=single_transformer_blocks.3
+#   - top_k_ratio=0.1
+#   - attention bias: neg=1.0, pos=1.0
+
+KLEIN9B_ASPECT_RATIO_TESTS = [
+    _make_klein_test(
+        "klein9b_square_1024", 1024, 1024, 3,
+        "Klein9B baseline square",
+        top_k_ratio=0.1, bias_scale=1.0, positive_bias_scale=1.0,
+    ),
+    _make_klein_test(
+        "klein9b_portrait_768x1024", 768, 1024, 3,
+        "Klein9B portrait 3:4",
+        top_k_ratio=0.1, bias_scale=1.0, positive_bias_scale=1.0,
+    ),
+    _make_klein_test(
+        "klein9b_landscape_1024x768", 1024, 768, 3,
+        "Klein9B landscape 4:3",
+        top_k_ratio=0.1, bias_scale=1.0, positive_bias_scale=1.0,
+    ),
+]
+
+KLEIN9B_BLOCK_TESTS = [
+    _make_klein_test(
+        "klein9b_block_1", 1024, 1024, 1,
+        "Klein9B earlier single-stream block",
+        top_k_ratio=0.1, bias_scale=1.0, positive_bias_scale=1.0,
+    ),
+    _make_klein_test(
+        "klein9b_block_3", 1024, 1024, 3,
+        "Klein9B script-aligned extraction block",
+        top_k_ratio=0.1, bias_scale=1.0, positive_bias_scale=1.0,
+    ),
+    _make_klein_test(
+        "klein9b_block_6", 1024, 1024, 6,
+        "Klein9B later single-stream block",
+        top_k_ratio=0.1, bias_scale=1.0, positive_bias_scale=1.0,
+    ),
+]
+
+KLEIN9B_SIMMAP_PARAM_TESTS = [
+    _make_klein_test(
+        "klein9b_temp_100", 1024, 1024, 3,
+        "Klein9B low temperature",
+        temperature=100.0, top_k_ratio=0.1, bias_scale=1.0, positive_bias_scale=1.0,
+    ),
+    _make_klein_test(
+        "klein9b_temp_10000", 1024, 1024, 3,
+        "Klein9B high temperature",
+        temperature=10000.0, top_k_ratio=0.1, bias_scale=1.0, positive_bias_scale=1.0,
+    ),
+    _make_klein_test(
+        "klein9b_topk_0.05", 1024, 1024, 3,
+        "Klein9B sparse top-k",
+        top_k_ratio=0.05, bias_scale=1.0, positive_bias_scale=1.0,
+    ),
+    _make_klein_test(
+        "klein9b_topk_0.2", 1024, 1024, 3,
+        "Klein9B dense top-k",
+        top_k_ratio=0.2, bias_scale=1.0, positive_bias_scale=1.0,
+    ),
+]
+
+KLEIN9B_MASK_PARAM_TESTS = [
+    _make_klein_test(
+        "klein9b_bg_scale_0.8", 1024, 1024, 3,
+        "Klein9B low background scale",
+        top_k_ratio=0.1, bg_scale=0.8, bias_scale=1.0, positive_bias_scale=1.0,
+    ),
+    _make_klein_test(
+        "klein9b_bg_scale_1.2", 1024, 1024, 3,
+        "Klein9B high background scale",
+        top_k_ratio=0.1, bg_scale=1.2, bias_scale=1.0, positive_bias_scale=1.0,
+    ),
+    _make_klein_test(
+        "klein9b_morph_on", 1024, 1024, 3,
+        "Klein9B morphology cleaning enabled",
+        top_k_ratio=0.1, use_morphological_cleaning=True, bias_scale=1.0, positive_bias_scale=1.0,
+    ),
+    _make_klein_test(
+        "klein9b_balance_iter_30", 1024, 1024, 3,
+        "Klein9B more balancing iterations",
+        top_k_ratio=0.1, balance_iterations=30, bias_scale=1.0, positive_bias_scale=1.0,
+    ),
+]
+
+KLEIN9B_LORA_PHASE1_TESTS = [
+    _make_klein_test(
+        "klein9b_lora_disabled_phase1", 1024, 1024, 3,
+        "Klein9B LoRA disabled in phase-1",
+        top_k_ratio=0.1, disable_lora_phase1=True, bias_scale=1.0, positive_bias_scale=1.0,
+    ),
+    _make_klein_test(
+        "klein9b_lora_enabled_phase1", 1024, 1024, 3,
+        "Klein9B LoRA enabled in phase-1",
+        top_k_ratio=0.1, disable_lora_phase1=False, bias_scale=1.0, positive_bias_scale=1.0,
+    ),
+]
+
+KLEIN9B_ATTN_BIAS_TESTS = [
+    _make_klein_test(
+        "klein9b_bias_0", 1024, 1024, 3,
+        "Klein9B no attention bias baseline",
+        top_k_ratio=0.1, bias_scale=0.0, positive_bias_scale=0.0,
+    ),
+    _make_klein_test(
+        "klein9b_bias_1_1", 1024, 1024, 3,
+        "Klein9B script-aligned attention bias",
+        top_k_ratio=0.1, bias_scale=1.0, positive_bias_scale=1.0,
+    ),
+    _make_klein_test(
+        "klein9b_bias_3_2", 1024, 1024, 3,
+        "Klein9B stronger attention bias",
+        top_k_ratio=0.1, bias_scale=3.0, positive_bias_scale=2.0,
+    ),
+]
+
 # ── Z-Image-Turbo specific test configurations ──────────────────────────
 # Parameters aligned with main_freefuse_z_image.py:
 #   - top_k_ratio=0.1, temperature=0 (auto → 4000), bias_scale=3.0
@@ -551,6 +892,99 @@ def load_flux_models():
     return model, clip, vae, "flux"
 
 
+def load_flux2_klein_models(variant: str):
+    """Load Flux2.Klein model variant (4b or 9b) and return components."""
+    if variant not in ("4b", "9b"):
+        raise ValueError(f"Unsupported Klein variant: {variant}")
+
+    print(f"\n[Loading Flux2.Klein {variant.upper()} Models]")
+
+    diffusion_models = folder_paths.get_filename_list("diffusion_models")
+    unet_patterns = (
+        ["flux-2-klein-4b", "flux2-klein-4b", "klein_4b", "klein-4b", "klein4b"]
+        if variant == "4b"
+        else ["flux-2-klein-9b", "flux2-klein-9b", "klein_9b", "klein-9b", "klein9b", "9b-fp8"]
+    )
+    non_base_diffusion_models = _filter_out_base_variants(diffusion_models)
+    unet_name = _pick_name_by_patterns(non_base_diffusion_models, unet_patterns)
+    if not unet_name and variant == "4b":
+        # Broad fallback
+        unet_name = _pick_name_by_patterns(
+            non_base_diffusion_models, [f"klein-{variant}", f"klein{variant}", "klein"]
+        )
+
+    if not unet_name:
+        base_only_candidates = [
+            n for n in diffusion_models if "klein" in n.lower() and variant in n.lower() and "base" in n.lower()
+        ]
+        raise FileNotFoundError(
+            f"No non-base Flux2.Klein {variant} UNET found in diffusion_models. "
+            f"Base-only candidates: {base_only_candidates}. Available: {diffusion_models}"
+        )
+
+    clip_names = folder_paths.get_filename_list("text_encoders")
+    non_base_clip_names = _filter_out_base_variants(clip_names)
+    clip_patterns = (
+        ["qwen_3_4b", "qwen3_4b", "qwen3-4b", "qwen_4b", "4b"]
+        if variant == "4b"
+        else ["qwen_3_8b_fp8mixed", "qwen3_8b_fp8mixed", "qwen_3_8b", "qwen3_8b", "qwen3-8b", "8b", "fp8"]
+    )
+    clip_name = _pick_name_by_patterns(non_base_clip_names, clip_patterns)
+    if not clip_name:
+        clip_name = _pick_name_by_patterns(non_base_clip_names, ["qwen3", "qwen"])
+
+    if not clip_name:
+        base_only_clip_candidates = [
+            n for n in clip_names if "qwen" in n.lower() and variant in n.lower() and "base" in n.lower()
+        ]
+        raise FileNotFoundError(
+            f"No suitable non-base Flux2.Klein {variant} text encoder found. "
+            f"Base-only candidates: {base_only_clip_candidates}. Available: {clip_names}"
+        )
+
+    vae_names = folder_paths.get_filename_list("vae")
+    vae_name = _pick_name_by_patterns(vae_names, ["flux2-vae", "flux2_vae", "flux2", "ae"])
+    if not vae_name:
+        raise FileNotFoundError(f"No suitable Flux2 VAE found. Available: {vae_names}")
+
+    from nodes import UNETLoader, CLIPLoader, VAELoader
+
+    unet_loader = UNETLoader()
+    model, = unet_loader.load_unet(unet_name, "default")
+    print(f"  ✅ UNET loaded: {unet_name}")
+    context_in_dim = _get_flux_context_dim(model)
+    print(f"  Flux2 context_in_dim: {context_in_dim}")
+
+    clip_loader = CLIPLoader()
+    clip, = clip_loader.load_clip(clip_name, type="flux2")
+    print(f"  ✅ CLIP loaded (flux2): {clip_name}")
+
+    # Early sanity check: encoded context dim must match UNET expected context dim.
+    try:
+        tokens = clip.tokenize("test")
+        cond = clip.encode_from_tokens_scheduled(tokens)
+        cond_dim = None
+        if isinstance(cond, list) and cond and isinstance(cond[0], (list, tuple)) and len(cond[0]) > 0:
+            first = cond[0][0]
+            if hasattr(first, "shape"):
+                cond_dim = int(first.shape[-1])
+        if context_in_dim is not None and cond_dim is not None and cond_dim != context_in_dim:
+            raise RuntimeError(
+                f"Flux2.Klein {variant} text encoder dim mismatch: "
+                f"UNET expects {context_in_dim}, but CLIP '{clip_name}' outputs {cond_dim}."
+            )
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed Flux2.Klein {variant} CLIP/UNET compatibility check: {e}"
+        )
+
+    vae_loader = VAELoader()
+    vae, = vae_loader.load_vae(vae_name)
+    print(f"  ✅ VAE loaded: {vae_name}")
+
+    return model, clip, vae, f"klein{variant}"
+
+
 def load_sdxl_models():
     """Load SDXL model and return components."""
     print("\n[Loading SDXL Models]")
@@ -639,6 +1073,20 @@ def load_loras(model, clip, model_type: str):
         lora_b = next((l for l in lora_list if "skeletor" in l.lower() and "zit" in l.lower()), None)
         adapter_a, adapter_b = "jinx", "skeleton"
         strength = 0.8  # Matches main_freefuse_z_image.py
+    elif model_type in ("klein4b", "klein9b"):
+        variant = "4b" if model_type == "klein4b" else "9b"
+
+        lora_a = next((l for l in lora_list if "harry" in l.lower() and "klein" in l.lower() and variant in l.lower()), None)
+        lora_b = next((l for l in lora_list if "shalnark" in l.lower() and "klein" in l.lower() and variant in l.lower()), None)
+
+        # Fallbacks if variant suffix is missing in filename
+        if not lora_a:
+            lora_a = next((l for l in lora_list if "harry" in l.lower() and "klein" in l.lower()), None)
+        if not lora_b:
+            lora_b = next((l for l in lora_list if "shalnark" in l.lower() and "klein" in l.lower()), None)
+
+        adapter_a, adapter_b = "harry_klein", "shalnark_klein"
+        strength = 1.0
     elif model_type == "flux":
         lora_a = next((l for l in lora_list if "harry" in l.lower() and "flux" in l.lower()), None)
         lora_b = next((l for l in lora_list if "daiyu" in l.lower() and "flux" in l.lower()), None)
@@ -654,7 +1102,7 @@ def load_loras(model, clip, model_type: str):
         print(f"  Warning: LoRAs not found for {model_type}")
         print(f"  Available: {lora_list}")
         freefuse_data = {"adapters": []}
-        if model_type == "flux":
+        if model_type in ("flux", "klein4b", "klein9b"):
             freefuse_data["flux_variant"] = "flux2" if _is_flux2_model(model) else "flux"
         return model, clip, freefuse_data
     
@@ -665,7 +1113,7 @@ def load_loras(model, clip, model_type: str):
     )
     print(f"  ✅ LoRA loaded: {adapter_a} ({lora_a}), strength={strength}")
 
-    if model_type == "flux":
+    if model_type in ("flux", "klein4b", "klein9b"):
         freefuse_data["flux_variant"] = "flux2" if _is_flux2_model(model) else "flux"
     
     model, clip, freefuse_data = loader.load_lora(
@@ -698,6 +1146,26 @@ def setup_concepts_and_conditioning(clip, freefuse_data, model_type: str):
         }
         background_text = "a starry night scene with northern lights"
         adapter_a, adapter_b = "jinx", "skeleton"
+    elif model_type in ("klein4b", "klein9b"):
+        concept_map = {
+            "harry_klein": (
+                "harry potter, an European photorealistic style teenage wizard boy with "
+                "messy black hair, round wire-frame glasses, and bright green eyes, "
+                "wearing a white shirt, burgundy and gold striped tie, and dark robes"
+            ),
+            "shalnark_klein": (
+                "shalnark, an anime boy with blonde bob haircut and turquoise eyes, "
+                "wearing purple and teal futuristic uniform, determined expression, "
+                "digital anime art style"
+            ),
+        }
+        adapter_a, adapter_b = "harry_klein", "shalnark_klein"
+        prompt = (
+            "A picture of two characters, a starry night scene with northern lights: "
+            + " and ".join(concept_map[name] for name in (adapter_a, adapter_b))
+        )
+        negative_prompt = ""
+        background_text = "a starry night scene with northern lights"
     else:
         # Flux / SDXL use Harry + Daiyu
         prompt = ("Realistic photography, harry potter, an European photorealistic style teenage wizard boy "
@@ -718,6 +1186,12 @@ def setup_concepts_and_conditioning(clip, freefuse_data, model_type: str):
         }
         background_text = "autumn leaves blurred in the background"
         adapter_a, adapter_b = "harry", "daiyu"
+
+    if model_type in ("klein4b", "klein9b"):
+        updated = _set_klein_no_think_template(clip)
+        print(
+            f"[Klein] Applied no-think tokenizer template to {updated} object(s)"
+        )
     
     from freefuse_comfyui.nodes.concept_map import FreeFuseConceptMap, FreeFuseTokenPositions
     
@@ -740,9 +1214,24 @@ def setup_concepts_and_conditioning(clip, freefuse_data, model_type: str):
         filter_meaningless=True,
         filter_single_char=True,
     )
+
+    # Force model type hint for Flux2.Klein to avoid tokenizer-only misdetection.
+    if model_type in ("klein4b", "klein9b"):
+        freefuse_data["model_type"] = "flux2"
+        freefuse_data["flux_variant"] = "flux2"
     
     # Create conditioning
-    if model_type == "flux" and freefuse_data.get("flux_variant") == "flux2":
+    if model_type in ("klein4b", "klein9b"):
+        tokens = clip.tokenize(prompt, llama_template=KLEIN_NO_THINK_TEMPLATE)
+        conditioning = clip.encode_from_tokens_scheduled(
+            tokens, add_dict={"guidance": KLEIN_GUIDANCE}
+        )
+
+        neg_tokens = clip.tokenize("", llama_template=KLEIN_NO_THINK_TEMPLATE)
+        neg_conditioning = clip.encode_from_tokens_scheduled(
+            neg_tokens, add_dict={"guidance": KLEIN_GUIDANCE}
+        )
+    elif model_type == "flux" and freefuse_data.get("flux_variant") == "flux2":
         tokens = clip.tokenize(prompt)
         conditioning = clip.encode_from_tokens_scheduled(tokens, add_dict={"guidance": 3.5})
 
@@ -809,6 +1298,9 @@ def run_single_test(
         "phase2_time": 0,
         "masks": {},
     }
+    if model_type in ("klein4b", "klein9b") and isinstance(freefuse_data, dict):
+        freefuse_data["model_type"] = "flux2"
+        freefuse_data["flux_variant"] = "flux2"
     
     try:
         # Create latent (respect model latent format when available)
@@ -818,7 +1310,7 @@ def run_single_test(
             downscale = getattr(latent_format, "spacial_downscale_ratio", 8)
         else:
             # Fallbacks
-            latent_channels = 16 if model_type in ["flux", "z_image"] else 4
+            latent_channels = 16 if model_type in ["flux", "z_image", "klein4b", "klein9b"] else 4
             downscale = 8
 
         latent_h, latent_w = config.height // downscale, config.width // downscale
@@ -835,11 +1327,17 @@ def run_single_test(
             #   NOTE: diffusers uses guidance_scale=0.0 (skip CFG, cond-only output)
             #   In ComfyUI, cfg=1.0 triggers cfg1_optimization which skips uncond entirely
             #   cfg=0.0 would return ONLY uncond_pred (gibberish!)
-            # Flux: 28 steps, cfg=1.0, collect_step=5
+            # Flux1: 28 steps, cfg=1.0, collect_step=5
+            # Flux2/Klein: 4 steps, cfg=1.0, Flux2 mu-shift schedule (custom sigmas)
             # SDXL: 30 steps, cfg=7.0, collect_step=10
+            p1_sigmas = None
             if model_type == "z_image":
                 p1_steps, p1_collect, p1_cfg = 12, 3, 1.0
                 p1_scheduler = "simple"
+            elif model_type in ("klein4b", "klein9b"):
+                p1_steps, p1_collect, p1_cfg = 4, 2, 1.0
+                p1_scheduler = "simple"
+                p1_sigmas = _build_flux2_sigmas(p1_steps, config.width, config.height)
             elif model_type == "flux":
                 p1_steps, p1_collect, p1_cfg = 28, 5, 1.0
                 p1_scheduler = "simple"
@@ -859,6 +1357,7 @@ def run_single_test(
                 cfg=p1_cfg,
                 sampler_name="euler",
                 scheduler=p1_scheduler,
+                sigmas=p1_sigmas,
                 collect_block=config.collect_block,
                 temperature=config.temperature,
                 top_k_ratio=config.top_k_ratio,
@@ -905,8 +1404,12 @@ def run_single_test(
         noise = comfy.sample.prepare_noise(latent, seed, None)
         
         # Use matching parameters for Phase 2
+        p2_sigmas = None
         if model_type == "z_image":
             p2_steps, p2_cfg, p2_scheduler = 12, 1.0, "simple"  # cfg=1.0 = no CFG (cond-only)
+        elif model_type in ("klein4b", "klein9b"):
+            p2_steps, p2_cfg, p2_scheduler = 4, 1.0, "simple"
+            p2_sigmas = _build_flux2_sigmas(p2_steps, config.width, config.height)
         elif model_type == "flux":
             p2_steps, p2_cfg, p2_scheduler = 28, 1.0, "simple"
         else:
@@ -930,6 +1433,7 @@ def run_single_test(
                 last_step=p2_steps,
                 force_full_denoise=True,
                 noise_mask=None,
+                sigmas=p2_sigmas,
                 callback=None,
                 seed=seed,
             )
@@ -988,6 +1492,10 @@ def run_test_suite(model_type: str, test_categories: List[str] = None):
     # Load models
     if model_type == "flux":
         model, clip, vae, mt = load_flux_models()
+    elif model_type == "klein4b":
+        model, clip, vae, mt = load_flux2_klein_models("4b")
+    elif model_type == "klein9b":
+        model, clip, vae, mt = load_flux2_klein_models("9b")
     elif model_type == "z_image":
         model, clip, vae, mt = load_zimage_models()
     else:
@@ -1009,6 +1517,24 @@ def run_test_suite(model_type: str, test_categories: List[str] = None):
             "simmap": ZIMAGE_SIMMAP_PARAM_TESTS,
             "bias": ZIMAGE_ATTN_BIAS_TESTS,
         }
+    elif model_type == "klein4b":
+        all_tests = {
+            "aspect": KLEIN4B_ASPECT_RATIO_TESTS,
+            "block": KLEIN4B_BLOCK_TESTS,
+            "simmap": KLEIN4B_SIMMAP_PARAM_TESTS,
+            "mask": KLEIN4B_MASK_PARAM_TESTS,
+            "lora": KLEIN4B_LORA_PHASE1_TESTS,
+            "bias": KLEIN4B_ATTN_BIAS_TESTS,
+        }
+    elif model_type == "klein9b":
+        all_tests = {
+            "aspect": KLEIN9B_ASPECT_RATIO_TESTS,
+            "block": KLEIN9B_BLOCK_TESTS,
+            "simmap": KLEIN9B_SIMMAP_PARAM_TESTS,
+            "mask": KLEIN9B_MASK_PARAM_TESTS,
+            "lora": KLEIN9B_LORA_PHASE1_TESTS,
+            "bias": KLEIN9B_ATTN_BIAS_TESTS,
+        }
     else:
         all_tests = {
             "aspect": ASPECT_RATIO_TESTS,
@@ -1020,7 +1546,12 @@ def run_test_suite(model_type: str, test_categories: List[str] = None):
         }
     
     # Default seed: 77 for Z-Image (matches main_freefuse_z_image.py), 42 otherwise
-    default_seed = 77 if model_type == "z_image" else 42
+    if model_type in ("z_image", "klein4b"):
+        default_seed = 77
+    elif model_type == "klein9b":
+        default_seed = 0
+    else:
+        default_seed = 42
     
     if test_categories is None:
         test_categories = list(all_tests.keys())
@@ -1074,6 +1605,8 @@ def run_test_suite(model_type: str, test_categories: List[str] = None):
 def main():
     parser = argparse.ArgumentParser(description="FreeFuse Parameter Test Suite")
     parser.add_argument("--flux", action="store_true", help="Run Flux tests")
+    parser.add_argument("--klein4b", action="store_true", help="Run Flux2.Klein 4B tests")
+    parser.add_argument("--klein9b", action="store_true", help="Run Flux2.Klein 9B tests")
     parser.add_argument("--sdxl", action="store_true", help="Run SDXL tests")
     parser.add_argument("--zimage", action="store_true", help="Run Z-Image-Turbo tests")
     parser.add_argument("--all", action="store_true", help="Run all tests")
@@ -1086,7 +1619,7 @@ def main():
     args = parser.parse_args()
     
     # Default to all if nothing specified
-    if not args.flux and not args.sdxl and not args.zimage and not args.all:
+    if not args.flux and not args.klein4b and not args.klein9b and not args.sdxl and not args.zimage and not args.all:
         args.all = True
     
     categories = args.category
@@ -1100,6 +1633,22 @@ def main():
             results["flux"] = run_test_suite("flux", categories)
         except Exception as e:
             print(f"Flux tests failed: {e}")
+            import traceback
+            traceback.print_exc()
+
+    if args.klein4b or args.all:
+        try:
+            results["klein4b"] = run_test_suite("klein4b", categories)
+        except Exception as e:
+            print(f"Klein4B tests failed: {e}")
+            import traceback
+            traceback.print_exc()
+
+    if args.klein9b or args.all:
+        try:
+            results["klein9b"] = run_test_suite("klein9b", categories)
+        except Exception as e:
+            print(f"Klein9B tests failed: {e}")
             import traceback
             traceback.print_exc()
     

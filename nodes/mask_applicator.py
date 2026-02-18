@@ -33,6 +33,7 @@ from ..freefuse_core.attention_bias import (
 from ..freefuse_core.attention_bias_patch import (
     apply_attention_bias_patches,
 )
+from ..freefuse_core.token_utils import detect_model_type
 
 
 class FreeFuseMaskApplicator:
@@ -83,7 +84,7 @@ class FreeFuseMaskApplicator:
                 }),
                 "bidirectional": ("BOOLEAN", {
                     "default": True,
-                    "tooltip": "Apply bias for both image→text and text→image directions (Flux only)"
+                    "tooltip": "Apply bias for both image→text and text→image directions (Flux/Flux2 only)"
                 }),
                 "use_positive_bias": ("BOOLEAN", {
                     "default": True,
@@ -149,8 +150,11 @@ When enabled, constructs soft attention bias to guide cross-attention:
         # Clone the model
         model_clone = model.clone()
         
-        # Detect model type
-        model_type = self._detect_model_type(model_clone)
+        # Detect model type (prefer workflow/model-side hint).
+        model_type = self._detect_model_type(
+            model_clone,
+            model_type_hint=freefuse_data.get("model_type"),
+        )
         print(f"[FreeFuse] Detected model type: {model_type}")
         
         # Get adapter name to mask mapping
@@ -197,28 +201,10 @@ When enabled, constructs soft attention bias to guide cross-attention:
         
         return (model_clone,)
     
-    def _detect_model_type(self, model_patcher) -> str:
-        """Detect whether model is Flux, SDXL, or Z-Image (Lumina2/NextDiT)."""
-        model = model_patcher.model
-        model_class_name = model.__class__.__name__.lower()
-        
-        # Z-Image / Lumina2 / NextDiT detection
-        if "nextdit" in model_class_name or "lumina" in model_class_name:
-            return "z_image"
-        
-        if "flux" in model_class_name:
-            return "flux"
-        
-        # Check for specific model structure
-        if hasattr(model, 'diffusion_model'):
-            dm = model.diffusion_model
-            if hasattr(dm, 'double_blocks') and hasattr(dm, 'single_blocks'):
-                return "flux"
-            # Z-Image has 'layers' but NOT 'double_blocks'
-            if hasattr(dm, 'layers') and not hasattr(dm, 'double_blocks'):
-                return "z_image"
-        
-        return "sdxl"
+    def _detect_model_type(self, model_patcher, model_type_hint: Optional[str] = None) -> str:
+        """Detect model type with model-first strategy and optional hint."""
+        model_type = detect_model_type(model=model_patcher, model_type_hint=model_type_hint)
+        return "sdxl" if model_type == "unknown" else model_type
     
     def _apply_attention_bias(
         self,
@@ -247,7 +233,7 @@ When enabled, constructs soft attention bias to guide cross-attention:
         # Get sequence lengths
         latent_h, latent_w = latent_size
         
-        if model_type == "flux":
+        if model_type in ("flux", "flux2"):
             # For Flux, masks from generate_masks are ALREADY in packed space (H/16, W/16)
             # So img_seq_len is simply latent_h * latent_w (no additional packing needed)
             img_seq_len = latent_h * latent_w
@@ -284,7 +270,7 @@ When enabled, constructs soft attention bias to guide cross-attention:
                 lora_masks=lora_masks_flat,
                 token_pos_maps=token_pos_maps,
             )
-            print(f"[FreeFuse] Applied attention bias for Flux "
+            print(f"[FreeFuse] Applied attention bias for {model_type} "
                   f"(bias_scale={bias_scale}, positive_scale={positive_bias_scale}, "
                   f"bidirectional={bidirectional}, blocks={bias_blocks})")
         

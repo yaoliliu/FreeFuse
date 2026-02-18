@@ -18,6 +18,9 @@ LUMINA2_SYSTEM_PROMPT = (
     "degree of image-text alignment based on textual prompts or user prompts."
 )
 
+# Flux2.Klein should match diffusers apply_chat_template(..., enable_thinking=False).
+KLEIN_NO_THINK_TEMPLATE = "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
+
 
 # Stopwords and punctuation to filter (shared between both methods)
 STOPWORDS = {
@@ -119,6 +122,7 @@ def detect_model_type_from_model(model) -> str:
     if "flux" in model_cls:
         return "flux"
 
+    has_flux_block_layout = False
     dm = getattr(core_model, "diffusion_model", None)
     if dm is not None:
         dm_cls = dm.__class__.__name__.lower()
@@ -129,7 +133,8 @@ def detect_model_type_from_model(model) -> str:
         if "flux" in dm_cls:
             return "flux"
         if hasattr(dm, "double_blocks") and hasattr(dm, "single_blocks"):
-            return "flux"
+            # Could be Flux1 or Flux2; defer final decision to config hints below.
+            has_flux_block_layout = True
         # Lumina2/NextDiT style: layered stack without Flux double/single blocks
         if hasattr(dm, "layers") and not hasattr(dm, "double_blocks"):
             return "z_image"
@@ -144,6 +149,9 @@ def detect_model_type_from_model(model) -> str:
             return "flux"
         if image_model == "lumina2":
             return "z_image"
+
+    if has_flux_block_layout:
+        return "flux"
 
     return "unknown"
 
@@ -433,31 +441,55 @@ def find_concept_positions_t5(
     return concept_pos_map
 
 
+def _collect_token_ids_recursive(payload, flat_ids: List[int]) -> None:
+    """Recursively collect token ids from nested ComfyUI token structures."""
+    if payload is None:
+        return
+
+    if isinstance(payload, dict):
+        for value in payload.values():
+            _collect_token_ids_recursive(value, flat_ids)
+        return
+
+    if isinstance(payload, (int, float)):
+        flat_ids.append(int(payload))
+        return
+
+    if isinstance(payload, (tuple, list)):
+        # Most ComfyUI entries are (token_id, weight[, word_id]).
+        is_token_tuple = (
+            payload
+            and isinstance(payload[0], (int, float))
+            and len(payload) <= 3
+            and (len(payload) == 1 or isinstance(payload[1], (int, float)))
+        )
+        if is_token_tuple:
+            flat_ids.append(int(payload[0]))
+            return
+        for item in payload:
+            _collect_token_ids_recursive(item, flat_ids)
+
+
 def _flatten_chunked_token_ids(token_weight_pairs) -> List[int]:
     """
-    Flatten ComfyUI chunked token-weight pairs into a single token id list.
+    Flatten ComfyUI token-weight pairs into a single token id list.
 
-    Supports:
-    - SDXL: dict with keys "l"/"g", each a list of chunks
-    - SD1/SD2: list of chunks directly
-    Each chunk is a list of (token_id, weight[, word_id]) tuples.
+    Supports both CLIP-style chunking and Qwen/Klein dict outputs.
     """
+    chunks = token_weight_pairs
     if isinstance(token_weight_pairs, dict):
-        if "l" in token_weight_pairs:
-            chunks = token_weight_pairs["l"]
-        else:
-            # Fallback to first entry in dict
-            chunks = next(iter(token_weight_pairs.values()))
-    else:
-        chunks = token_weight_pairs
+        chunks = None
+        # Prefer known text branches first.
+        for key in ("l", "qwen3_8b", "qwen3_4b", "qwen3", "t5xxl", "clip_l", "g"):
+            if key in token_weight_pairs:
+                chunks = token_weight_pairs[key]
+                break
+        if chunks is None:
+            # Fallback to first available payload.
+            chunks = next(iter(token_weight_pairs.values()), [])
 
     flat_ids: List[int] = []
-    for chunk in chunks:
-        for item in chunk:
-            if isinstance(item, (tuple, list)):
-                flat_ids.append(int(item[0]))
-            else:
-                flat_ids.append(int(item))
+    _collect_token_ids_recursive(chunks, flat_ids)
     return flat_ids
 
 
@@ -605,6 +637,7 @@ def find_concept_positions_qwen3(
     filter_meaningless: bool = True,
     filter_single_char: bool = True,
     system_prompt: Optional[str] = None,
+    llama_template: Optional[str] = None,
 ) -> Dict[str, List[List[int]]]:
     """
     Find token positions for Z-Image (Qwen3) models.
@@ -632,6 +665,8 @@ def find_concept_positions_qwen3(
                        When provided, constructs "{system_prompt} <Prompt Start> {prompt}"
                        to match CLIPTextEncodeLumina2 behavior.
                        Use LUMINA2_SYSTEM_PROMPT for the standard Lumina2 prompt.
+        llama_template: Optional explicit chat template passed to clip.tokenize().
+                        Use this to align Flux2.Klein with no-<think> templating.
         
     Returns:
         Dict mapping concept name to list of position lists (one per prompt)
@@ -650,29 +685,20 @@ def find_concept_positions_qwen3(
         else:
             tokenize_prompt = prompt
         
-        # Apply Z-Image's llama template (from comfy/text_encoders/z_image.py)
-        # Template: "<|im_start|>user\n{text}<|im_end|>\n<|im_start|>assistant\n"
-        llama_template = "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
-        wrapped_text = llama_template.format(tokenize_prompt)
+        # Default Qwen chat template (used by Z-Image) unless caller overrides.
+        template_to_use = llama_template or "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
+        wrapped_text = template_to_use.format(tokenize_prompt)
         
         # Tokenize using the ComfyUI clip's tokenize method
         # This gives us the actual token sequence used during generation
         try:
-            token_weight_pairs = clip.tokenize(tokenize_prompt)
-            # For Z-Image, the tokens are directly in qwen3_4b key
-            if 'qwen3_4b' in token_weight_pairs:
-                chunks = token_weight_pairs['qwen3_4b']
-            else:
-                chunks = token_weight_pairs
-            
-            # Flatten chunks to get token IDs
-            token_ids = []
-            for chunk in chunks:
-                for item in chunk:
-                    if isinstance(item, (tuple, list)):
-                        token_ids.append(int(item[0]))
-                    else:
-                        token_ids.append(int(item))
+            token_kwargs = {}
+            if llama_template is not None:
+                token_kwargs["llama_template"] = llama_template
+            token_weight_pairs = clip.tokenize(tokenize_prompt, **token_kwargs)
+            token_ids = _flatten_chunked_token_ids(token_weight_pairs)
+            if not token_ids:
+                raise ValueError("clip.tokenize returned no token ids")
         except Exception as e:
             # Fallback: tokenize directly
             print(f"[FreeFuse] Warning: clip.tokenize failed, using direct tokenization: {e}")
@@ -804,11 +830,13 @@ def find_concept_positions(
     tokenizer = get_tokenizer_for_model(clip, model_type)
     
     if model_type in ('z_image', 'flux2', 'qwen3'):
+        qwen_template = KLEIN_NO_THINK_TEMPLATE if model_type == "flux2" else None
         return find_concept_positions_qwen3(
             clip, tokenizer, prompts, concepts,
             filter_meaningless=filter_meaningless,
             filter_single_char=filter_single_char,
             system_prompt=system_prompt,
+            llama_template=qwen_template,
         )
     elif model_type == 'flux':
         return find_concept_positions_t5(
@@ -870,6 +898,56 @@ def find_eos_position_t5(
     return -1
 
 
+def find_eos_position_qwen3(
+    clip,
+    prompt: str,
+    model_type: Optional[str] = None,
+) -> int:
+    """
+    Find the EOS token position for Qwen3-family tokenizers (Flux2-Klein).
+
+    Args:
+        clip: ComfyUI CLIP object
+        prompt: Prompt string
+        model_type: Optional explicit model type
+
+    Returns:
+        Index of the first EOS token, or -1 if not found.
+    """
+    if model_type is None:
+        model_type = detect_model_type(clip=clip)
+    else:
+        model_type = _normalize_model_type(model_type) or model_type
+
+    if model_type not in {"flux2", "qwen3"}:
+        return -1
+
+    tokenizer = get_tokenizer_for_model(clip, model_type)
+    eos_token_id = getattr(tokenizer, "eos_token_id", None)
+    if eos_token_id is None:
+        return -1
+
+    try:
+        token_kwargs = {}
+        if model_type == "flux2":
+            token_kwargs["llama_template"] = KLEIN_NO_THINK_TEMPLATE
+        token_weight_pairs = clip.tokenize(prompt, **token_kwargs)
+        input_ids = _flatten_chunked_token_ids(token_weight_pairs)
+        if not input_ids:
+            raise ValueError("empty token stream")
+    except Exception:
+        encoded = tokenizer(prompt, return_tensors=None, add_special_tokens=True)
+        input_ids = encoded["input_ids"] if hasattr(encoded, "keys") else encoded.input_ids
+        if hasattr(input_ids, "tolist"):
+            input_ids = input_ids.tolist()
+
+    for i, token_id in enumerate(input_ids):
+        if int(token_id) == int(eos_token_id):
+            return i
+
+    return -1
+
+
 def find_background_positions(
     clip,
     prompt: str,
@@ -880,8 +958,8 @@ def find_background_positions(
     """
     Find token positions for background region.
     
-    For Flux: Uses EOS position if no background_text provided
-    For SDXL: Uses the provided background_text or returns empty
+    For Flux/Flux2: Uses EOS position if no background_text provided
+    For SDXL/Z-Image: Uses the provided background_text or returns empty
     
     Args:
         clip: ComfyUI CLIP object
@@ -907,9 +985,13 @@ def find_background_positions(
         )
         return pos_map.get('__bg__', [[]])[0]
     
-    # For Flux, can use EOS position as background anchor
+    # For Flux/Flux2, use EOS as background anchor when explicit text is absent.
     if model_type == 'flux':
         eos_pos = find_eos_position_t5(clip, prompt)
+        if eos_pos >= 0:
+            return [eos_pos]
+    elif model_type in ('flux2', 'qwen3'):
+        eos_pos = find_eos_position_qwen3(clip, prompt, model_type=model_type)
         if eos_pos >= 0:
             return [eos_pos]
     

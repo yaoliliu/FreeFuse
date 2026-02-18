@@ -22,6 +22,7 @@ from ..freefuse_core.attention_bias import (
 from ..freefuse_core.attention_bias_patch import (
     apply_attention_bias_patches,
 )
+from ..freefuse_core.token_utils import detect_model_type
 
 
 class FreeFuseAttentionBias:
@@ -67,7 +68,7 @@ class FreeFuseAttentionBias:
                 "bidirectional": ("BOOLEAN", {
                     "default": True,
                     "tooltip": "Apply bias for both image→text and text→image directions. "
-                              "Only applies to Flux (SDXL cross-attention is inherently unidirectional)."
+                              "Only applies to Flux/Flux2 (SDXL cross-attention is inherently unidirectional)."
                 }),
                 "use_positive_bias": ("BOOLEAN", {
                     "default": True,
@@ -76,10 +77,10 @@ class FreeFuseAttentionBias:
                 }),
                 "bias_blocks": (["all", "double_stream_only", "single_stream_only", "last_half_double", "last_half", "none"], {
                     "default": "double_stream_only",
-                    "tooltip": "Which transformer blocks to apply attention bias:\n"
+                              "tooltip": "Which transformer blocks to apply attention bias:\n"
                               "- all: Apply to all blocks\n"
-                              "- double_stream_only: Only double-stream blocks (Flux)\n"
-                              "- single_stream_only: Only single-stream blocks (Flux)\n"
+                              "- double_stream_only: Only double-stream blocks (Flux/Flux2)\n"
+                              "- single_stream_only: Only single-stream blocks (Flux/Flux2)\n"
                               "- last_half_double: Last half of double blocks\n"
                               "- last_half: Last half of layers (Z-Image)\n"
                               "- none: Disable attention bias"
@@ -106,7 +107,7 @@ the attention bias will:
 Parameters:
 - bias_scale: Higher = stronger separation (5-10 is typical)
 - positive_bias_scale: Usually 1-2, keeps attention focused
-- bidirectional: For Flux, also constrains text→image attention
+- bidirectional: For Flux/Flux2, also constrains text→image attention
 - bias_blocks: Control which layers get the bias"""
     
     def apply_bias(
@@ -146,8 +147,11 @@ Parameters:
         # Clone model
         model_clone = model.clone()
         
-        # Detect model type
-        model_type = self._detect_model_type(model_clone)
+        # Detect model type (prefer workflow/model-side hint).
+        model_type = self._detect_model_type(
+            model_clone,
+            model_type_hint=freefuse_data.get("model_type"),
+        )
         print(f"[FreeFuse] Attention bias for {model_type} model")
         
         # Create config
@@ -163,7 +167,7 @@ Parameters:
         latent_h, latent_w = latent_size
         attention_bias = None
         
-        if model_type == "flux":
+        if model_type in ("flux", "flux2"):
             # For Flux, masks from generate_masks are ALREADY in packed space (H/16, W/16)
             # So img_seq_len is simply latent_h * latent_w (no additional packing needed)
             img_seq_len = latent_h * latent_w
@@ -201,6 +205,27 @@ Parameters:
                 config=config,
                 txt_seq_len=txt_seq_len,  # Estimate - actual determined at runtime
                 model_type="flux",
+                lora_masks=lora_masks_flat,
+                token_pos_maps=token_pos_maps,
+            )
+        elif model_type == "z_image":
+            cap_seq_len = self._estimate_txt_seq_len(token_pos_maps, default=256)
+
+            lora_masks_flat = {}
+            for name, mask in mask_dict.items():
+                if name.startswith("_"):
+                    continue
+                if mask.dim() == 3:
+                    mask = mask[0]
+                mask_flat = mask.reshape(-1)
+                lora_masks_flat[name] = mask_flat.unsqueeze(0)
+
+            apply_attention_bias_patches(
+                model_patcher=model_clone,
+                attention_bias=None,
+                config=config,
+                txt_seq_len=cap_seq_len,
+                model_type="z_image",
                 lora_masks=lora_masks_flat,
                 token_pos_maps=token_pos_maps,
             )
@@ -246,20 +271,14 @@ Parameters:
         
         return None
     
-    def _detect_model_type(self, model_patcher) -> str:
-        """Detect model type."""
-        model = model_patcher.model
-        if "flux" in model.__class__.__name__.lower():
-            return "flux"
-        if hasattr(model, 'diffusion_model'):
-            dm = model.diffusion_model
-            if hasattr(dm, 'double_blocks'):
-                return "flux"
-        return "sdxl"
+    def _detect_model_type(self, model_patcher, model_type_hint: Optional[str] = None) -> str:
+        """Detect model type with model-first strategy and optional hint."""
+        model_type = detect_model_type(model=model_patcher, model_type_hint=model_type_hint)
+        return "sdxl" if model_type == "unknown" else model_type
     
-    def _estimate_txt_seq_len(self, token_pos_maps) -> int:
+    def _estimate_txt_seq_len(self, token_pos_maps, default: int = 512) -> int:
         """Estimate text sequence length from token positions."""
-        txt_seq_len = 512
+        txt_seq_len = default
         for positions_list in token_pos_maps.values():
             if positions_list and positions_list[0]:
                 max_pos = max(positions_list[0])

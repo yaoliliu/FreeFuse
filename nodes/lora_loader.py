@@ -22,7 +22,11 @@ import comfy.lora
 import comfy.lora_convert
 
 # Use our fixed bypass loader instead of ComfyUI's buggy version
-from ..freefuse_core.bypass_lora_loader import load_bypass_lora_for_models_fixed
+from ..freefuse_core.bypass_lora_loader import (
+    load_bypass_lora_for_models_fixed,
+    _expand_flux_lora_aliases,
+    _key_group,
+)
 from ..freefuse_core.token_utils import detect_model_type
 
 
@@ -100,6 +104,21 @@ Example workflow:
         if lora is None:
             lora = comfy.utils.load_torch_file(lora_path, safe_load=True)
             self.loaded_lora = (lora_path, lora)
+
+        raw_single = sum(
+            1
+            for k in lora.keys()
+            if "single_blocks." in k or "single_transformer_blocks." in k
+        )
+        raw_double = sum(
+            1
+            for k in lora.keys()
+            if "double_blocks." in k or "transformer_blocks." in k
+        )
+        logging.info(
+            f"[FreeFuse] LoRA '{adapter_name}' raw key groups: "
+            f"single={raw_single}, double={raw_double}, total={len(lora)}"
+        )
         
         # Use FreeFuse's fixed bypass mode - correctly handles Flux fused QKV weights
         # Original ComfyUI's load_bypass_lora_for_models() doesn't support tuple keys
@@ -129,9 +148,17 @@ Example workflow:
         key_map = {}
         if model is not None:
             key_map = comfy.lora.model_lora_keys_unet(model.model, key_map)
+            _expand_flux_lora_aliases(key_map)
         
         lora_converted = comfy.lora_convert.convert_lora(lora)
         loaded = comfy.lora.load_lora(lora_converted, key_map)
+        loaded_single = sum(1 for k in loaded.keys() if _key_group(k) == "single")
+        loaded_double = sum(1 for k in loaded.keys() if _key_group(k) == "double")
+        loaded_other = len(loaded) - loaded_single - loaded_double
+        logging.info(
+            f"[FreeFuse] LoRA '{adapter_name}' matched key groups: "
+            f"single={loaded_single}, double={loaded_double}, other={loaded_other}, total={len(loaded)}"
+        )
         
         # Store the adapter keys for this adapter
         adapter_key_list = list(loaded.keys())
