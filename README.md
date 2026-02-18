@@ -19,6 +19,7 @@
 - [x] Supports Z-Image-turbo in ComfyUI
 - [x] Supports FLUX.2-klein-4B/9B  in diffusers
 - [x] Supports FLUX.2-klein-4B/9B in ComfyUI
+- [ ] Support ControlNet+FreeFuse in ComfyUI
 - [ ] Exploring FreeFuse in text2video model
 
 ## 📖 Abstract
