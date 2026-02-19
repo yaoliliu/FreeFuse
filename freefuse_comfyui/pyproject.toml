@@ -1,7 +1,7 @@
 [project]
 name = "freefuse"
 description = "FreeFuse: Easily multi LoRA multi subject Generation! 🤗"
-version = "1.0.6"
+version = "1.0.8"
 license = {file = "LICENSE"} 
 # classifiers = [
 #     # For OS-independent nodes (works on all operating systems)
@@ -25,7 +25,7 @@ dependencies = ["# ComfyUI-FreeFuse requirements", "# Core dependencies should b
 [project.urls]
 Repository = "https://github.com/yaoliliu/FreeFuse"
 #  Used by Comfy Registry https://registry.comfy.org
-Documentation = "https://github.com/yaoliliu/FreeFuse/"
+Documentation = "https://github.com/yaoliliu/FreeFuse/blob/master/README.md"
 "Bug Tracker" = "https://github.com/yaoliliu/FreeFuse/issues"
 
 [tool.comfy]
