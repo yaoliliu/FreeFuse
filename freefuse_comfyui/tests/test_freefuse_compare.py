@@ -538,7 +538,7 @@ def _default_prompt_config(model_type: str) -> Tuple[str, str, Dict[str, str], s
                 "wearing a white shirt, burgundy and gold striped tie, and dark robes"
             ),
             "shalnark_klein": (
-                "shalnark, an anime boy with blonde bob haircut and turquoise eyes, "
+                "shalnark, an anime boy with blonde short haircut and turquoise eyes, "
                 "wearing purple and teal futuristic uniform, determined expression, "
                 "digital anime art style"
             ),
