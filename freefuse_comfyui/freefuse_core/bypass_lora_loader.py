@@ -62,13 +62,23 @@ def _is_float8_dtype(dtype: Optional[torch.dtype]) -> bool:
 
 def _sanitize_adapter_dtype(dtype: Optional[torch.dtype]) -> Optional[torch.dtype]:
     """
-    Avoid casting LoRA adapter tensors to float8.
+    Keep LoRA adapter tensors in floating precision.
 
-    Keeping LoRA at bf16/fp16 preserves adapter signal when base UNET weights are fp8.
+    - Avoid float8 casts: adapter signal can vanish under aggressive quantization.
+    - Avoid integer/bool casts: GGUF quantized layers often expose uint8 weights.
+      Casting LoRA tensors to non-floating dtypes destroys the LoRA delta.
     """
     # Debug/ablation switch: opt back into original behavior when needed.
     if os.environ.get("FREEFUSE_ALLOW_FP8_ADAPTER_CAST", "0") == "1":
         return dtype
+
+    if dtype is None:
+        return None
+
+    # Quantized backends (e.g. GGUF) can expose integer weight dtypes.
+    # LoRA adapters must stay floating-point.
+    if not getattr(dtype, "is_floating_point", False):
+        return None
 
     if _is_float8_dtype(dtype):
         return None
@@ -870,10 +880,16 @@ class MultiAdapterBypassForwardHook:
         dtype = None
         if hasattr(self.module, "weight") and self.module.weight is not None:
             device = self.module.weight.device
-            dtype = _sanitize_adapter_dtype(self.module.weight.dtype)
-            if _is_float8_dtype(self.module.weight.dtype):
+            raw_dtype = self.module.weight.dtype
+            dtype = _sanitize_adapter_dtype(raw_dtype)
+            if _is_float8_dtype(raw_dtype):
                 logging.info(
                     "[OffsetBypass] Detected fp8 module weight; keeping LoRA adapter dtype as source precision."
+                )
+            elif not getattr(raw_dtype, "is_floating_point", False):
+                logging.info(
+                    "[OffsetBypass] Detected non-floating module weight dtype "
+                    f"({raw_dtype}); keeping LoRA adapter dtype as source precision."
                 )
         
         if device is not None:

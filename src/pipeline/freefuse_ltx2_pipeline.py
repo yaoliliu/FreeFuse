@@ -72,6 +72,34 @@ class FreeFuseLTX2Pipeline(LTX2Pipeline):
             self.transformer.__class__ = FreeFuseLTX2VideoTransformer3DModel
         self.transformer.setup_freefuse_attention_processors()
 
+    def restore_ltx2_attention_processors(self) -> None:
+        """
+        Restore stock LTX2 attention processors.
+
+        Note: do not revert class-swap here. With accelerate/offload hooks,
+        `forward` may be wrapped and cached; switching class back can desync
+        the wrapped forward method and trigger attribute errors at runtime.
+        """
+        if isinstance(self.transformer, FreeFuseLTX2VideoTransformer3DModel):
+            self.transformer.clear_freefuse_state()
+
+        for block in self.transformer.transformer_blocks:
+            for attn_name in (
+                "attn1",
+                "audio_attn1",
+                "attn2",
+                "audio_attn2",
+                "audio_to_video_attn",
+                "video_to_audio_attn",
+            ):
+                attn_module = getattr(block, attn_name, None)
+                if attn_module is None:
+                    continue
+                default_processor_cls = getattr(attn_module, "_default_processor_cls", None)
+                if default_processor_cls is None:
+                    continue
+                attn_module.set_processor(default_processor_cls())
+
     def convert_lora_layers(self, include_connectors: bool = False) -> None:
         """
         Upgrade PEFT LoRA linear layers to `FreeFuseLinear`.
@@ -1095,20 +1123,8 @@ class FreeFuseLTX2Pipeline(LTX2Pipeline):
         freefuse_debug_save_path: Optional[str] = None,
         freefuse_debug_collect_per_step: bool = True,
     ):
-        num_frames, height, width = self._resolve_packed_video_geometry(
-            latents=latents,
-            num_frames=num_frames,
-            height=height,
-            width=width,
-        )
-
-        self.setup_freefuse_attention_processors()
-        debug_enabled = bool(freefuse_debug_save_path)
-        if debug_enabled:
-            os.makedirs(freefuse_debug_save_path, exist_ok=True)
-        self._freefuse_last_phase1_debug_steps = None
-
         if not freefuse_enabled:
+            self.restore_ltx2_attention_processors()
             return super().__call__(
                 prompt=prompt,
                 negative_prompt=negative_prompt,
@@ -1139,6 +1155,19 @@ class FreeFuseLTX2Pipeline(LTX2Pipeline):
                 callback_on_step_end_tensor_inputs=callback_on_step_end_tensor_inputs,
                 max_sequence_length=max_sequence_length,
             )
+
+        num_frames, height, width = self._resolve_packed_video_geometry(
+            latents=latents,
+            num_frames=num_frames,
+            height=height,
+            width=width,
+        )
+
+        self.setup_freefuse_attention_processors()
+        debug_enabled = bool(freefuse_debug_save_path)
+        if debug_enabled:
+            os.makedirs(freefuse_debug_save_path, exist_ok=True)
+        self._freefuse_last_phase1_debug_steps = None
 
         if freefuse_token_pos_maps is None:
             if freefuse_concept_map is not None and prompt is not None:

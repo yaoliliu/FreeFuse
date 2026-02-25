@@ -177,16 +177,8 @@ def main():
         guidance_scale=1.0,
         output_type="np",
         return_dict=True,
-        # Keep FreeFuse enabled in stage 2, distilled adapter remains unmasked.
-        freefuse_enabled=bool(freefuse_concept_map),
-        freefuse_concept_map=freefuse_concept_map if freefuse_concept_map else None,
-        freefuse_top_k_ratio=0.1,
-        freefuse_phase1_step=2,
-        freefuse_attention_bias_scale=4.0,
-        freefuse_attention_bias_positive_scale=2.0,
-        freefuse_use_av_cross_attention_bias=False,
-        freefuse_debug_save_path=stage2_debug_path,
-        freefuse_debug_collect_per_step=True,
+        # Stage 2 follows official LTX2 transition and does not use FreeFuse.
+        freefuse_enabled=False,
     )
 
     video = output.frames[0]
