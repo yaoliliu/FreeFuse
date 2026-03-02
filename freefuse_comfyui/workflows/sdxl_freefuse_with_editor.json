@@ -1,8 +1,8 @@
 {
   "id": "795e58af-67d8-4595-8ea9-4521b524f563",
   "revision": 0,
-  "last_node_id": 101,
-  "last_link_id": 50,
+  "last_node_id": 103,
+  "last_link_id": 56,
   "nodes": [
     {
       "id": 100,
@@ -352,7 +352,9 @@
           "type": "FREEFUSE_DATA",
           "slot_index": 0,
           "links": [
-            14
+            14,
+            52,
+            54
           ]
         }
       ],
@@ -546,8 +548,8 @@
           "type": "FREEFUSE_MASKS",
           "slot_index": 1,
           "links": [
-            19,
-            20
+            20,
+            51
           ]
         },
         {
@@ -747,7 +749,7 @@
         {
           "name": "masks",
           "type": "FREEFUSE_MASKS",
-          "link": 19
+          "link": 56
         },
         {
           "name": "freefuse_data",
@@ -940,6 +942,133 @@
       ],
       "color": "#224",
       "bgcolor": "#335"
+    },
+    {
+      "id": 102,
+      "type": "FreeFuseMaskTap",
+      "pos": [
+        1750.0,
+        170
+      ],
+      "size": [
+        252.853125,
+        358
+      ],
+      "flags": {},
+      "order": 16,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "mask_bank",
+          "type": "FREEFUSE_MASKS",
+          "link": 51
+        },
+        {
+          "name": "freefuse_data",
+          "shape": 7,
+          "type": "FREEFUSE_DATA",
+          "link": 52
+        }
+      ],
+      "outputs": [
+        {
+          "name": "mask_bank",
+          "type": "FREEFUSE_MASKS",
+          "slot_index": 0,
+          "links": [
+            53
+          ]
+        },
+        {
+          "name": "slot_names",
+          "type": "STRING",
+          "slot_index": 1,
+          "links": [
+            55
+          ]
+        },
+        {
+          "name": "slot_mask_images",
+          "type": "IMAGE",
+          "slot_index": 2,
+          "links": null
+        }
+      ],
+      "title": "Mask Tap (Optional Edit Branch)",
+      "properties": {
+        "Node name for S&R": "FreeFuseMaskTap"
+      },
+      "widgets_values": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "0",
+        "Open Mask Editor",
+        "Clear Current Slot"
+      ]
+    },
+    {
+      "id": 103,
+      "type": "FreeFuseMaskReassemble",
+      "pos": [
+        2310.0,
+        270
+      ],
+      "size": [
+        250.03125,
+        102
+      ],
+      "flags": {},
+      "order": 17,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "original_mask_bank",
+          "type": "FREEFUSE_MASKS",
+          "link": 53
+        },
+        {
+          "name": "freefuse_data",
+          "shape": 7,
+          "type": "FREEFUSE_DATA",
+          "link": 54
+        },
+        {
+          "name": "slot_names",
+          "shape": 7,
+          "type": "STRING",
+          "widget": {
+            "name": "slot_names"
+          },
+          "link": 55
+        }
+      ],
+      "outputs": [
+        {
+          "name": "new_mask_bank",
+          "type": "FREEFUSE_MASKS",
+          "slot_index": 0,
+          "links": [
+            56
+          ]
+        }
+      ],
+      "title": "Mask Reassemble",
+      "properties": {
+        "Node name for S&R": "FreeFuseMaskReassemble"
+      },
+      "widgets_values": [
+        true,
+        true
+      ]
     }
   ],
   "links": [
@@ -1064,14 +1193,6 @@
       "MODEL"
     ],
     [
-      19,
-      12,
-      1,
-      14,
-      1,
-      "FREEFUSE_MASKS"
-    ],
-    [
       20,
       12,
       1,
@@ -1190,6 +1311,54 @@
       16,
       3,
       "LATENT"
+    ],
+    [
+      51,
+      12,
+      1,
+      102,
+      0,
+      "FREEFUSE_MASKS"
+    ],
+    [
+      52,
+      8,
+      0,
+      102,
+      1,
+      "FREEFUSE_DATA"
+    ],
+    [
+      53,
+      102,
+      0,
+      103,
+      0,
+      "FREEFUSE_MASKS"
+    ],
+    [
+      54,
+      8,
+      0,
+      103,
+      1,
+      "FREEFUSE_DATA"
+    ],
+    [
+      55,
+      102,
+      1,
+      103,
+      2,
+      "STRING"
+    ],
+    [
+      56,
+      103,
+      0,
+      14,
+      1,
+      "FREEFUSE_MASKS"
     ]
   ],
   "groups": [

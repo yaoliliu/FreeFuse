@@ -50,16 +50,17 @@ class FreeFuseLTX2AttnProcessor:
         self._eos_token_index: Optional[int] = None
         self._background_token_positions: Optional[List[int]] = None
         self._attention_bias: Optional[torch.Tensor] = None
+        self._video_frame_token_count: Optional[int] = None
 
     @staticmethod
-    def _adaptive_softmax(scores: torch.Tensor, dim: int) -> torch.Tensor:
+    def _adaptive_sigmoid(scores: torch.Tensor, dim: int) -> torch.Tensor:
         """
-        Normalize scores with per-sample z-score before softmax.
-        This avoids over-flattening from fixed large temperatures across different models.
+        Normalize scores with per-sample z-score and sigmoid.
+        Unlike token-wise softmax, this keeps local contrast without forcing sum=1 over all tokens.
         """
         centered = scores - scores.mean(dim=dim, keepdim=True)
         scale = centered.std(dim=dim, keepdim=True, unbiased=False).clamp_min(1e-6)
-        return F.softmax(centered / scale, dim=dim)
+        return torch.sigmoid(centered / scale)
 
     def __call__(
         self,
@@ -227,6 +228,49 @@ class FreeFuseLTX2AttnProcessor:
         bg_result: List[torch.Tensor] = []
         bg_key_name: Optional[str] = None
 
+        frame_token_count: Optional[int] = None
+        if self._freefuse_role == "video_text":
+            if self._video_frame_token_count is not None and int(self._video_frame_token_count) > 0:
+                frame_token_count = int(self._video_frame_token_count)
+
+        def build_sim_map(
+            scores_1d: torch.Tensor,              # (1, q_len)
+            hidden_1d: torch.Tensor,              # (1, q_len, C)
+            chunk_len: Optional[int],             # frame token count for per-frame routing
+        ) -> torch.Tensor:
+            out = torch.zeros((1, q_len, 1), device=hidden_1d.device, dtype=torch.float32)
+
+            if chunk_len is None or chunk_len <= 0 or chunk_len >= q_len:
+                spans = [(0, q_len)]
+            else:
+                spans = []
+                start = 0
+                while start < q_len:
+                    end = min(start + int(chunk_len), q_len)
+                    spans.append((start, end))
+                    start = end
+
+            for start, end in spans:
+                cur_len = end - start
+                if cur_len <= 0:
+                    continue
+                cur_k = max(1, int(cur_len * float(top_k_ratio)))
+                cur_k = min(cur_k, cur_len)
+
+                local_scores = scores_1d[:, start:end]  # (1, cur_len)
+                _, topk_idx_local = torch.topk(local_scores, cur_k, dim=-1)
+                topk_idx_global = topk_idx_local + int(start)
+
+                gather_idx = topk_idx_global.unsqueeze(-1).expand(-1, -1, hidden_1d.shape[-1])
+                core = torch.gather(hidden_1d, dim=1, index=gather_idx)  # (1, cur_k, C)
+                cur_hidden = hidden_1d[:, start:end, :]                  # (1, cur_len, C)
+
+                sim = core @ cur_hidden.transpose(-1, -2)                # (1, cur_k, cur_len)
+                sim_avg = sim.mean(dim=1, keepdim=True).transpose(1, 2)  # (1, cur_len, 1)
+                out[:, start:end, :] = self._adaptive_sigmoid(sim_avg.float(), dim=1)
+
+            return out.to(dtype=hidden_1d.dtype)
+
         for b in range(B):
             per_concept_scores: Dict[str, torch.Tensor] = {}
 
@@ -250,7 +294,6 @@ class FreeFuseLTX2AttnProcessor:
                 continue
 
             num_concepts = len(per_concept_scores)
-            k = max(1, int(q_len * float(top_k_ratio)))
 
             for lora_name, base_scores in per_concept_scores.items():
                 contrastive = base_scores * num_concepts
@@ -258,24 +301,23 @@ class FreeFuseLTX2AttnProcessor:
                     if other_name != lora_name:
                         contrastive = contrastive - other_scores
 
-                _, topk_idx = torch.topk(contrastive, k, dim=-1)
-                gather_idx = topk_idx.unsqueeze(-1).expand(-1, -1, query_hidden_states.shape[-1])
-                core = torch.gather(query_hidden_states[b : b + 1], dim=1, index=gather_idx)
-
-                sim = core @ query_hidden_states[b : b + 1].transpose(-1, -2)  # (1, k, q_len)
-                sim_avg = sim.mean(dim=1, keepdim=True).transpose(1, 2)         # (1, q_len, 1)
-                sim_map = self._adaptive_softmax(sim_avg.float(), dim=1).to(dtype=query_hidden_states.dtype)
+                sim_map = build_sim_map(
+                    scores_1d=contrastive,
+                    hidden_1d=query_hidden_states[b : b + 1],
+                    chunk_len=frame_token_count,
+                )
                 if sim_map.ndim != 3 or sim_map.shape[1] != q_len or sim_map.shape[-1] != 1:
                     raise ValueError(
                         f"Unexpected concept sim-map shape for `{lora_name}`: {tuple(sim_map.shape)}."
                     )
                 if not torch.isfinite(sim_map).all():
                     raise ValueError(f"Non-finite concept sim-map detected for `{lora_name}`.")
-                sim_mass = sim_map.float().sum(dim=1)  # (1, 1)
-                if not torch.allclose(sim_mass, torch.ones_like(sim_mass), atol=1e-2, rtol=1e-2):
+                sim_min = float(sim_map.min().item())
+                sim_max = float(sim_map.max().item())
+                if sim_min < -1e-4 or sim_max > 1.0001:
                     raise ValueError(
-                        f"Concept sim-map for `{lora_name}` is not normalized over token dimension. "
-                        f"sum range=({float(sim_mass.min().item()):.6f}, {float(sim_mass.max().item()):.6f})"
+                        f"Concept sim-map for `{lora_name}` is out of [0, 1] range: "
+                        f"min={sim_min:.6f}, max={sim_max:.6f}"
                     )
 
                 result_by_name.setdefault(lora_name, []).append(sim_map)
@@ -296,21 +338,21 @@ class FreeFuseLTX2AttnProcessor:
                 bg_weights = F.softmax(bg_weights, dim=2)
                 bg_scores = bg_weights.mean(dim=1).mean(dim=-1)  # (1, q_len)
 
-                _, topk_idx = torch.topk(bg_scores, k, dim=-1)
-                gather_idx = topk_idx.unsqueeze(-1).expand(-1, -1, query_hidden_states.shape[-1])
-                core = torch.gather(query_hidden_states[b : b + 1], dim=1, index=gather_idx)
-                sim = core @ query_hidden_states[b : b + 1].transpose(-1, -2)
-                sim_avg = sim.mean(dim=1, keepdim=True).transpose(1, 2)
-                bg_map = self._adaptive_softmax(sim_avg.float(), dim=1).to(dtype=query_hidden_states.dtype)
+                bg_map = build_sim_map(
+                    scores_1d=bg_scores,
+                    hidden_1d=query_hidden_states[b : b + 1],
+                    chunk_len=frame_token_count,
+                )
                 if bg_map.ndim != 3 or bg_map.shape[1] != q_len or bg_map.shape[-1] != 1:
                     raise ValueError(f"Unexpected background sim-map shape: {tuple(bg_map.shape)}.")
                 if not torch.isfinite(bg_map).all():
                     raise ValueError("Non-finite background sim-map detected.")
-                bg_mass = bg_map.float().sum(dim=1)
-                if not torch.allclose(bg_mass, torch.ones_like(bg_mass), atol=1e-2, rtol=1e-2):
+                bg_min = float(bg_map.min().item())
+                bg_max = float(bg_map.max().item())
+                if bg_min < -1e-4 or bg_max > 1.0001:
                     raise ValueError(
-                        "Background sim-map is not normalized over token dimension. "
-                        f"sum range=({float(bg_mass.min().item()):.6f}, {float(bg_mass.max().item()):.6f})"
+                        "Background sim-map is out of [0, 1] range. "
+                        f"min={bg_min:.6f}, max={bg_max:.6f}"
                     )
                 bg_result.append(bg_map)
 

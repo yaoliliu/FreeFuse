@@ -36,6 +36,10 @@ from .attention_bias import (
     NODE_CLASS_MAPPINGS as ATTN_BIAS_NODE_MAPPINGS,
     NODE_DISPLAY_NAME_MAPPINGS as ATTN_BIAS_DISPLAY_MAPPINGS,
 )
+from .mask_tap import (
+    FreeFuseMaskTap,
+    FreeFuseMaskReassemble,
+)
 
 # Combine all node mappings
 NODE_CLASS_MAPPINGS = {
@@ -48,6 +52,8 @@ NODE_CLASS_MAPPINGS = {
     "FreeFuseMaskPreview": FreeFuseMaskPreview,
     "FreeFuseMaskApplicator": FreeFuseMaskApplicator,
     "FreeFuseMaskDebug": FreeFuseMaskDebug,
+    "FreeFuseMaskTap": FreeFuseMaskTap,
+    "FreeFuseMaskReassemble": FreeFuseMaskReassemble,
     # Attention bias nodes
     "FreeFuseAttentionBias": FreeFuseAttentionBias,
     "FreeFuseAttentionBiasVisualize": FreeFuseAttentionBiasVisualize,
@@ -63,6 +69,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FreeFuseMaskPreview": "FreeFuse Mask Preview",
     "FreeFuseMaskApplicator": "FreeFuse Mask Applicator",
     "FreeFuseMaskDebug": "FreeFuse Mask Debug",
+    "FreeFuseMaskTap": "FreeFuse Mask Tap",
+    "FreeFuseMaskReassemble": "FreeFuse Mask Reassemble",
     # Attention bias nodes
     "FreeFuseAttentionBias": "FreeFuse Attention Bias",
     "FreeFuseAttentionBiasVisualize": "FreeFuse Attention Bias Visualize",
@@ -81,6 +89,8 @@ __all__ = [
     # Mask application
     "FreeFuseMaskApplicator",
     "FreeFuseMaskDebug",
+    "FreeFuseMaskTap",
+    "FreeFuseMaskReassemble",
     # Attention bias
     "FreeFuseAttentionBias",
     "FreeFuseAttentionBiasVisualize",

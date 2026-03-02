@@ -120,7 +120,7 @@ def main():
         freefuse_enabled=bool(freefuse_concept_map),
         freefuse_concept_map=freefuse_concept_map if freefuse_concept_map else None,
         freefuse_top_k_ratio=0.1,
-        freefuse_phase1_step=10,
+        freefuse_phase1_step=20,
         freefuse_attention_bias_scale=4.0,
         freefuse_attention_bias_positive_scale=2.0,
         freefuse_use_av_cross_attention_bias=False,

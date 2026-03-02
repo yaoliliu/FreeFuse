@@ -711,6 +711,103 @@ class FreeFuseLTX2Pipeline(LTX2Pipeline):
         return stats
 
     @staticmethod
+    def _slice_concept_maps_batch(
+        maps: Optional[Dict[str, Dict[str, torch.Tensor]]],
+        start: int,
+        length: int,
+    ) -> Optional[Dict[str, Dict[str, torch.Tensor]]]:
+        """
+        Slice concept sim-maps on batch dimension.
+
+        Input shape contract:
+        `maps = {"video": {name: (B, N, 1)}, "audio": {name: (B, M, 1)}}`.
+        """
+        if maps is None:
+            return None
+
+        if length <= 0:
+            return None
+
+        out: Dict[str, Dict[str, torch.Tensor]] = {}
+        for modality, concept_maps in maps.items():
+            if not concept_maps:
+                continue
+            sliced: Dict[str, torch.Tensor] = {}
+            for concept_name, cur in concept_maps.items():
+                if cur is None or cur.dim() < 1:
+                    continue
+                bsz = int(cur.shape[0])
+                if bsz <= int(length):
+                    cur_start = 0
+                    cur_end = bsz
+                else:
+                    cur_start = max(0, min(int(start), bsz - int(length)))
+                    cur_end = cur_start + int(length)
+                if cur_end <= cur_start:
+                    continue
+                sliced[concept_name] = cur[cur_start:cur_end]
+            if sliced:
+                out[modality] = sliced
+
+        return out if out else None
+
+    @staticmethod
+    def _prepend_uncond_masks_for_cfg(
+        masks: Optional[Dict[str, torch.Tensor]],
+        cond_batch_size: int,
+    ) -> Optional[Dict[str, torch.Tensor]]:
+        """
+        For CFG batch layout `[uncond, cond]`, prepend zero masks for uncond half.
+        """
+        if masks is None:
+            return None
+        if cond_batch_size <= 0:
+            return masks
+
+        out: Dict[str, torch.Tensor] = {}
+        for lora_name, mask in masks.items():
+            cur = mask
+            if cur.dim() == 2:
+                cur = cur.unsqueeze(-1)
+            if cur.dim() != 3:
+                raise ValueError(f"Unsupported mask shape for `{lora_name}`: {tuple(cur.shape)}")
+
+            if cur.shape[0] > cond_batch_size:
+                cur = cur[-cond_batch_size:]
+            elif cur.shape[0] < cond_batch_size:
+                repeats = (cond_batch_size + cur.shape[0] - 1) // cur.shape[0]
+                cur = cur.repeat(repeats, 1, 1)[:cond_batch_size]
+
+            zeros = torch.zeros((cond_batch_size, cur.shape[1], cur.shape[2]), device=cur.device, dtype=cur.dtype)
+            out[lora_name] = torch.cat([zeros, cur], dim=0)
+
+        return out
+
+    @staticmethod
+    def _expand_token_pos_maps_for_cfg(
+        token_pos_maps: Optional[Dict[str, List[List[int]]]],
+        cond_batch_size: int,
+    ) -> Optional[Dict[str, List[List[int]]]]:
+        """
+        Build per-batch token position maps for CFG layout `[uncond, cond]`.
+        Uncond half gets empty positions; cond half keeps concept positions.
+        """
+        if token_pos_maps is None:
+            return None
+        if cond_batch_size <= 0:
+            return token_pos_maps
+
+        out: Dict[str, List[List[int]]] = {}
+        for lora_name, positions_list in token_pos_maps.items():
+            src_list = positions_list if positions_list else [[]]
+            cond_positions: List[List[int]] = []
+            for b in range(cond_batch_size):
+                src = src_list[min(b, len(src_list) - 1)]
+                cond_positions.append([int(p) for p in src])
+            out[lora_name] = ([[] for _ in range(cond_batch_size)] + cond_positions)
+        return out
+
+    @staticmethod
     def _normalize_token_tensor_for_debug(
         x: torch.Tensor, seq_len: int, allow_matrix_flatten: bool = False
     ) -> torch.Tensor:
@@ -924,10 +1021,18 @@ class FreeFuseLTX2Pipeline(LTX2Pipeline):
             )
             frames_dir = os.path.join(step_dir, f"{out_prefix}_all_frames")
             os.makedirs(frames_dir, exist_ok=True)
-            vmin = 0.0 if is_mask else float(values_3d.min().item())
-            vmax = 1.0 if is_mask else float(values_3d.max().item())
-            if not is_mask and abs(vmax - vmin) < 1e-8:
-                vmax = vmin + 1e-8
+            if is_mask:
+                vmin = 0.0
+                vmax = 1.0
+            else:
+                flat = values_3d.reshape(-1)
+                vmin = float(torch.quantile(flat, 0.01).item())
+                vmax = float(torch.quantile(flat, 0.99).item())
+                if abs(vmax - vmin) < 1e-8:
+                    vmin = float(flat.min().item())
+                    vmax = float(flat.max().item())
+                if abs(vmax - vmin) < 1e-8:
+                    vmax = vmin + 1e-8
 
             for frame_idx in range(t_len):
                 fig, ax = plt.subplots(figsize=(4, 4))
@@ -1110,7 +1215,7 @@ class FreeFuseLTX2Pipeline(LTX2Pipeline):
         freefuse_eos_token_index: Optional[int] = None,
         freefuse_top_k_ratio: float = 0.1,
         freefuse_phase1_step: int = 3,
-        freefuse_phase1_guidance_scale: float = 1.0,
+        freefuse_phase1_guidance_scale: float = 4.0,
         freefuse_video_collect_block: Optional[str] = None,
         freefuse_audio_collect_block: Optional[str] = None,
         freefuse_use_attention_bias: bool = True,
@@ -1217,6 +1322,8 @@ class FreeFuseLTX2Pipeline(LTX2Pipeline):
 
         device = self._execution_device
         batch = batch_size * num_videos_per_prompt
+        phase1_do_cfg = float(freefuse_phase1_guidance_scale) > 1.0
+        phase2_do_cfg = float(guidance_scale) > 1.0
 
         num_channels_latents = self.transformer.config.in_channels
         init_video_latents = self.prepare_latents(
@@ -1288,6 +1395,9 @@ class FreeFuseLTX2Pipeline(LTX2Pipeline):
             with open(os.path.join(freefuse_debug_save_path, "phase1_metadata.txt"), "w", encoding="utf-8") as f:
                 f.write(f"phase1_step={int(freefuse_phase1_step)}\n")
                 f.write(f"phase1_effective_step={min(max(1, int(freefuse_phase1_step)), int(num_inference_steps))}\n")
+                f.write(f"phase1_guidance_scale={float(freefuse_phase1_guidance_scale)}\n")
+                f.write(f"phase1_do_cfg={phase1_do_cfg}\n")
+                f.write("phase1_map_source=cond_only_when_cfg\n")
                 f.write(f"video_collect_block={freefuse_video_collect_block}\n")
                 f.write(f"audio_collect_block={freefuse_audio_collect_block}\n")
                 f.write(f"enabled_extract_processors={enabled_extract_processors}\n")
@@ -1332,13 +1442,26 @@ class FreeFuseLTX2Pipeline(LTX2Pipeline):
             )
 
             if maps:
+                maps_for_routing = maps
+                if phase1_do_cfg:
+                    # LTX2 CFG batch order is [uncond, cond]; use cond-only sim maps for routing.
+                    maps_for_routing = self._slice_concept_maps_batch(
+                        maps=maps,
+                        start=int(batch),
+                        length=int(batch),
+                    )
+
+                if not maps_for_routing:
+                    pipeline._interrupt = True
+                    return callback_kwargs
+
                 captured_maps.clear()
-                captured_maps.update(maps)
+                captured_maps.update(maps_for_routing)
                 captured_timestep = timestep_value
 
                 if debug_enabled and freefuse_debug_collect_per_step:
-                    cur_video_maps = maps.get("video", None)
-                    cur_audio_maps = maps.get("audio", None)
+                    cur_video_maps = maps_for_routing.get("video", None)
+                    cur_audio_maps = maps_for_routing.get("audio", None)
                     cur_video_masks = self.sim_maps_to_masks_1d(
                         cur_video_maps or {},
                         seq_len=video_seq_len,
@@ -1422,12 +1545,23 @@ class FreeFuseLTX2Pipeline(LTX2Pipeline):
             audio_maps or {}, seq_len=audio_seq_len, exclude_background=True
         )
 
+        # Apply FreeFuse routing only on cond branch during CFG.
+        phase2_token_pos_maps = freefuse_token_pos_maps
+        runtime_video_masks = video_masks
+        runtime_audio_masks = audio_masks
+        if phase2_do_cfg:
+            runtime_video_masks = self._prepend_uncond_masks_for_cfg(video_masks, cond_batch_size=int(batch))
+            runtime_audio_masks = self._prepend_uncond_masks_for_cfg(audio_masks, cond_batch_size=int(batch))
+            phase2_token_pos_maps = self._expand_token_pos_maps_for_cfg(
+                freefuse_token_pos_maps, cond_batch_size=int(batch)
+            )
+
         attention_biases: Dict[str, torch.Tensor] = {}
         if freefuse_use_attention_bias:
-            if video_masks:
+            if runtime_video_masks:
                 video_text_bias = self.build_text_attention_bias(
-                    token_masks=video_masks,
-                    token_pos_maps=freefuse_token_pos_maps,
+                    token_masks=runtime_video_masks,
+                    token_pos_maps=phase2_token_pos_maps,
                     text_len=text_seq_len,
                     bias_scale=freefuse_attention_bias_scale,
                     positive_bias_scale=freefuse_attention_bias_positive_scale,
@@ -1436,10 +1570,10 @@ class FreeFuseLTX2Pipeline(LTX2Pipeline):
                 if video_text_bias is not None:
                     attention_biases["video_text"] = video_text_bias
 
-            if audio_masks:
+            if runtime_audio_masks:
                 audio_text_bias = self.build_text_attention_bias(
-                    token_masks=audio_masks,
-                    token_pos_maps=freefuse_token_pos_maps,
+                    token_masks=runtime_audio_masks,
+                    token_pos_maps=phase2_token_pos_maps,
                     text_len=text_seq_len,
                     bias_scale=freefuse_attention_bias_scale,
                     positive_bias_scale=freefuse_attention_bias_positive_scale,
@@ -1448,10 +1582,10 @@ class FreeFuseLTX2Pipeline(LTX2Pipeline):
                 if audio_text_bias is not None:
                     attention_biases["audio_text"] = audio_text_bias
 
-            if freefuse_use_av_cross_attention_bias and video_masks and audio_masks:
+            if freefuse_use_av_cross_attention_bias and runtime_video_masks and runtime_audio_masks:
                 video_audio_bias, audio_video_bias = self.build_cross_modal_attention_bias(
-                    video_masks=video_masks,
-                    audio_masks=audio_masks,
+                    video_masks=runtime_video_masks,
+                    audio_masks=runtime_audio_masks,
                     bias_scale=freefuse_av_attention_bias_scale,
                     positive_bias_scale=freefuse_attention_bias_positive_scale,
                     use_positive_bias=freefuse_attention_bias_positive,
@@ -1461,9 +1595,9 @@ class FreeFuseLTX2Pipeline(LTX2Pipeline):
                 if audio_video_bias is not None:
                     attention_biases["audio_video"] = audio_video_bias
 
-        self.transformer.set_freefuse_video_masks(video_masks if video_masks else None)
-        self.transformer.set_freefuse_audio_masks(audio_masks if audio_masks else None)
-        self.transformer.set_freefuse_token_pos_maps(freefuse_token_pos_maps)
+        self.transformer.set_freefuse_video_masks(runtime_video_masks if runtime_video_masks else None)
+        self.transformer.set_freefuse_audio_masks(runtime_audio_masks if runtime_audio_masks else None)
+        self.transformer.set_freefuse_token_pos_maps(phase2_token_pos_maps)
         self.transformer.set_freefuse_top_k_ratio(freefuse_top_k_ratio)
         self.transformer.set_freefuse_background_info(
             eos_token_index=freefuse_eos_token_index,
@@ -1495,8 +1629,8 @@ class FreeFuseLTX2Pipeline(LTX2Pipeline):
 
         # Keep debug state for caller access
         self._freefuse_last_concept_sim_maps = captured_maps if captured_maps else None
-        self._freefuse_last_video_masks = video_masks if video_masks else None
-        self._freefuse_last_audio_masks = audio_masks if audio_masks else None
+        self._freefuse_last_video_masks = runtime_video_masks if runtime_video_masks else None
+        self._freefuse_last_audio_masks = runtime_audio_masks if runtime_audio_masks else None
         self._freefuse_last_attention_biases = attention_biases if attention_biases else None
 
         # ------------------------------------------------------------------

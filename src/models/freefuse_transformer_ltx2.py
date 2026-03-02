@@ -94,6 +94,8 @@ class FreeFuseLTX2VideoTransformer3DModel(LTX2VideoTransformer3DModel):
             self._freefuse_eos_token_index: Optional[int] = None
         if not hasattr(self, "_freefuse_background_token_positions"):
             self._freefuse_background_token_positions: Optional[List[int]] = None
+        if not hasattr(self, "_freefuse_video_frame_token_count"):
+            self._freefuse_video_frame_token_count: Optional[int] = None
 
     # ------------------------------------------------------------------
     # Processor setup
@@ -208,6 +210,9 @@ class FreeFuseLTX2VideoTransformer3DModel(LTX2VideoTransformer3DModel):
             processor._top_k_ratio = 0.1
             processor._eos_token_index = None
             processor._background_token_positions = None
+            processor._video_frame_token_count = None
+
+        self._freefuse_video_frame_token_count = None
 
         for _, module in self.named_modules():
             if isinstance(module, FreeFuseLinear):
@@ -228,9 +233,11 @@ class FreeFuseLTX2VideoTransformer3DModel(LTX2VideoTransformer3DModel):
             processor.cal_concept_sim_map = False
 
         if video_block_name is None:
-            video_block_name = f"transformer_blocks.{len(self.transformer_blocks) - 1}.attn2"
+            # video_block_name = f"transformer_blocks.{len(self.transformer_blocks) - 1}.attn2"
+            video_block_name = f"transformer_blocks.{25}.attn2"
         if audio_block_name is None:
-            audio_block_name = f"transformer_blocks.{len(self.transformer_blocks) - 1}.audio_attn2"
+            # audio_block_name = f"transformer_blocks.{len(self.transformer_blocks) - 1}.audio_attn2"
+            audio_block_name = f"transformer_blocks.{25}.audio_attn2"
 
         for module_name, processor in self._iter_named_freefuse_processors():
             if processor._freefuse_role == "video_text" and video_block_name in module_name:
@@ -382,6 +389,11 @@ class FreeFuseLTX2VideoTransformer3DModel(LTX2VideoTransformer3DModel):
             processor._top_k_ratio = self._freefuse_top_k_ratio
             processor._eos_token_index = self._freefuse_eos_token_index
             processor._background_token_positions = self._freefuse_background_token_positions
+            processor._video_frame_token_count = (
+                int(self._freefuse_video_frame_token_count)
+                if self._freefuse_video_frame_token_count is not None
+                else None
+            )
 
             if self._freefuse_attention_bias_blocks is not None:
                 allow_bias = any(block_name in module_name for block_name in self._freefuse_attention_bias_blocks)
@@ -394,6 +406,59 @@ class FreeFuseLTX2VideoTransformer3DModel(LTX2VideoTransformer3DModel):
 
             bias_key = processor._freefuse_role
             processor._attention_bias = self._freefuse_attention_biases.get(bias_key, None)
+
+    @staticmethod
+    def _infer_video_frame_token_count(
+        video_seq_len: int,
+        num_frames: Optional[int],
+        height: Optional[int],
+        width: Optional[int],
+        patch_size_t: int,
+        patch_size: int,
+        video_coords: Optional[torch.Tensor],
+    ) -> Optional[int]:
+        """
+        Infer number of tokens per video frame after packing.
+        """
+        seq_len = int(video_seq_len)
+        if seq_len <= 0:
+            return None
+
+        # Preferred path: infer from explicit coordinates, which reflect real packed ordering.
+        try:
+            if video_coords is not None and video_coords.ndim == 4 and video_coords.shape[2] == seq_len:
+                frame_start = video_coords[0, 0, :, 0]  # (seq_len,)
+                _, counts = torch.unique_consecutive(frame_start, return_counts=True)
+                if counts.numel() > 0:
+                    first = int(counts[0].item())
+                    if first > 0 and int(counts.sum().item()) == seq_len and torch.all(counts == counts[0]):
+                        return first
+        except Exception:
+            pass
+
+        # Fallback path: infer from latent shape args.
+        try:
+            if num_frames is None or height is None or width is None:
+                return None
+            pt = max(1, int(patch_size_t))
+            ps = max(1, int(patch_size))
+            nf = int(num_frames)
+            h = int(height)
+            w = int(width)
+            if nf <= 0 or h <= 0 or w <= 0:
+                return None
+            if nf % pt != 0 or h % ps != 0 or w % ps != 0:
+                return None
+            post_t = nf // pt
+            post_h = h // ps
+            post_w = w // ps
+            per_frame = post_h * post_w
+            if post_t > 0 and per_frame > 0 and post_t * per_frame == seq_len:
+                return int(per_frame)
+        except Exception:
+            return None
+
+        return None
 
     def _apply_runtime_freefuse_to_lora_layers(
         self,
@@ -459,6 +524,17 @@ class FreeFuseLTX2VideoTransformer3DModel(LTX2VideoTransformer3DModel):
         attention_kwargs: Optional[Dict] = None,
         return_dict: bool = True,
     ):
+        self._ensure_freefuse_state()
+        self._freefuse_video_frame_token_count = self._infer_video_frame_token_count(
+            video_seq_len=int(hidden_states.shape[1]),
+            num_frames=num_frames,
+            height=height,
+            width=width,
+            patch_size_t=int(getattr(self.config, "patch_size_t", 1)),
+            patch_size=int(getattr(self.config, "patch_size", 1)),
+            video_coords=video_coords,
+        )
+
         self._apply_runtime_freefuse_to_processors()
         self._apply_runtime_freefuse_to_lora_layers(
             video_batch_size=hidden_states.shape[0],

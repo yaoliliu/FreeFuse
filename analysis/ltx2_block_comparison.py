@@ -6,7 +6,7 @@ FreeFuse LTX2 block comparison script.
 Purpose:
 - sweep `transformer_blocks.{i}.attn2` + `transformer_blocks.{i}.audio_attn2`
 - run FreeFuse once per block pair
-- save per-block keyframe + FreeFuse debug outputs
+- save per-block keyframe/video + FreeFuse debug outputs
 - parse debug summaries into simple metrics
 - generate comparison grids for quick visual inspection
 """
@@ -22,6 +22,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
+from diffusers.pipelines.ltx2.export_utils import encode_video
 from PIL import Image, ImageDraw, ImageFont
 
 # Add project root to import path
@@ -77,7 +78,9 @@ def _extract_keyframe_from_output(output) -> Image.Image:
 
     # np format: (T, H, W, C)
     if isinstance(first_item, np.ndarray):
-        if first_item.ndim == 4:
+        if first_item.ndim == 5:
+            frame = first_item[0, 0]
+        elif first_item.ndim == 4:
             frame = first_item[0]
         elif first_item.ndim == 3:
             frame = first_item
@@ -92,6 +95,59 @@ def _extract_keyframe_from_output(output) -> Image.Image:
         return first_item.convert("RGB")
 
     raise TypeError(f"Unsupported output frame type: {type(first_item)}")
+
+
+def _extract_video_tensor_from_output(output) -> torch.Tensor:
+    """
+    Convert pipeline output to `torch.uint8` video tensor with shape `(T, H, W, C)`.
+    """
+    frames = output.frames if hasattr(output, "frames") else output[0]
+    first_item = frames[0] if isinstance(frames, list) else frames
+
+    if isinstance(first_item, np.ndarray):
+        if first_item.ndim == 5:
+            video = first_item[0]
+        elif first_item.ndim == 4:
+            video = first_item
+        elif first_item.ndim == 3:
+            video = first_item[None, ...]
+        else:
+            raise ValueError(f"Unexpected ndarray video shape: {first_item.shape}")
+        video_uint8 = np.stack([_to_uint8_image(frame) for frame in video], axis=0)
+        return torch.from_numpy(video_uint8)
+
+    if isinstance(first_item, list) and first_item and isinstance(first_item[0], Image.Image):
+        video_uint8 = np.stack(
+            [np.asarray(im.convert("RGB"), dtype=np.uint8) for im in first_item],
+            axis=0,
+        )
+        return torch.from_numpy(video_uint8)
+
+    if isinstance(first_item, Image.Image):
+        frame = np.asarray(first_item.convert("RGB"), dtype=np.uint8)
+        return torch.from_numpy(frame[None, ...])
+
+    raise TypeError(f"Unsupported output frame type for video export: {type(first_item)}")
+
+
+def _extract_audio_tensor_from_output(output) -> Optional[torch.Tensor]:
+    """
+    Convert pipeline output audio to CPU float tensor (if present).
+    """
+    if not hasattr(output, "audio"):
+        return None
+
+    audio = output.audio
+    first_item = audio[0] if isinstance(audio, list) else audio
+    if first_item is None:
+        return None
+    if isinstance(first_item, torch.Tensor):
+        return first_item.detach().float().cpu()
+
+    arr = np.asarray(first_item)
+    if arr.size == 0:
+        return None
+    return torch.from_numpy(arr).float().cpu()
 
 
 def _find_latest_phase1_dir(block_dir: str) -> Optional[str]:
@@ -424,10 +480,13 @@ def main():
         os.makedirs(block_dir, exist_ok=True)
 
         keyframe_path = os.path.join(block_dir, "result_keyframe.png")
+        video_path = os.path.join(block_dir, "result_video.mp4")
         print(f"\n[{i + 1}/{len(block_indices)}] {block_name} + {audio_block_name}")
 
-        if skip_if_result_exists and os.path.isfile(keyframe_path):
-            print("  skip: existing result_keyframe.png")
+        has_keyframe = os.path.isfile(keyframe_path)
+        has_video = os.path.isfile(video_path)
+        if skip_if_result_exists and has_keyframe and has_video:
+            print("  skip: existing result_keyframe.png + result_video.mp4")
             phase1_dir = _find_latest_phase1_dir(block_dir)
             summary = _parse_summary_file(os.path.join(phase1_dir, "summary.txt")) if phase1_dir else {}
             metrics = _compute_metrics(summary, concept_names)
@@ -477,6 +536,22 @@ def main():
             keyframe = _extract_keyframe_from_output(output)
             keyframe.save(keyframe_path)
             print(f"  saved keyframe -> {keyframe_path}")
+
+            video_tensor = _extract_video_tensor_from_output(output)
+            audio_tensor = _extract_audio_tensor_from_output(output)
+            audio_sample_rate = (
+                int(pipe.vocoder.config.output_sampling_rate)
+                if audio_tensor is not None and hasattr(pipe, "vocoder")
+                else None
+            )
+            encode_video(
+                video=video_tensor,
+                fps=frame_rate,
+                audio=audio_tensor,
+                audio_sample_rate=audio_sample_rate,
+                output_path=video_path,
+            )
+            print(f"  saved video -> {video_path}")
 
             phase1_dir = _find_latest_phase1_dir(block_dir)
             summary = _parse_summary_file(os.path.join(phase1_dir, "summary.txt")) if phase1_dir else {}
@@ -623,4 +698,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -1,8 +1,8 @@
 {
   "id": "45e5cd8d-ee5d-4dd8-a8cd-2b44dd243280",
   "revision": 0,
-  "last_node_id": 101,
-  "last_link_id": 50,
+  "last_node_id": 103,
+  "last_link_id": 56,
   "nodes": [
     {
       "id": 100,
@@ -428,7 +428,9 @@
           "type": "FREEFUSE_DATA",
           "slot_index": 0,
           "links": [
-            14
+            14,
+            52,
+            54
           ]
         }
       ],
@@ -501,34 +503,6 @@
       ]
     },
     {
-      "id": 13,
-      "type": "PreviewImage",
-      "pos": [
-        2220,
-        100
-      ],
-      "size": [
-        320,
-        280
-      ],
-      "flags": {},
-      "order": 15,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "images",
-          "type": "IMAGE",
-          "link": 21
-        }
-      ],
-      "outputs": [],
-      "title": "Phase 1 Mask Preview",
-      "properties": {
-        "Node name for S&R": "PreviewImage"
-      },
-      "widgets_values": []
-    },
-    {
       "id": 15,
       "type": "FreeFuseMaskPreview",
       "pos": [
@@ -590,7 +564,7 @@
         246
       ],
       "flags": {},
-      "order": 16,
+      "order": 17,
       "mode": 0,
       "inputs": [
         {
@@ -618,7 +592,7 @@
         246
       ],
       "flags": {},
-      "order": 17,
+      "order": 18,
       "mode": 0,
       "inputs": [
         {
@@ -646,7 +620,7 @@
         320
       ],
       "flags": {},
-      "order": 18,
+      "order": 20,
       "mode": 0,
       "inputs": [
         {
@@ -657,7 +631,7 @@
         {
           "name": "masks",
           "type": "FREEFUSE_MASKS",
-          "link": 19
+          "link": 56
         },
         {
           "name": "freefuse_data",
@@ -707,7 +681,7 @@
         350
       ],
       "flags": {},
-      "order": 19,
+      "order": 21,
       "mode": 0,
       "inputs": [
         {
@@ -767,7 +741,7 @@
         50
       ],
       "flags": {},
-      "order": 20,
+      "order": 22,
       "mode": 0,
       "inputs": [
         {
@@ -808,7 +782,7 @@
         400
       ],
       "flags": {},
-      "order": 21,
+      "order": 23,
       "mode": 0,
       "inputs": [
         {
@@ -860,7 +834,7 @@
       ],
       "size": [
         380,
-        666
+        710
       ],
       "flags": {},
       "order": 13,
@@ -890,6 +864,12 @@
           "name": "freefuse_data",
           "type": "FREEFUSE_DATA",
           "link": 14
+        },
+        {
+          "name": "sigmas",
+          "shape": 7,
+          "type": "SIGMAS",
+          "link": null
         }
       ],
       "outputs": [
@@ -906,8 +886,8 @@
           "type": "FREEFUSE_MASKS",
           "slot_index": 1,
           "links": [
-            19,
-            20
+            20,
+            51
           ]
         },
         {
@@ -1027,6 +1007,161 @@
         "",
         "",
         3.5
+      ]
+    },
+    {
+      "id": 13,
+      "type": "PreviewImage",
+      "pos": [
+        2304.0186707308944,
+        83.07823592821042
+      ],
+      "size": [
+        320,
+        280
+      ],
+      "flags": {},
+      "order": 16,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 21
+        }
+      ],
+      "outputs": [],
+      "title": "Phase 1 Mask Preview",
+      "properties": {
+        "Node name for S&R": "PreviewImage"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 103,
+      "type": "FreeFuseMaskReassemble",
+      "pos": [
+        1977.3782103297792,
+        -324.86461297742255
+      ],
+      "size": [
+        250.03125,
+        102
+      ],
+      "flags": {},
+      "order": 19,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "original_mask_bank",
+          "type": "FREEFUSE_MASKS",
+          "link": 53
+        },
+        {
+          "name": "freefuse_data",
+          "shape": 7,
+          "type": "FREEFUSE_DATA",
+          "link": 54
+        },
+        {
+          "name": "slot_names",
+          "shape": 7,
+          "type": "STRING",
+          "widget": {
+            "name": "slot_names"
+          },
+          "link": 55
+        }
+      ],
+      "outputs": [
+        {
+          "name": "new_mask_bank",
+          "type": "FREEFUSE_MASKS",
+          "slot_index": 0,
+          "links": [
+            56
+          ]
+        }
+      ],
+      "title": "Mask Reassemble",
+      "properties": {
+        "Node name for S&R": "FreeFuseMaskReassemble"
+      },
+      "widgets_values": [
+        true,
+        true
+      ]
+    },
+    {
+      "id": 102,
+      "type": "FreeFuseMaskTap",
+      "pos": [
+        1679.8643406856525,
+        -330.37233937390135
+      ],
+      "size": [
+        252.853125,
+        358
+      ],
+      "flags": {},
+      "order": 15,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "mask_bank",
+          "type": "FREEFUSE_MASKS",
+          "link": 51
+        },
+        {
+          "name": "freefuse_data",
+          "shape": 7,
+          "type": "FREEFUSE_DATA",
+          "link": 52
+        }
+      ],
+      "outputs": [
+        {
+          "name": "mask_bank",
+          "type": "FREEFUSE_MASKS",
+          "slot_index": 0,
+          "links": [
+            53
+          ]
+        },
+        {
+          "name": "slot_names",
+          "type": "STRING",
+          "slot_index": 1,
+          "links": [
+            55
+          ]
+        },
+        {
+          "name": "slot_mask_images",
+          "type": "IMAGE",
+          "slot_index": 2,
+          "links": null
+        }
+      ],
+      "title": "Mask Tap (Optional Edit Branch)",
+      "properties": {
+        "Node name for S&R": "FreeFuseMaskTap"
+      },
+      "widgets_values": [
+        "clipspace/freefuse-masktap-edit-s42-1772466212297.png [input]",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "clipspace/freefuse-masktap-edit-s42-1772466212297.png [input]",
+        "0",
+        "Open Mask Editor",
+        "Clear Current Slot"
       ]
     }
   ],
@@ -1150,14 +1285,6 @@
       14,
       0,
       "MODEL"
-    ],
-    [
-      19,
-      12,
-      1,
-      14,
-      1,
-      "FREEFUSE_MASKS"
     ],
     [
       20,
@@ -1286,6 +1413,54 @@
       16,
       3,
       "LATENT"
+    ],
+    [
+      51,
+      12,
+      1,
+      102,
+      0,
+      "FREEFUSE_MASKS"
+    ],
+    [
+      52,
+      8,
+      0,
+      102,
+      1,
+      "FREEFUSE_DATA"
+    ],
+    [
+      53,
+      102,
+      0,
+      103,
+      0,
+      "FREEFUSE_MASKS"
+    ],
+    [
+      54,
+      8,
+      0,
+      103,
+      1,
+      "FREEFUSE_DATA"
+    ],
+    [
+      55,
+      102,
+      1,
+      103,
+      2,
+      "STRING"
+    ],
+    [
+      56,
+      103,
+      0,
+      14,
+      1,
+      "FREEFUSE_MASKS"
     ]
   ],
   "groups": [
@@ -1373,8 +1548,8 @@
     "ds": {
       "scale": 0.6288129863327355,
       "offset": [
-        -1025.4246527754556,
-        -144.5362040523662
+        -1162.246184963842,
+        626.1557254771612
       ]
     },
     "info": {
