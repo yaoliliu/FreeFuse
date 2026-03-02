@@ -36,7 +36,9 @@ class FreeFuseState:
         self.phase: str = "collect"  # "collect" or "generate"
         self.current_step: int = 0
         self.collect_step: int = 4  # Which step to collect attention at
-        self.collect_block: int = 18  # Which block to collect from (for Flux)
+        self.collect_block: int = 18  # Which block/layer to collect from
+        # Optional block range. Single-block behavior when equal.
+        self.collect_block_end: int = 18
         
         # Concept information
         self.token_pos_maps: Dict[str, List[List[int]]] = {}
@@ -44,7 +46,10 @@ class FreeFuseState:
         
         # Collected data
         self.similarity_maps: Dict[str, torch.Tensor] = {}
-        self.collected_outputs: Dict[str, torch.Tensor] = {}
+        self.collected_outputs: Dict[str, Any] = {}
+        # Optional range-mode storage: block_idx -> similarity_maps
+        self.collected_outputs["block_similarity_maps"] = {}
+        self.collected_blocks: set = set()
         
         # Generated masks
         self.masks: Dict[str, torch.Tensor] = {}
@@ -58,6 +63,8 @@ class FreeFuseState:
         """Reset collected data for new generation."""
         self.similarity_maps = {}
         self.collected_outputs = {}
+        self.collected_outputs["block_similarity_maps"] = {}
+        self.collected_blocks = set()
         
     def is_collect_step(self, step: int, block_index: int = None) -> bool:
         """Check if we should collect at this step/block."""
@@ -65,8 +72,12 @@ class FreeFuseState:
             return False
         if step != self.collect_step:
             return False
-        if block_index is not None and block_index != self.collect_block:
-            return False
+        if block_index is not None:
+            if self.collect_block_end > self.collect_block:
+                if not (self.collect_block <= block_index <= self.collect_block_end):
+                    return False
+            elif block_index != self.collect_block:
+                return False
         return True
 
 
@@ -224,6 +235,12 @@ class FreeFuseFluxBlockReplace:
                         num_heads=block.num_heads,
                     )
                     state.similarity_maps.update(sim_maps)
+                    if "block_similarity_maps" in state.collected_outputs:
+                        state.collected_outputs["block_similarity_maps"][block_index] = {
+                            name: tensor for name, tensor in sim_maps.items()
+                        }
+                    if hasattr(state, "collected_blocks"):
+                        state.collected_blocks.add(block_index)
                     
                     logging.info(f"[FreeFuse] Collected similarity maps at block {block_index}, "
                                f"step {current_step}: {list(sim_maps.keys())}")
@@ -515,6 +532,12 @@ class FreeFuseFluxSingleBlockReplace:
                         n_heads=block.num_heads,
                     )
                     state.similarity_maps.update(sim_maps)
+                    if "block_similarity_maps" in state.collected_outputs:
+                        state.collected_outputs["block_similarity_maps"][block_index] = {
+                            name: tensor for name, tensor in sim_maps.items()
+                        }
+                    if hasattr(state, "collected_blocks"):
+                        state.collected_blocks.add(block_index)
                     logging.info(
                         f"[FreeFuse] Collected single-block similarity maps at block {block_index}, "
                         f"step {current_step}: {list(sim_maps.keys())}"
@@ -1200,111 +1223,85 @@ def compute_flux_similarity_maps_from_outputs(
 
 class FreeFuseZImageBlockReplace:
     """
-    AGGRESSIVE block replace for Z-Image (Lumina NextDiT) similarity map collection.
+    QKV-based similarity collector for Z-Image (Lumina NextDiT).
 
-    Analogous to FreeFuseFluxBlockReplace: we directly access the target layer's
-    JointAttention module to compute QKV with QK-norm and RoPE, then extract
-    proper cross-attention-based similarity maps exactly as the reference
-    FreeFuseZImageAttnProcessor does.
-
-    Architecture recap (ComfyUI Lumina2 / Z-Image):
-      - Unified sequence layout: ``[txt_embeds, img_embeds]``  (text first)
-      - JointAttention performs QKV on the full unified sequence with:
-        ``qkv`` projection → q_norm / k_norm → complex-valued RoPE
-      - Each ``JointTransformerBlock`` receives ``(x, mask, freqs_cis, adaln, ...)``
-        where ``freqs_cis`` covers the **full** unified sequence.
-
-    Strategy:
-      1. Register a PyTorch ``register_forward_pre_hook`` on the target layer to
-         capture its **input** ``(x, mask, freqs_cis, adaln_input, ...)``.
-      2. Register a ``double_block`` patch callback that runs **after** the
-         layer.  When collection is triggered it:
-         a) Retrieves the cached layer input.
-         b) Reproduces the first half of the layer forward:
-            ``x_mod = attention_norm1(x) * (1 + scale_msa)``
-            ``q, k, v = split(attention.qkv(x_mod))``
-            ``q, k = q_norm(q), k_norm(k)``
-            ``q, k = apply_rope(q, k, freqs_cis)``
-         c) Splits into img_q / txt_k by ``cap_size``.
-         d) Computes standard multi-head cross-attention similarity maps
-            and concept attention with the attention output hidden states.
-      3. Stores similarity maps on ``state.similarity_maps``.
-
-    This matches the reference ``FreeFuseZImageAttnProcessor._extract_concept_sim_maps``.
-
-    Usage:
-        replacer = FreeFuseZImageBlockReplace(state, block=layer, block_index=18)
-        replacer.install(model_patcher)   # registers hook + double_block patch
+    Supports both single-layer and range-mode collection by:
+      1) registering pre-hooks on target layers to cache layer inputs,
+      2) installing one double_block patch callback that dispatches by block_index.
     """
 
     def __init__(
         self,
         state: FreeFuseState,
-        block,                # JointTransformerBlock reference (required)
+        block=None,
         block_index: int = 18,
+        block_entries: Optional[List[Tuple[int, Any]]] = None,
     ):
         self.state = state
-        self.block = block
-        self.block_index = block_index
+        if block_entries is None:
+            if block is None:
+                raise ValueError("FreeFuseZImageBlockReplace requires block or block_entries.")
+            block_entries = [(int(block_index), block)]
 
-        # Cache filled by the pre-hook before the layer executes
-        self._cached_input: Optional[Dict[str, torch.Tensor]] = None
-        self._hook_handle = None   # to allow removal later
+        self._blocks: Dict[int, Any] = {}
+        for idx, layer in block_entries:
+            self._blocks[int(idx)] = layer
+        self._target_blocks = set(self._blocks.keys())
+
+        # Cached per-layer inputs from pre-hooks.
+        self._cached_inputs: Dict[int, Dict[str, torch.Tensor]] = {}
+        self._hook_handles: Dict[int, Any] = {}
 
     # ------------------------------------------------------------------
     # Installation
     # ------------------------------------------------------------------
     def install(self, model_patcher) -> None:
-        """Register both the pre-hook (to capture layer input) and the
-        double_block patch (to compute QKV-based similarity maps)."""
-        # 1. Pre-hook on the target layer (with_kwargs to capture timestep_zero_index)
-        self._hook_handle = self.block.register_forward_pre_hook(
-            self._pre_hook, with_kwargs=True
-        )
-        # 2. double_block patch (runs after every layer; we filter by index)
-        model_patcher.set_model_double_block_patch(self.create_double_block_patch())
+        """Register pre-hooks on target blocks and one shared double_block patch."""
+        for block_index, layer in self._blocks.items():
+            self._hook_handles[block_index] = layer.register_forward_pre_hook(
+                self._make_pre_hook(block_index), with_kwargs=True
+            )
 
-        logging.info(f"[FreeFuse Z-Image] Installed QKV-based block replace "
-                     f"on layer {self.block_index} "
-                     f"(type={type(self.block).__name__})")
+        model_patcher.set_model_double_block_patch(self.create_double_block_patch())
+        block_ids = sorted(self._target_blocks)
+        logging.info(
+            f"[FreeFuse Z-Image] Installed QKV-based block replace on layers {block_ids}"
+        )
 
     def remove(self) -> None:
-        """Remove the pre-hook (double_block patch is managed by ComfyUI)."""
-        if self._hook_handle is not None:
-            self._hook_handle.remove()
-            self._hook_handle = None
+        """Remove all pre-hooks (double_block patch is managed by ComfyUI)."""
+        for handle in self._hook_handles.values():
+            handle.remove()
+        self._hook_handles.clear()
 
     # ------------------------------------------------------------------
     # Pre-hook: capture layer input
     # ------------------------------------------------------------------
-    def _pre_hook(self, module, args, kwargs=None):
-        """``register_forward_pre_hook`` callback (with_kwargs=True).
+    def _make_pre_hook(self, block_index: int) -> Callable:
+        """Bind pre-hook to a concrete Z-Image layer index."""
 
-        ``JointTransformerBlock.forward(x, x_mask, freqs_cis, adaln_input=None,
-            timestep_zero_index=None, transformer_options={})``
-        We cache ``x``, ``freqs_cis``, ``adaln_input`` and ``timestep_zero_index``
-        so the ``double_block`` callback can recompute QKV with correct modulation.
-        """
-        # Only cache when we are in the collection phase
-        if self.state.phase != "collect":
-            return
+        def _pre_hook(module, args, kwargs=None):
+            # Only cache when we are in the collection phase.
+            if self.state.phase != "collect":
+                return
 
-        if kwargs is None:
-            kwargs = {}
+            if kwargs is None:
+                kwargs = {}
 
-        # args = (x, x_mask, freqs_cis, adaln_input, ...)
-        if len(args) >= 3:
-            self._cached_input = {
-                "x": args[0].detach(),           # (B, seq, dim)
-                "freqs_cis": args[2].detach(),   # (B, seq, rope_dim) full unified
-            }
-            # adaln_input: positional arg #3
-            if len(args) >= 4 and args[3] is not None:
-                self._cached_input["adaln_input"] = args[3].detach()
-            # timestep_zero_index: keyword arg
-            tzi = kwargs.get("timestep_zero_index", None)
-            if tzi is not None:
-                self._cached_input["timestep_zero_index"] = tzi
+            # args = (x, x_mask, freqs_cis, adaln_input, ...)
+            if len(args) >= 3:
+                cached = {
+                    "x": args[0].detach(),         # (B, seq, dim)
+                    "freqs_cis": args[2].detach(), # (B, seq, rope_dim)
+                }
+                if len(args) >= 4 and args[3] is not None:
+                    cached["adaln_input"] = args[3].detach()
+                tzi = kwargs.get("timestep_zero_index", None)
+                if tzi is not None:
+                    cached["timestep_zero_index"] = tzi
+                self._cached_inputs[block_index] = cached
+
+        return _pre_hook
 
     # ------------------------------------------------------------------
     # double_block patch callback
@@ -1312,35 +1309,48 @@ class FreeFuseZImageBlockReplace:
     def create_double_block_patch(self) -> Callable:
         """Return a callback compatible with ``model.set_model_double_block_patch``."""
         state = self.state
-        collect_block_index = self.block_index
         parent = self  # capture reference
 
         def double_block_patch(patch_args: Dict) -> Dict:
-            block_index = patch_args.get("block_index", -1)
-            if block_index != collect_block_index:
+            block_index = int(patch_args.get("block_index", -1))
+            if block_index not in parent._target_blocks:
                 return {}
 
             transformer_options = patch_args.get("transformer_options", {})
             current_step = transformer_options.get("sigmas_index", state.current_step)
 
-            should_collect = state.is_collect_step(current_step, collect_block_index)
+            should_collect = state.is_collect_step(current_step, block_index)
             if not should_collect:
                 return {}
 
             # === COLLECTION MODE ===
-            cached = parent._cached_input
+            cached = parent._cached_inputs.get(block_index)
             if cached is None:
-                logging.warning("[FreeFuse Z-Image] No cached input for QKV computation")
+                logging.warning(
+                    f"[FreeFuse Z-Image] No cached input for QKV computation at layer {block_index}"
+                )
+                return {}
+
+            block = parent._blocks.get(block_index)
+            if block is None:
+                logging.warning(
+                    f"[FreeFuse Z-Image] Missing block reference for layer {block_index}"
+                )
                 return {}
 
             try:
-                parent._extract_and_compute(patch_args, cached)
+                parent._extract_and_compute(
+                    patch_args=patch_args,
+                    cached=cached,
+                    block=block,
+                    block_index=block_index,
+                )
             except Exception as e:
                 logging.error(f"[FreeFuse Z-Image] QKV extraction failed: {e}")
                 import traceback
                 traceback.print_exc()
             finally:
-                parent._cached_input = None  # release memory
+                parent._cached_inputs.pop(block_index, None)  # release memory
 
             return {}   # never modify hidden states
 
@@ -1349,12 +1359,17 @@ class FreeFuseZImageBlockReplace:
     # ------------------------------------------------------------------
     # Core: recompute QKV and extract similarity maps
     # ------------------------------------------------------------------
-    def _extract_and_compute(self, patch_args: Dict, cached: Dict) -> None:
+    def _extract_and_compute(
+        self,
+        patch_args: Dict,
+        cached: Dict,
+        block: Any,
+        block_index: int,
+    ) -> None:
         """Recompute QKV from cached layer input and build sim maps."""
         from comfy.ldm.flux.math import apply_rope
         from comfy.ldm.lumina.model import modulate
 
-        block = self.block
         state = self.state
 
         x_input = cached["x"]               # (B, seq, dim)  – full unified [txt, img]
@@ -1367,7 +1382,7 @@ class FreeFuseZImageBlockReplace:
         cap_len = txt_hidden.shape[1]
         img_len = img_hidden.shape[1]
 
-        logging.info(f"[FreeFuse Z-Image] QKV extraction at block {self.block_index}: "
+        logging.info(f"[FreeFuse Z-Image] QKV extraction at block {block_index}: "
                      f"img_len={img_len}, cap_len={cap_len}, "
                      f"unified_seq={x_input.shape[1]}")
 
@@ -1452,6 +1467,12 @@ class FreeFuseZImageBlockReplace:
                 n_heads=n_heads,
             )
             state.similarity_maps.update(sim_maps)
+            if "block_similarity_maps" in state.collected_outputs:
+                state.collected_outputs["block_similarity_maps"][block_index] = {
+                    name: tensor for name, tensor in sim_maps.items()
+                }
+            if hasattr(state, "collected_blocks"):
+                state.collected_blocks.add(block_index)
 
             logging.info(f"[FreeFuse Z-Image] Collected {len(sim_maps)} similarity maps")
             for name, sm in sim_maps.items():
@@ -1719,6 +1740,9 @@ def apply_freefuse_replace_patches(
     state: FreeFuseState,
     model_type: str = "auto",
     sdxl_collect_blocks: Optional[List[Tuple]] = None,
+    flux_collect_blocks: Optional[List[int]] = None,
+    flux2_collect_blocks: Optional[List[int]] = None,
+    z_image_collect_blocks: Optional[List[int]] = None,
 ) -> None:
     """
     Apply FreeFuse replace patches to a ComfyUI model.
@@ -1732,6 +1756,12 @@ def apply_freefuse_replace_patches(
         model_type: "flux", "flux2", "sdxl", "z_image", or "auto"
         sdxl_collect_blocks: Optional list of (block_name, block_num, tf_index)
                             tuples for SDXL. If None, uses default.
+        flux_collect_blocks: Optional Flux `double_blocks` indices for range
+                            collection. If None, uses state.collect_block.
+        flux2_collect_blocks: Optional Flux2 `single_blocks` indices for range
+                             collection. If None, uses state.collect_block.
+        z_image_collect_blocks: Optional Z-Image `layers` indices for range
+                               collection. If None, uses state.collect_block.
     """
     # Auto-detect model type
     if model_type == "auto":
@@ -1749,62 +1779,96 @@ def apply_freefuse_replace_patches(
     
     if model_type == "z_image":
         # Z-Image uses NextDiT (Lumina) architecture with layers array
-        # We use the AGGRESSIVE QKV-based approach: pre-hook + double_block patch
         diffusion_model = model.model.diffusion_model
-        
-        block_index = state.collect_block
-        if hasattr(diffusion_model, 'layers') and len(diffusion_model.layers) > block_index:
-            block = diffusion_model.layers[block_index]
-            
-            # Create replacer with QKV extraction and register both
-            # the pre-hook and the double_block patch
-            replacer = FreeFuseZImageBlockReplace(state, block=block, block_index=block_index)
-            replacer.install(model)
-            
-            logging.info(f"[FreeFuse] Set QKV-based block replace for Z-Image layer {block_index}")
-            logging.info(f"[FreeFuse] Block type: {type(block).__name__}")
-        else:
-            logging.error(f"[FreeFuse] Cannot find layers[{block_index}] in Z-Image diffusion model")
+
+        if z_image_collect_blocks is None:
+            z_image_collect_blocks = [state.collect_block]
+
+        layers = getattr(diffusion_model, "layers", None)
+        if layers is None or len(layers) == 0:
+            logging.error("[FreeFuse] Cannot find Z-Image layers in diffusion model")
+            return
+
+        max_idx = len(layers) - 1
+        valid_blocks: List[int] = []
+        for block_index in z_image_collect_blocks:
+            if block_index < 0 or block_index > max_idx:
+                logging.warning(
+                    f"[FreeFuse] collect_block={block_index} out of range for "
+                    f"{len(layers)} Z-Image layers; skipping."
+                )
+                continue
+            valid_blocks.append(int(block_index))
+
+        if not valid_blocks:
+            fallback_block = min(max(state.collect_block, 0), max_idx)
+            logging.warning(
+                f"[FreeFuse] No valid Z-Image blocks in requested range; "
+                f"falling back to layer {fallback_block}."
+            )
+            valid_blocks = [fallback_block]
+            state.collect_block = fallback_block
+            state.collect_block_end = fallback_block
+
+        block_entries = [(idx, layers[idx]) for idx in valid_blocks]
+        replacer = FreeFuseZImageBlockReplace(state, block_entries=block_entries)
+        replacer.install(model)
+        for idx in valid_blocks:
+            logging.info(f"[FreeFuse] Set QKV-based block replace for Z-Image layer {idx}")
+            logging.info(f"[FreeFuse] Block type: {type(layers[idx]).__name__}")
     
     elif model_type == "flux":
         # Get the actual diffusion model
         diffusion_model = model.model.diffusion_model
-        
-        # Get the target block
-        block_index = state.collect_block
+
+        if flux_collect_blocks is None:
+            flux_collect_blocks = [state.collect_block]
+
         if hasattr(diffusion_model, 'double_blocks') and len(diffusion_model.double_blocks) > 0:
             max_idx = len(diffusion_model.double_blocks) - 1
-            if block_index > max_idx:
+            valid_blocks: List[int] = []
+            for block_index in flux_collect_blocks:
+                if block_index < 0 or block_index > max_idx:
+                    logging.warning(
+                        f"[FreeFuse] collect_block={block_index} out of range for "
+                        f"{len(diffusion_model.double_blocks)} double_blocks; skipping."
+                    )
+                    continue
+                valid_blocks.append(int(block_index))
+
+            if not valid_blocks:
+                fallback_block = min(max(state.collect_block, 0), max_idx)
                 logging.warning(
-                    f"[FreeFuse] collect_block={block_index} out of range for "
-                    f"{len(diffusion_model.double_blocks)} double_blocks; "
-                    f"clamping to {max_idx}."
+                    f"[FreeFuse] No valid Flux blocks in requested range; "
+                    f"falling back to block {fallback_block}."
                 )
-                block_index = max_idx
-                state.collect_block = block_index
-            block = diffusion_model.double_blocks[block_index]
-            
-            # Create replacer with actual block reference
-            replacer = FreeFuseFluxBlockReplace(state, block=block, block_index=block_index)
-            block_replace = replacer.create_block_replace()
-            
-            # Set the replace patch using ComfyUI's API
-            model.set_model_patch_replace(
-                block_replace,
-                "dit",
-                "double_block",
-                block_index,
-            )
-            
-            logging.info(f"[FreeFuse] Set AGGRESSIVE block replace for double_block {block_index}")
-            logging.info(f"[FreeFuse] Block type: {type(block).__name__}")
+                valid_blocks = [fallback_block]
+                state.collect_block = fallback_block
+                state.collect_block_end = fallback_block
+
+            for block_index in valid_blocks:
+                block = diffusion_model.double_blocks[block_index]
+                replacer = FreeFuseFluxBlockReplace(
+                    state, block=block, block_index=block_index
+                )
+                block_replace = replacer.create_block_replace()
+
+                model.set_model_patch_replace(
+                    block_replace,
+                    "dit",
+                    "double_block",
+                    block_index,
+                )
+
+                logging.info(
+                    f"[FreeFuse] Set AGGRESSIVE block replace for double_block {block_index}"
+                )
+                logging.info(f"[FreeFuse] Block type: {type(block).__name__}")
         else:
-            logging.error(f"[FreeFuse] Cannot find double_blocks[{block_index}] in diffusion model")
+            logging.error("[FreeFuse] Cannot find double_blocks in diffusion model")
 
     elif model_type == "flux2":
         diffusion_model = model.model.diffusion_model
-
-        block_index = state.collect_block
 
         # Comfy Flux2 exposes single-stream stack as `single_blocks`.
         # Keep compatibility with potential alternative naming.
@@ -1815,37 +1879,53 @@ def apply_freefuse_replace_patches(
             single_blocks = diffusion_model.single_transformer_blocks
 
         if single_blocks is not None and len(single_blocks) > 0:
+            if flux2_collect_blocks is None:
+                flux2_collect_blocks = [state.collect_block]
+
             max_idx = len(single_blocks) - 1
-            if block_index > max_idx:
+            valid_blocks: List[int] = []
+            for block_index in flux2_collect_blocks:
+                if block_index < 0 or block_index > max_idx:
+                    logging.warning(
+                        f"[FreeFuse] collect_block={block_index} out of range for "
+                        f"{len(single_blocks)} single_transformer_blocks; skipping."
+                    )
+                    continue
+                valid_blocks.append(int(block_index))
+
+            if not valid_blocks:
+                fallback_block = min(max(state.collect_block, 0), max_idx)
                 logging.warning(
-                    f"[FreeFuse] collect_block={block_index} out of range for "
-                    f"{len(single_blocks)} single_transformer_blocks; clamping to {max_idx}."
+                    f"[FreeFuse] No valid Flux2 blocks in requested range; "
+                    f"falling back to block {fallback_block}."
                 )
-                block_index = max_idx
-                state.collect_block = block_index
+                valid_blocks = [fallback_block]
+                state.collect_block = fallback_block
+                state.collect_block_end = fallback_block
 
-            block = single_blocks[block_index]
-            replacer = FreeFuseFluxSingleBlockReplace(
-                state,
-                block=block,
-                block_index=block_index,
-            )
-            block_replace = replacer.create_block_replace()
+            for block_index in valid_blocks:
+                block = single_blocks[block_index]
+                replacer = FreeFuseFluxSingleBlockReplace(
+                    state,
+                    block=block,
+                    block_index=block_index,
+                )
+                block_replace = replacer.create_block_replace()
 
-            model.set_model_patch_replace(
-                block_replace,
-                "dit",
-                "single_block",
-                block_index,
-            )
+                model.set_model_patch_replace(
+                    block_replace,
+                    "dit",
+                    "single_block",
+                    block_index,
+                )
 
-            logging.info(
-                f"[FreeFuse] Set AGGRESSIVE block replace for single_transformer_blocks.{block_index}"
-            )
-            logging.info(f"[FreeFuse] Block type: {type(block).__name__}")
+                logging.info(
+                    f"[FreeFuse] Set AGGRESSIVE block replace for single_transformer_blocks.{block_index}"
+                )
+                logging.info(f"[FreeFuse] Block type: {type(block).__name__}")
         else:
             logging.error(
-                f"[FreeFuse] Cannot find single_transformer_blocks[{block_index}] in diffusion model"
+                "[FreeFuse] Cannot find single_transformer_blocks in diffusion model"
             )
         
     else:

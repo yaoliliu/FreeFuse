@@ -87,6 +87,10 @@ from .attention_bias_patch import (
     apply_attention_bias_patches,
 )
 
+from .voting import (
+    create_consensus_similarity_maps,
+)
+
 __all__ = [
     # Attention
     "FreeFuseAttentionCollector",
@@ -144,4 +148,5 @@ __all__ = [
     "FreeFuseFluxBiasSingleBlockReplace",
     "FreeFuseSDXLBiasAttnReplace",
     "apply_attention_bias_patches",
+    "create_consensus_similarity_maps",
 ]

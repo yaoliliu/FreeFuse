@@ -1,8 +1,8 @@
 {
   "id": "45e5cd8d-ee5d-4dd8-a8cd-2b44dd243280",
   "revision": 0,
-  "last_node_id": 101,
-  "last_link_id": 50,
+  "last_node_id": 103,
+  "last_link_id": 56,
   "nodes": [
     {
       "id": 100,
@@ -20,60 +20,19 @@
       "mode": 0,
       "inputs": [],
       "outputs": [],
+      "title": "Flux2/Klein 4B Model Guide",
       "properties": {
         "text": ""
       },
       "widgets_values": [
-        "# FreeFuse Flux — Model & LoRA Download Guide\n# FreeFuse Flux — 模型与LoRA下载指南\n\n═══════════════════════════════════════\n\n## Required Models / 所需模型 (FP8 Quantized)\n\n### 📂 text_encoders/\n• clip_l.safetensors\n  → https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors\n  EN: CLIP-L text encoder\n  中: CLIP-L 文本编码器\n\n• t5xxl_fp8_e4m3fn.safetensors\n  → https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp8_e4m3fn.safetensors\n  EN: T5-XXL text encoder (FP8 quantized)\n  中: T5-XXL 文本编码器（FP8量化）\n\n### 📂 diffusion_models/\n• flux1-dev-fp8.safetensors\n  → https://huggingface.co/Comfy-Org/flux1-dev/resolve/main/flux1-dev-fp8.safetensors\n  EN: Flux.1 Dev transformer (FP8 quantized)\n  中: Flux.1 Dev 变换器模型（FP8量化）\n\n### 📂 vae/\n• ae.safetensors\n  → https://huggingface.co/Comfy-Org/Lumina_Image_2.0_Repackaged/resolve/main/split_files/vae/ae.safetensors\n  EN: Flux VAE autoencoder\n  中: Flux VAE 自编码器\n\n### 📂 loras/ (LoRA Files)\n• harry_potter_flux.safetensors\n  → https://huggingface.co/lsmpp/freefuse_community_loras/resolve/main/harry_potter.safetensors\n• daiyu_lin_flux.safetensors\n  → https://huggingface.co/lsmpp/freefuse_community_loras/resolve/main/daiyu_lin.safetensors\n  EN: Download and rename to *_flux.safetensors, or change lora_name in nodes\n  中: 下载后重命名为 *_flux.safetensors，或修改节点中的 lora_name\n\n═══════════════════════════════════════\n\n## Directory Structure / 目录结构\n📂 ComfyUI/models/\n├─ text_encoders/\n│  ├─ clip_l.safetensors\n│  └─ t5xxl_fp8_e4m3fn.safetensors\n├─ diffusion_models/\n│  └─ flux1-dev-fp8.safetensors\n├─ vae/\n│  └─ ae.safetensors\n└─ loras/\n   ├─ harry_potter_flux.safetensors\n   └─ daiyu_lin_flux.safetensors\n\n═══════════════════════════════════════\n\n## Important Notes / 重要提示\n• FP8 uses ~50% less VRAM than FP16 / FP8约省50%显存\n• ~12GB VRAM for 1024×1024 / 约需12GB显存\n• Flux uses guidance embedding, NOT CFG / Flux用guidance嵌入而非CFG\n• KSampler CFG must be 1.0 for Flux / KSampler CFG必须为1.0\n• Guidance set in CLIPTextEncodeFlux (default 3.5)\n  引导值在CLIPTextEncodeFlux中设置（默认3.5）\n• For full precision, use FP16 model variants\n  如需全精度，使用FP16模型变体"
+        "# FreeFuse Flux2.Klein 4B — Model Guide\n# FreeFuse Flux2.Klein 4B — 模型指南\n\nModel links synced from ComfyUI official Flux2-Klein workflow:\n- diffusion_models/flux-2-klein-base-4b.safetensors\n- diffusion_models/flux-2-klein-4b.safetensors\n- text_encoders/qwen_3_4b.safetensors\n- vae/flux2-vae.safetensors"
       ],
       "color": "#432",
       "bgcolor": "#653"
     },
     {
-      "id": 1,
-      "type": "UNETLoader",
-      "pos": [
-        50,
-        100
-      ],
-      "size": [
-        315,
-        82
-      ],
-      "flags": {},
-      "order": 1,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "MODEL",
-          "type": "MODEL",
-          "slot_index": 0,
-          "links": [
-            1
-          ]
-        }
-      ],
-      "title": "Load Flux UNET",
-      "properties": {
-        "Node name for S&R": "UNETLoader",
-        "cnr_id": "comfy-core",
-        "models": [
-          {
-            "name": "flux1-dev-fp8.safetensors",
-            "url": "https://huggingface.co/Comfy-Org/flux1-dev/resolve/main/flux1-dev-fp8.safetensors",
-            "directory": "diffusion_models"
-          }
-        ]
-      },
-      "widgets_values": [
-        "flux1-dev-fp8.safetensors",
-        "fp8_e4m3fn"
-      ]
-    },
-    {
       "id": 2,
-      "type": "DualCLIPLoader",
+      "type": "CLIPLoader",
       "pos": [
         50,
         250
@@ -83,7 +42,7 @@
         130
       ],
       "flags": {},
-      "order": 2,
+      "order": 1,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -96,27 +55,21 @@
           ]
         }
       ],
-      "title": "Load CLIP + T5",
+      "title": "Load Flux2/Klein 4B Text Encoder",
       "properties": {
-        "Node name for S&R": "DualCLIPLoader",
+        "Node name for S&R": "CLIPLoader",
         "cnr_id": "comfy-core",
         "models": [
           {
-            "name": "clip_l.safetensors",
-            "url": "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors",
-            "directory": "text_encoders"
-          },
-          {
-            "name": "t5xxl_fp8_e4m3fn.safetensors",
-            "url": "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp8_e4m3fn.safetensors",
+            "name": "qwen_3_4b.safetensors",
+            "url": "https://huggingface.co/Comfy-Org/flux2-klein/resolve/main/split_files/text_encoders/qwen_3_4b.safetensors",
             "directory": "text_encoders"
           }
         ]
       },
       "widgets_values": [
-        "clip_l.safetensors",
-        "t5xxl_fp8_e4m3fn.safetensors",
-        "flux",
+        "qwen_3_4b.safetensors",
+        "flux2",
         "default"
       ]
     },
@@ -132,7 +85,7 @@
         58
       ],
       "flags": {},
-      "order": 3,
+      "order": 2,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -145,20 +98,20 @@
           ]
         }
       ],
-      "title": "Load Flux VAE",
+      "title": "Load Flux2 VAE",
       "properties": {
         "Node name for S&R": "VAELoader",
         "cnr_id": "comfy-core",
         "models": [
           {
-            "name": "ae.safetensors",
-            "url": "https://huggingface.co/Comfy-Org/Lumina_Image_2.0_Repackaged/resolve/main/split_files/vae/ae.safetensors",
+            "name": "flux2-vae.safetensors",
+            "url": "https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/vae/flux2-vae.safetensors",
             "directory": "vae"
           }
         ]
       },
       "widgets_values": [
-        "ae.safetensors"
+        "flux2-vae.safetensors"
       ]
     },
     {
@@ -219,13 +172,13 @@
           ]
         }
       ],
-      "title": "LoRA 1: Harry Potter",
+      "title": "LoRA 1: Harry Klein",
       "properties": {
         "Node name for S&R": "FreeFuseLoRALoader"
       },
       "widgets_values": [
-        "harry_potter_flux.safetensors",
-        "harry",
+        "harry_klein_4b.safetensors",
+        "harry_klein",
         1,
         1
       ]
@@ -290,13 +243,13 @@
           ]
         }
       ],
-      "title": "LoRA 2: Daiyu Lin",
+      "title": "LoRA 2: Shalnark Klein",
       "properties": {
         "Node name for S&R": "FreeFuseLoRALoader"
       },
       "widgets_values": [
-        "daiyu_lin_flux.safetensors",
-        "daiyu",
+        "shalnark_klein_4b.safetensors",
+        "shalnark_klein",
         1,
         1
       ]
@@ -338,16 +291,16 @@
         "Node name for S&R": "FreeFuseConceptMap"
       },
       "widgets_values": [
-        "harry",
+        "harry_klein",
         "harry potter, an European photorealistic style teenage wizard boy with messy black hair, round wire-frame glasses, and bright green eyes, wearing a white shirt, burgundy and gold striped tie, and dark robes",
-        "daiyu",
-        "daiyu_lin, a young East Asian photorealistic style woman in traditional Chinese hanfu dress, elaborate black updo hairstyle adorned with delicate white floral hairpins and ornaments, dangling red tassel earrings, soft pink and red color palette, gentle smile with knowing expression",
+        "shalnark_klein",
+        "shalnark, an anime boy with blonde bob haircut and turquoise eyes, wearing purple and teal futuristic uniform, determined expression, digital anime art style",
         "",
         "",
         "",
         "",
         true,
-        "autumn leaves blurred in the background"
+        ""
       ]
     },
     {
@@ -362,7 +315,7 @@
         130
       ],
       "flags": {},
-      "order": 4,
+      "order": 3,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -375,8 +328,7 @@
           "slot_index": 0,
           "links": [
             35,
-            36,
-            37
+            36
           ]
         }
       ],
@@ -385,7 +337,7 @@
         "Run widget replace on values": false
       },
       "widgets_values": [
-        "Realistic photography, harry potter, an European photorealistic style teenage wizard boy with messy black hair, round wire-frame glasses, and bright green eyes, wearing a white shirt, burgundy and gold striped tie, and dark robes hugging daiyu_lin, a young East Asian photorealistic style woman in traditional Chinese hanfu dress, elaborate black updo hairstyle adorned with delicate white floral hairpins and ornaments, dangling red tassel earrings, soft pink and red color palette, gentle smile with knowing expression, autumn leaves blurred in the background, high quality, detailed"
+        "A picture of two characters, a starry night scene with northern lights: harry potter, an European photorealistic style teenage wizard boy with messy black hair, round wire-frame glasses, and bright green eyes, wearing a white shirt, burgundy and gold striped tie, and dark robes and shalnark, an anime boy with blonde bob haircut and turquoise eyes, wearing purple and teal futuristic uniform, determined expression, digital anime art style"
       ]
     },
     {
@@ -428,7 +380,9 @@
           "type": "FREEFUSE_DATA",
           "slot_index": 0,
           "links": [
-            14
+            14,
+            52,
+            54
           ]
         }
       ],
@@ -437,14 +391,14 @@
         "Node name for S&R": "FreeFuseTokenPositions"
       },
       "widgets_values": [
-        "Realistic photography, harry potter, an European photorealistic style teenage wizard boy with messy black hair, round wire-frame glasses, and bright green eyes, wearing a white shirt, burgundy and gold striped tie, and dark robes hugging daiyu_lin, a young East Asian photorealistic style woman in traditional Chinese hanfu dress, elaborate black updo hairstyle adorned with delicate white floral hairpins and ornaments, dangling red tassel earrings, soft pink and red color palette, gentle smile with knowing expression, autumn leaves blurred in the background, high quality, detailed",
+        "A picture of two characters, a starry night scene with northern lights: harry potter, an European photorealistic style teenage wizard boy with messy black hair, round wire-frame glasses, and bright green eyes, wearing a white shirt, burgundy and gold striped tie, and dark robes and shalnark, an anime boy with blonde bob haircut and turquoise eyes, wearing purple and teal futuristic uniform, determined expression, digital anime art style",
         true,
         true
       ]
     },
     {
       "id": 9,
-      "type": "CLIPTextEncodeFlux",
+      "type": "CLIPTextEncode",
       "pos": [
         1320,
         280
@@ -463,20 +417,12 @@
           "link": 8
         },
         {
-          "name": "clip_l",
+          "name": "text",
           "type": "STRING",
           "widget": {
-            "name": "clip_l"
+            "name": "text"
           },
           "link": 36
-        },
-        {
-          "name": "t5xxl",
-          "type": "STRING",
-          "widget": {
-            "name": "t5xxl"
-          },
-          "link": 37
         }
       ],
       "outputs": [
@@ -492,12 +438,10 @@
       ],
       "title": "Positive Conditioning",
       "properties": {
-        "Node name for S&R": "CLIPTextEncodeFlux"
+        "Node name for S&R": "CLIPTextEncode"
       },
       "widgets_values": [
-        "Realistic photography, harry potter, an European photorealistic style teenage wizard boy with messy black hair, round wire-frame glasses, and bright green eyes, wearing a white shirt, burgundy and gold striped tie, and dark robes hugging daiyu_lin, a young East Asian photorealistic style woman in traditional Chinese hanfu dress, elaborate black updo hairstyle adorned with delicate white floral hairpins and ornaments, dangling red tassel earrings, soft pink and red color palette, gentle smile with knowing expression, autumn leaves blurred in the background, high quality, detailed",
-        "Realistic photography, harry potter, an European photorealistic style teenage wizard boy with messy black hair, round wire-frame glasses, and bright green eyes, wearing a white shirt, burgundy and gold striped tie, and dark robes hugging daiyu_lin, a young East Asian photorealistic style woman in traditional Chinese hanfu dress, elaborate black updo hairstyle adorned with delicate white floral hairpins and ornaments, dangling red tassel earrings, soft pink and red color palette, gentle smile with knowing expression, autumn leaves blurred in the background, high quality, detailed",
-        3.5
+        "A picture of two characters, a starry night scene with northern lights: harry potter, an European photorealistic style teenage wizard boy with messy black hair, round wire-frame glasses, and bright green eyes, wearing a white shirt, burgundy and gold striped tie, and dark robes and shalnark, an anime boy with blonde bob haircut and turquoise eyes, wearing purple and teal futuristic uniform, determined expression, digital anime art style"
       ]
     },
     {
@@ -657,7 +601,7 @@
         {
           "name": "masks",
           "type": "FREEFUSE_MASKS",
-          "link": 19
+          "link": 56
         },
         {
           "name": "freefuse_data",
@@ -688,7 +632,7 @@
       "widgets_values": [
         true,
         true,
-        5,
+        3,
         1,
         true,
         true,
@@ -746,9 +690,9 @@
         "Node name for S&R": "KSampler"
       },
       "widgets_values": [
-        42,
+        77,
         "fixed",
-        28,
+        4,
         1,
         "euler",
         "simple",
@@ -823,7 +767,7 @@
         "Node name for S&R": "SaveImage"
       },
       "widgets_values": [
-        "FreeFuse/flux_output"
+        "FreeFuse/flux2_klein_4b_output"
       ]
     },
     {
@@ -838,15 +782,16 @@
         2200
       ],
       "flags": {},
-      "order": 5,
+      "order": 4,
       "mode": 0,
       "inputs": [],
       "outputs": [],
+      "title": "Flux2/Klein 4B Parameters",
       "properties": {
         "text": ""
       },
       "widgets_values": [
-        "# FreeFuse Flux — Complete Parameter Guide\n# FreeFuse Flux — 完整参数指南\n\n═══════════════════════════════════════\n\n## Workflow Overview / 工作流概览\nEN: FreeFuse uses a two-phase approach for multi-LoRA composition:\n  Phase 1: Collect cross-attention → generate spatial masks\n  Phase 2: Apply masks to LoRAs → full denoising generation\n中: FreeFuse 采用两阶段方法实现多LoRA合成：\n  阶段1：收集交叉注意力 → 生成空间掩码\n  阶段2：对LoRA应用掩码 → 完整去噪生成\n\n═══════════════════════════════════════\n\n## 1. LoRA Loader / LoRA加载器\n• adapter_name (string): Unique ID, MUST match ConceptMap\n  适配器名称：必须与ConceptMap中一致\n• strength_model (float, default=1.0): LoRA strength for transformer\n  变换器的LoRA强度\n• strength_clip (float, default=1.0): LoRA strength for text encoder\n  文本编码器的LoRA强度\n\n## 2. Concept Map / 概念映射\n• concept_text: Description text for this concept\n  MUST appear verbatim in prompt\n  概念文本：必须原样出现在提示词中\n• enable_background (bool, default=true): Background as separate concept\n  将背景作为独立概念处理\n• background_text (string): Background description (optional)\n  背景描述（可选，留空则自动检测）\n\n## 3. Token Positions / Token位置\n• filter_meaningless (bool, default=true): Remove articles/prepositions\n  过滤冠词/介词等无意义词\n• filter_single_char (bool, default=true): Remove single-char tokens\n  过滤单字符token\n\n═══════════════════════════════════════\n\n## 4. Phase 1 Sampler / 阶段1采样器\n\n### Core Parameters / 核心参数\n• steps (int, default=28): Total steps, MUST match Phase 2\n  总步数：须与阶段2一致\n• collect_step (int, default=5): Collect attention then early-stop\n  收集注意力后提前终止的步骤\n• cfg (float, default=1.0): Flux MUST be 1.0\n  (guidance via CLIPTextEncodeFlux)\n  Flux必须1.0（引导通过编码器设置）\n• sampler_name: euler recommended for Flux\n  Flux推荐euler\n• scheduler: simple recommended for Flux\n  Flux推荐simple\n\n### Block Selection [Flux] / Block选择\n• collect_block (int, default=18): Double-block 0-56\n  双流block索引0-56用于注意力收集\n  ★ Block 18 recommended / 推荐Block 18\n• collect_region: [SDXL only, ignored for Flux]\n  [仅SDXL，Flux忽略此参数]\n• collect_tf_index: [SDXL only, ignored for Flux]\n  [仅SDXL，Flux忽略此参数]\n\n### Similarity / 相似度计算\n• temperature (float, default=0→auto:4000):\n  Softmax temperature. Higher = sharper maps\n  Softmax温度，越高→越锐利的映射\n• top_k_ratio (float, default=0.3):\n  Ratio of top-k tokens for similarity\n  top-k token比例\n\n### LoRA Control / LoRA控制\n• disable_lora_phase1 (bool, default=true ★):\n  Disable LoRA for cleaner base-model attention\n  禁用LoRA以获取更干净的注意力 ★推荐\n\n### Mask Post-processing / 掩码后处理\n• bg_scale (float, default=0.95):\n  Background scaling. Higher = more background\n  背景缩放，越高→背景越大\n• use_morphological_cleaning (bool, default=false):\n  Clean mask boundaries with morphology\n  形态学清理掩码边界\n\n### Mask Balancing (Advanced) / 掩码平衡（高级）\n• balance_iterations (int, 15): Balanced argmax iterations\n  平衡argmax迭代次数\n• balance_lr (float, 0.01): Bias update learning rate\n  偏置更新学习率\n• gravity_weight (float, 0.00004): Centroid attraction\n  质心吸引力（空间连贯性）\n• spatial_weight (float, 0.00004): Neighbor voting\n  邻域投票（空间平滑性）\n• momentum (float, 0.2): Smoothing between iters\n  迭代间平滑动量\n• centroid_margin (float, 0.0): Clamp from borders\n  质心边界夹紧\n• border_penalty (float, 0.0): Border assignment penalty\n  边界分配惩罚\n• anisotropy (float, 1.3): H-stretch >1=wider masks\n  各向异性 >1=更宽的掩码\n\n═══════════════════════════════════════\n\n## 5. Mask Applicator / 掩码应用器\n\n### LoRA Masking / LoRA掩码\n• enable_token_masking (bool, true):\n  Zero LoRA at other concepts' tokens\n  在其他概念token处清零LoRA输出\n\n### Attention Bias / 注意力偏置\n• enable_attention_bias (bool, true):\n  Apply attention bias to guide cross-attention\n  启用注意力偏置引导交叉注意力\n• bias_scale (float, 5.0): Negative bias strength\n  Suppress cross-LoRA attention (5-10 typical)\n  负偏置强度（抑制跨LoRA注意力，典型值5-10）\n• positive_bias_scale (float, 1.0):\n  Enhance same-LoRA attention\n  正偏置强度（增强同LoRA注意力）\n• bidirectional (bool, true) [Flux only]:\n  Bias both img→txt and txt→img\n  双向偏置 [Flux专用]\n• use_positive_bias (bool, true):\n  Add positive bias for matched pairs\n  为匹配对添加正偏置\n• bias_blocks: Which blocks get bias\n  应用偏置的block范围\n  - all: All blocks / 所有block\n  - double_stream_only: Double blocks [Flux]\n  - single_stream_only: Single blocks [Flux]\n  - last_half_double: Last half double blocks\n  - none: Disable / 禁用\n\n═══════════════════════════════════════\n\n## 6. KSampler (Phase 2)\n• seed: Same as Phase 1 / 与阶段1相同\n• steps: MUST match Phase 1 (28) / 须一致\n• cfg: MUST be 1.0 for Flux / Flux须1.0\n• sampler/scheduler: Match Phase 1 / 与阶段1一致\n• denoise: 1.0 for full generation / 完整生成"
+        "# FreeFuse Flux2.Klein 4B — Parameter Notes\n\nSynced to `test_freefuse_compare.py`:\n- steps=4, cfg=1.0, seed=77\n- collect_step=2, collect_block=6, temperature=0.0, top_k_ratio=0.1\n- attention bias: neg=3.0, pos=1.0, bidirectional=true"
       ],
       "color": "#224",
       "bgcolor": "#335"
@@ -860,7 +805,7 @@
       ],
       "size": [
         380,
-        666
+        710
       ],
       "flags": {},
       "order": 13,
@@ -890,6 +835,12 @@
           "name": "freefuse_data",
           "type": "FREEFUSE_DATA",
           "link": 14
+        },
+        {
+          "name": "sigmas",
+          "shape": 7,
+          "type": "SIGMAS",
+          "link": null
         }
       ],
       "outputs": [
@@ -906,8 +857,8 @@
           "type": "FREEFUSE_MASKS",
           "slot_index": 1,
           "links": [
-            19,
-            20
+            20,
+            51
           ]
         },
         {
@@ -924,18 +875,18 @@
         "Node name for S&R": "FreeFusePhase1Sampler"
       },
       "widgets_values": [
-        42,
-        28,
-        28,
-        5,
+        77,
+        4,
+        4,
+        2,
         1,
         "euler",
         "simple",
-        18,
-        18,
+        6,
+        6,
         "output_early ★ (recommended)",
         3,
-        4000,
+        0,
         0.1,
         true,
         0.95,
@@ -952,7 +903,7 @@
     },
     {
       "id": 10,
-      "type": "EmptySD3LatentImage",
+      "type": "EmptyFlux2LatentImage",
       "pos": [
         1320,
         651.2468911968602
@@ -962,7 +913,7 @@
         106
       ],
       "flags": {},
-      "order": 6,
+      "order": 5,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -979,7 +930,7 @@
       ],
       "title": "Latent Image Size",
       "properties": {
-        "Node name for S&R": "EmptySD3LatentImage"
+        "Node name for S&R": "EmptyFlux2LatentImage"
       },
       "widgets_values": [
         1024,
@@ -989,7 +940,7 @@
     },
     {
       "id": 11,
-      "type": "CLIPTextEncodeFlux",
+      "type": "CLIPTextEncode",
       "pos": [
         1320.78017412197,
         478.0312149293347
@@ -1021,12 +972,184 @@
       ],
       "title": "Negative Conditioning",
       "properties": {
-        "Node name for S&R": "CLIPTextEncodeFlux"
+        "Node name for S&R": "CLIPTextEncode"
+      },
+      "widgets_values": [
+        ""
+      ]
+    },
+    {
+      "id": 1,
+      "type": "UNETLoader",
+      "pos": [
+        50,
+        100
+      ],
+      "size": [
+        315,
+        82
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "slot_index": 0,
+          "links": [
+            1
+          ]
+        }
+      ],
+      "title": "Load Flux2/Klein 4B UNET",
+      "properties": {
+        "Node name for S&R": "UNETLoader",
+        "cnr_id": "comfy-core",
+        "models": [
+          {
+            "name": "flux-2-klein-base-4b.safetensors",
+            "url": "https://huggingface.co/Comfy-Org/flux2-klein/resolve/main/split_files/diffusion_models/flux-2-klein-base-4b.safetensors",
+            "directory": "diffusion_models"
+          },
+          {
+            "name": "flux-2-klein-4b.safetensors",
+            "url": "https://huggingface.co/Comfy-Org/flux2-klein/resolve/main/split_files/diffusion_models/flux-2-klein-4b.safetensors",
+            "directory": "diffusion_models"
+          }
+        ]
+      },
+      "widgets_values": [
+        "flux-2-klein-4b-fp8.safetensors",
+        "fp8_e4m3fn"
+      ]
+    },
+    {
+      "id": 102,
+      "type": "FreeFuseMaskTap",
+      "pos": [
+        1751.7259290786267,
+        170
+      ],
+      "size": [
+        252.853125,
+        358
+      ],
+      "flags": {},
+      "order": 18,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "mask_bank",
+          "type": "FREEFUSE_MASKS",
+          "link": 51
+        },
+        {
+          "name": "freefuse_data",
+          "shape": 7,
+          "type": "FREEFUSE_DATA",
+          "link": 52
+        }
+      ],
+      "outputs": [
+        {
+          "name": "mask_bank",
+          "type": "FREEFUSE_MASKS",
+          "slot_index": 0,
+          "links": [
+            53
+          ]
+        },
+        {
+          "name": "slot_names",
+          "type": "STRING",
+          "slot_index": 1,
+          "links": [
+            55
+          ]
+        },
+        {
+          "name": "slot_mask_images",
+          "type": "IMAGE",
+          "slot_index": 2,
+          "links": null
+        }
+      ],
+      "title": "Mask Tap (Optional Edit Branch)",
+      "properties": {
+        "Node name for S&R": "FreeFuseMaskTap"
       },
       "widgets_values": [
         "",
         "",
-        3.5
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "0",
+        "Open Mask Editor",
+        "Clear Current Slot"
+      ]
+    },
+    {
+      "id": 103,
+      "type": "FreeFuseMaskReassemble",
+      "pos": [
+        2311.725929078627,
+        270
+      ],
+      "size": [
+        250.03125,
+        102
+      ],
+      "flags": {},
+      "order": 19,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "original_mask_bank",
+          "type": "FREEFUSE_MASKS",
+          "link": 53
+        },
+        {
+          "name": "freefuse_data",
+          "shape": 7,
+          "type": "FREEFUSE_DATA",
+          "link": 54
+        },
+        {
+          "name": "slot_names",
+          "shape": 7,
+          "type": "STRING",
+          "widget": {
+            "name": "slot_names"
+          },
+          "link": 55
+        }
+      ],
+      "outputs": [
+        {
+          "name": "new_mask_bank",
+          "type": "FREEFUSE_MASKS",
+          "slot_index": 0,
+          "links": [
+            56
+          ]
+        }
+      ],
+      "title": "Mask Reassemble",
+      "properties": {
+        "Node name for S&R": "FreeFuseMaskReassemble"
+      },
+      "widgets_values": [
+        true,
+        true
       ]
     }
   ],
@@ -1152,14 +1275,6 @@
       "MODEL"
     ],
     [
-      19,
-      12,
-      1,
-      14,
-      1,
-      "FREEFUSE_MASKS"
-    ],
-    [
       20,
       12,
       1,
@@ -1240,14 +1355,6 @@
       "STRING"
     ],
     [
-      37,
-      20,
-      0,
-      9,
-      2,
-      "STRING"
-    ],
-    [
       38,
       11,
       0,
@@ -1286,6 +1393,54 @@
       16,
       3,
       "LATENT"
+    ],
+    [
+      51,
+      12,
+      1,
+      102,
+      0,
+      "FREEFUSE_MASKS"
+    ],
+    [
+      52,
+      8,
+      0,
+      102,
+      1,
+      "FREEFUSE_DATA"
+    ],
+    [
+      53,
+      102,
+      0,
+      103,
+      0,
+      "FREEFUSE_MASKS"
+    ],
+    [
+      54,
+      8,
+      0,
+      103,
+      1,
+      "FREEFUSE_DATA"
+    ],
+    [
+      55,
+      102,
+      1,
+      103,
+      2,
+      "STRING"
+    ],
+    [
+      56,
+      103,
+      0,
+      14,
+      1,
+      "FREEFUSE_MASKS"
     ]
   ],
   "groups": [
@@ -1373,49 +1528,49 @@
     "ds": {
       "scale": 0.6288129863327355,
       "offset": [
-        -1025.4246527754556,
-        -144.5362040523662
+        445.9923088017461,
+        47.53575752460232
       ]
     },
     "info": {
-      "name": "FreeFuse Flux Complete Workflow",
-      "description": "Two-phase FreeFuse workflow for Flux model with multi-LoRA composition. Uses DualCLIPLoader for CLIP+T5 (FP8), UNETLoader for Flux transformer (FP8), and CLIPTextEncodeFlux for guidance-conditioned prompts.",
+      "name": "FreeFuse Flux2.Klein 4B Complete Workflow",
+      "description": "Two-phase FreeFuse workflow for Flux2/Klein 4B with script-aligned prompt/LoRA defaults and official model links.",
       "author": "FreeFuse Team",
       "version": "3.1",
-      "notes": "Flux uses guidance embedding instead of CFG, so KSampler CFG should stay at 1.0. Guidance is provided via CLIPTextEncodeFlux. This workflow uses FP8 quantized models for reduced VRAM usage (~12GB for 1024x1024).",
+      "notes": "Model links synced from image_flux2_klein_text_to_image.json. Main generation settings are aligned to main_freefuse_flux2_klein_4b.py where node interfaces allow.",
       "models": {
         "text_encoders": [
           {
-            "name": "clip_l.safetensors",
-            "url": "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors"
-          },
-          {
-            "name": "t5xxl_fp8_e4m3fn.safetensors",
-            "url": "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp8_e4m3fn.safetensors"
+            "name": "qwen_3_4b.safetensors",
+            "url": "https://huggingface.co/Comfy-Org/flux2-klein/resolve/main/split_files/text_encoders/qwen_3_4b.safetensors"
           }
         ],
         "diffusion_models": [
           {
-            "name": "flux1-dev-fp8.safetensors",
-            "url": "https://huggingface.co/Comfy-Org/flux1-dev/resolve/main/flux1-dev-fp8.safetensors"
+            "name": "flux-2-klein-base-4b.safetensors",
+            "url": "https://huggingface.co/Comfy-Org/flux2-klein/resolve/main/split_files/diffusion_models/flux-2-klein-base-4b.safetensors"
+          },
+          {
+            "name": "flux-2-klein-4b.safetensors",
+            "url": "https://huggingface.co/Comfy-Org/flux2-klein/resolve/main/split_files/diffusion_models/flux-2-klein-4b.safetensors"
           }
         ],
         "vae": [
           {
-            "name": "ae.safetensors",
-            "url": "https://huggingface.co/Comfy-Org/Lumina_Image_2.0_Repackaged/resolve/main/split_files/vae/ae.safetensors"
+            "name": "flux2-vae.safetensors",
+            "url": "https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/vae/flux2-vae.safetensors"
           }
         ],
         "loras": [
           {
-            "name": "harry_potter_flux.safetensors",
-            "url": "https://huggingface.co/lsmpp/freefuse_community_loras/resolve/main/harry_potter.safetensors",
-            "note": "Download and rename to harry_potter_flux.safetensors"
+            "name": "harry_klein_4b.safetensors",
+            "url": "",
+            "note": "Custom LoRA used by main_freefuse_flux2_klein_4b.py"
           },
           {
-            "name": "daiyu_lin_flux.safetensors",
-            "url": "https://huggingface.co/lsmpp/freefuse_community_loras/resolve/main/daiyu_lin.safetensors",
-            "note": "Download and rename to daiyu_lin_flux.safetensors"
+            "name": "shalnark_klein_4b.safetensors",
+            "url": "",
+            "note": "Custom LoRA used by main_freefuse_flux2_klein_4b.py"
           }
         ]
       }

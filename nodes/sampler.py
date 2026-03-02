@@ -25,6 +25,7 @@ from ..freefuse_core.attention_replace import (
 )
 from ..freefuse_core.mask_utils import generate_masks
 from ..freefuse_core.token_utils import detect_model_type
+from ..freefuse_core.voting import create_consensus_similarity_maps
 
 # SDXL UNet region → ComfyUI (block_name, block_num) mapping
 # Each region contains N transformer blocks with cross-attention (attn2).
@@ -79,7 +80,11 @@ class FreeFusePhase1Sampler:
                 # Block selection — Flux
                 "collect_block": ("INT", {
                     "default": 18, "min": 0, "max": 56,
-                    "tooltip": "[Flux/Flux2 only] Flux uses transformer_blocks.<idx>; Flux2 uses single_transformer_blocks.<idx>. Ignored for SDXL."
+                    "tooltip": "[Flux/Flux2/Z-Image only] Flux uses transformer_blocks.<idx>; Flux2 uses single_transformer_blocks.<idx>; Z-Image uses layers.<idx>. Ignored for SDXL."
+                }),
+                "collect_block_end": ("INT", {
+                    "default": 18, "min": 0, "max": 56,
+                    "tooltip": "[Flux/Flux2/Z-Image only] Optional end block (inclusive). If > collect_block, collect a range and aggregate by majority voting."
                 }),
                 # Block selection — SDXL
                 "collect_region": (list(SDXL_COLLECT_REGION_MAP.keys()), {
@@ -161,7 +166,11 @@ attention at collect_step. This ensures correct noise levels while saving time.
 
 Block Selection (model-type aware):
 - Flux: Use 'collect_block' (INT 0-56) to pick transformer_blocks.<idx>.
+- Flux: Set 'collect_block_end' > 'collect_block' to aggregate a block range.
 - Flux2: Use 'collect_block' (INT 0-56) to pick single_transformer_blocks.<idx>.
+- Flux2: Set 'collect_block_end' > 'collect_block' to aggregate a block range.
+- Z-Image: Use 'collect_block' (INT 0-56) to pick layers.<idx>.
+- Z-Image: Set 'collect_block_end' > 'collect_block' to aggregate a block range.
 - SDXL: Use 'collect_region' + 'collect_tf_index' to pick a UNet cross-attention block.
   The recommended default is output_early (region) + 3 (tf_index).
   Other parameters for the non-active model type are simply ignored.
@@ -188,7 +197,7 @@ for Phase 2 generation with the same seed and steps."""
     
     def collect_masks(self, model, conditioning, neg_conditioning, latent,
                       freefuse_data, seed, steps, collect_step, cfg, sampler_name, scheduler,
-                      collect_block=18, 
+                      collect_block=18, collect_block_end=18,
                       collect_region="output_early ★ (recommended)", collect_tf_index=3,
                       temperature=0.0, top_k_ratio=0.3,
                       disable_lora_phase1=True, bg_scale=0.95, 
@@ -240,6 +249,7 @@ for Phase 2 generation with the same seed and steps."""
         # Collect at the specified step (0-indexed internally)
         freefuse_state.collect_step = collect_step - 1  # Convert to 0-indexed
         freefuse_state.collect_block = collect_block  # Used by Flux
+        freefuse_state.collect_block_end = collect_block_end
         freefuse_state.token_pos_maps = token_pos_maps
         freefuse_state.include_background = include_background
         
@@ -274,6 +284,10 @@ for Phase 2 generation with the same seed and steps."""
         
         # Build SDXL collect_blocks from region + tf_index (only used for SDXL)
         sdxl_collect_blocks = None
+        flux_collect_blocks = None
+        flux2_collect_blocks = None
+        z_image_collect_blocks = None
+        range_collect_blocks = None
         if patch_model_type == "sdxl":
             region_info = SDXL_COLLECT_REGION_MAP.get(collect_region)
             if region_info is None:
@@ -289,11 +303,43 @@ for Phase 2 generation with the same seed and steps."""
             sdxl_collect_blocks = [(block_name, block_num, tf_idx)]
             print(f"[FreeFuse] SDXL collect block: ({block_name}, {block_num}, {tf_idx}) "
                   f"from region='{collect_region}'")
+        elif patch_model_type in ("flux", "flux2", "z_image"):
+            range_start = int(collect_block)
+            range_end = int(collect_block_end)
+            if range_end < range_start:
+                print(
+                    f"[FreeFuse] Warning: collect_block_end ({range_end}) < collect_block ({range_start}); "
+                    f"using single block {range_start}."
+                )
+                range_end = range_start
+            freefuse_state.collect_block = range_start
+            freefuse_state.collect_block_end = range_end
+            if range_end > range_start:
+                range_collect_blocks = list(range(range_start, range_end + 1))
+                if patch_model_type == "flux":
+                    flux_collect_blocks = range_collect_blocks
+                elif patch_model_type == "flux2":
+                    flux2_collect_blocks = range_collect_blocks
+                else:
+                    z_image_collect_blocks = range_collect_blocks
+                print(
+                    f"[FreeFuse] {patch_model_type} range mode: collecting blocks {range_start}-{range_end} "
+                    f"({len(range_collect_blocks)} blocks)"
+                )
+        elif collect_block_end != collect_block:
+            # Keep SDXL behavior stable.
+            print(
+                f"[FreeFuse] Info: collect_block_end is ignored for {patch_model_type}; "
+                f"using collect_block={collect_block}."
+            )
             
         apply_freefuse_replace_patches(
             model_clone, freefuse_state, 
             model_type=patch_model_type,
             sdxl_collect_blocks=sdxl_collect_blocks,
+            flux_collect_blocks=flux_collect_blocks,
+            flux2_collect_blocks=flux2_collect_blocks,
+            z_image_collect_blocks=z_image_collect_blocks,
         )
         
         # Get latent info
@@ -324,13 +370,25 @@ for Phase 2 generation with the same seed and steps."""
             print(f"[FreeFuse] Z-Image sequence info: img_seq_len={z_img_seq_len}, cap_seq_len={z_cap_seq_len}")
         
         block_info = (
-            f"double_block {collect_block}"
+            (
+                f"double_block {collect_block}-{collect_block_end}"
+                if (patch_model_type == "flux" and range_collect_blocks is not None)
+                else f"double_block {collect_block}"
+            )
             if patch_model_type == "flux"
             else (
-                f"single_transformer_blocks.{collect_block}"
+                (
+                    f"single_transformer_blocks.{collect_block}-{collect_block_end}"
+                    if (patch_model_type == "flux2" and range_collect_blocks is not None)
+                    else f"single_transformer_blocks.{collect_block}"
+                )
                 if patch_model_type == "flux2"
                 else (
-                    f"layer {collect_block}"
+                    (
+                        f"layer {collect_block}-{collect_block_end}"
+                        if (patch_model_type == "z_image" and range_collect_blocks is not None)
+                        else f"layer {collect_block}"
+                    )
                     if patch_model_type == "z_image"
                     else f"{collect_region} tf={collect_tf_index}"
                 )
@@ -358,9 +416,29 @@ for Phase 2 generation with the same seed and steps."""
         def step_callback(step, x0, x, total_steps):
             freefuse_state.current_step = step
             # Check if we've collected similarity maps and can stop early
-            if freefuse_state.similarity_maps and step > freefuse_state.collect_step:
-                print(f"[FreeFuse] Early stopping at step {step + 1} (collected at step {collect_step})")
-                raise EarlyStopException("Similarity maps collected, stopping early")
+            if step <= freefuse_state.collect_step or not freefuse_state.similarity_maps:
+                return
+
+            if range_collect_blocks and len(range_collect_blocks) > 1:
+                collected = len(freefuse_state.collected_blocks)
+                expected = len(range_collect_blocks)
+                if collected >= expected:
+                    print(
+                        f"[FreeFuse] Early stopping at step {step + 1} "
+                        f"(range collected {collected}/{expected} blocks at step {collect_step}, "
+                        f"model={patch_model_type})"
+                    )
+                    raise EarlyStopException("Range similarity maps collected, stopping early")
+                if step > freefuse_state.collect_step + 1:
+                    print(
+                        f"[FreeFuse] Warning: only {collected}/{expected} range blocks collected; "
+                        f"stopping early with available blocks."
+                    )
+                    raise EarlyStopException("Partial range maps collected, stopping early")
+                return
+
+            print(f"[FreeFuse] Early stopping at step {step + 1} (collected at step {collect_step})")
+            raise EarlyStopException("Similarity maps collected, stopping early")
         
         # Run Phase 1 sampling (may terminate early via EarlyStopException)
         early_stopped = False
@@ -404,6 +482,73 @@ for Phase 2 generation with the same seed and steps."""
         # Get similarity maps directly from freefuse_state
         similarity_maps = freefuse_state.similarity_maps
 
+        # Optional range-mode aggregation for Flux / Flux2 / Z-Image.
+        if range_collect_blocks and len(range_collect_blocks) > 1:
+            block_sim_maps = freefuse_state.collected_outputs.get("block_similarity_maps", {})
+            if block_sim_maps:
+                print(
+                    f"[FreeFuse] Range mode collected block ids: "
+                    f"{sorted(int(k) for k in block_sim_maps.keys())}"
+                )
+                concept_names = []
+                seen = set()
+                # Prefer concept-map ordering when present.
+                for name in token_pos_maps.keys():
+                    for _, per_block in block_sim_maps.items():
+                        if name in per_block and name not in seen:
+                            concept_names.append(name)
+                            seen.add(name)
+                            break
+                # Add any extra keys found in collected maps.
+                for _, per_block in block_sim_maps.items():
+                    for name in per_block.keys():
+                        if name not in seen:
+                            concept_names.append(name)
+                            seen.add(name)
+
+                vote_h, vote_w, vote_len = self._resolve_range_voting_size(
+                    block_sim_maps=block_sim_maps,
+                    concept_names=concept_names,
+                    latent_h=latent_h,
+                    latent_w=latent_w,
+                )
+                if (vote_h * vote_w) != (latent_h * latent_w):
+                    print(
+                        f"[FreeFuse] Range mode voting size resolved to {vote_h}x{vote_w} "
+                        f"(len={vote_len}) from latent {latent_h}x{latent_w}."
+                    )
+
+                voted_maps = create_consensus_similarity_maps(
+                    all_blocks_similarity_maps=block_sim_maps,
+                    concept_names=concept_names,
+                    latent_h=vote_h,
+                    latent_w=vote_w,
+                    device=latent_image.device,
+                )
+                if voted_maps and self._has_similarity_signal(voted_maps):
+                    similarity_maps = voted_maps
+                    freefuse_state.similarity_maps = voted_maps
+                    print(
+                        f"[FreeFuse] Range mode voting aggregated {len(block_sim_maps)} blocks "
+                        f"into {len(voted_maps)} concept maps (model={patch_model_type})."
+                    )
+                else:
+                    print(
+                        f"[FreeFuse] Warning: range voting produced degenerate maps "
+                        f"(all-zero or empty). Falling back to last collected block maps. "
+                        f"(blocks_collected={len(block_sim_maps)}, model={patch_model_type})"
+                    )
+                    self._log_range_block_debug(
+                        block_sim_maps=block_sim_maps,
+                        concept_names=concept_names,
+                        expected_img_len=vote_len,
+                    )
+            else:
+                print(
+                    f"[FreeFuse] Warning: range mode enabled but no per-block maps were collected "
+                    f"(model={patch_model_type})."
+                )
+
         # Optional debug dump for Z-Image
         if os.environ.get("FREEFUSE_DEBUG_ZIMAGE") == "1" and patch_model_type == "z_image":
             debug_dir = os.path.join(os.getcwd(), "debug_z_image_comfyui")
@@ -414,6 +559,7 @@ for Phase 2 generation with the same seed and steps."""
                     "concepts": concepts,
                     "token_pos_maps": token_pos_maps,
                     "collect_block": collect_block,
+                    "collect_block_end": collect_block_end,
                     "collect_step": collect_step,
                     "top_k_ratio": top_k_ratio,
                     "temperature": auto_temperature,
@@ -501,9 +647,20 @@ for Phase 2 generation with the same seed and steps."""
             coverage = mask.sum() / mask.numel() * 100
             print(f"   {name}: coverage={coverage:.1f}%")
         
+        try:
+            phase1_seed = int(seed)
+        except Exception:
+            phase1_seed = seed
+        mask_bank = {
+            "masks": masks,
+            "similarity_maps": similarity_maps,
+            "metadata": {
+                "phase1_seed": phase1_seed,
+            },
+        }
         return (
-            model_clone, 
-            {"masks": masks, "similarity_maps": similarity_maps}, 
+            model_clone,
+            mask_bank,
             preview
         )
 
@@ -567,6 +724,120 @@ for Phase 2 generation with the same seed and steps."""
                 if abs(w - h) < abs(best_w - best_h):
                     best_h, best_w = h, w
         return (best_h, best_w)
+
+    @staticmethod
+    def _has_similarity_signal(similarity_maps: dict) -> bool:
+        """Return True if any similarity map contains positive finite values."""
+        if not similarity_maps:
+            return False
+        for sim_map in similarity_maps.values():
+            if not torch.is_tensor(sim_map):
+                continue
+            if sim_map.numel() == 0:
+                continue
+            finite = torch.isfinite(sim_map)
+            if torch.any(finite & (sim_map > 0)):
+                return True
+        return False
+
+    @staticmethod
+    def _log_range_block_debug(
+        block_sim_maps: dict,
+        concept_names: list,
+        expected_img_len: int,
+    ) -> None:
+        """Print per-block key/shape/value summaries for range-voting diagnostics."""
+        try:
+            for block_idx in sorted(block_sim_maps.keys()):
+                per_block = block_sim_maps.get(block_idx, {})
+                if not isinstance(per_block, dict):
+                    print(f"[FreeFuse] Range debug block {block_idx}: invalid payload type={type(per_block)}")
+                    continue
+
+                present = [name for name in concept_names if name in per_block]
+                missing = [name for name in concept_names if name not in per_block]
+                print(
+                    f"[FreeFuse] Range debug block {block_idx}: "
+                    f"present={len(present)}/{len(concept_names)}, missing={missing}"
+                )
+
+                for name in present:
+                    tensor = per_block.get(name)
+                    if not torch.is_tensor(tensor):
+                        print(
+                            f"  - {name}: non-tensor value type={type(tensor)}"
+                        )
+                        continue
+                    flat_len = int(tensor.reshape(1, -1).shape[1])
+                    tmin = float(tensor.min().item()) if tensor.numel() > 0 else 0.0
+                    tmax = float(tensor.max().item()) if tensor.numel() > 0 else 0.0
+                    tmean = float(tensor.mean().item()) if tensor.numel() > 0 else 0.0
+                    mismatch = "" if flat_len == expected_img_len else " [LEN_MISMATCH]"
+                    print(
+                        f"  - {name}: shape={tuple(tensor.shape)}, flat_len={flat_len}, "
+                        f"min={tmin:.6f}, max={tmax:.6f}, mean={tmean:.6f}{mismatch}"
+                    )
+        except Exception as e:
+            print(f"[FreeFuse] Range debug logging failed: {e}")
+
+    @staticmethod
+    def _extract_sim_map_len(sim_map: torch.Tensor) -> int:
+        """Extract flattened image-token length from a similarity map tensor."""
+        if sim_map is None or not torch.is_tensor(sim_map) or sim_map.numel() == 0:
+            return 0
+        if sim_map.dim() == 3:
+            # (B, N, 1) or (B, 1, N)
+            if sim_map.shape[-1] == 1:
+                return int(sim_map.shape[1])
+            if sim_map.shape[1] == 1:
+                return int(sim_map.shape[2])
+        if sim_map.dim() == 2:
+            # (B, N)
+            return int(sim_map.shape[1])
+        if sim_map.dim() == 1:
+            return int(sim_map.shape[0])
+        return int(sim_map.reshape(1, -1).shape[1])
+
+    def _resolve_range_voting_size(
+        self,
+        block_sim_maps: dict,
+        concept_names: list,
+        latent_h: int,
+        latent_w: int,
+    ) -> tuple:
+        """Resolve voting spatial size from collected sim maps."""
+        inferred_len = 0
+        for _, per_block in block_sim_maps.items():
+            if not isinstance(per_block, dict):
+                continue
+            # Prefer known concept ordering, then any available key.
+            candidate_names = concept_names if concept_names else list(per_block.keys())
+            for name in candidate_names:
+                if name not in per_block:
+                    continue
+                inferred_len = self._extract_sim_map_len(per_block.get(name))
+                if inferred_len > 0:
+                    break
+            if inferred_len > 0:
+                break
+
+        if inferred_len <= 0:
+            inferred_len = int(latent_h * latent_w)
+
+        vote_h, vote_w = self._infer_spatial_size_from_latent(
+            seq_len=inferred_len,
+            lat_h=latent_h,
+            lat_w=latent_w,
+        )
+        if vote_h * vote_w != inferred_len:
+            # Last-resort square fallback.
+            side = int(round(inferred_len ** 0.5))
+            if side > 0 and side * side == inferred_len:
+                vote_h, vote_w = side, side
+            else:
+                vote_h, vote_w = latent_h, latent_w
+                inferred_len = vote_h * vote_w
+        return int(vote_h), int(vote_w), int(inferred_len)
 
     def _process_similarity_maps(self, similarity_maps, latent_size):
         """Convert similarity maps to spatial format."""

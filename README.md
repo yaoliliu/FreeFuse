@@ -63,7 +63,8 @@ Example:
 
 - `steps`: Total steps for Phase 2 (keep consistent for the same noise schedule)
 - `collect_step`: Which step to collect attention and early-stop
-- `collect_block`: Transformer block to extract attention (Flux: `transformer_blocks.<idx>`, Flux2: `single_transformer_blocks.<idx>`, SDXL ignored)
+- `collect_block`: Transformer block/layer to extract attention (Flux: `transformer_blocks.<idx>`, Flux2: `single_transformer_blocks.<idx>`, Z-Image: `layers.<idx>`, SDXL ignored)
+- `collect_block_end`: Optional inclusive end index for range-mode collection (Flux/Flux2/Z-Image). Set `collect_block_end > collect_block` to enable majority-vote aggregation across blocks.
 - `temperature`: Softmax temperature for similarity; 0 = auto (Flux/Flux2=4000, SDXL=300)
 - `top_k_ratio`: Ratio of top-k tokens used for similarity
 - `disable_lora_phase1`: Disable LoRA in Phase 1 (recommended for cleaner attention)

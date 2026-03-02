@@ -173,6 +173,7 @@ def test_3_freefuse_state():
     assert state.phase == "collect", f"Expected phase='collect', got {state.phase}"
     assert state.collect_step == 4, f"Expected collect_step=4, got {state.collect_step}"
     assert state.collect_block == 18, f"Expected collect_block=18, got {state.collect_block}"
+    assert state.collect_block_end == 18, f"Expected collect_block_end=18, got {state.collect_block_end}"
     print(f"✅ Initial state: phase={state.phase}, collect_step={state.collect_step}, collect_block={state.collect_block}")
     
     # Test is_collect_step
@@ -181,6 +182,15 @@ def test_3_freefuse_state():
     assert state.is_collect_step(4, 17) == False
     assert state.is_collect_step(3, 18) == False
     print("✅ is_collect_step() works correctly")
+
+    # Test range-mode block selection
+    state.collect_block = 16
+    state.collect_block_end = 18
+    assert state.is_collect_step(4, 16) == True
+    assert state.is_collect_step(4, 17) == True
+    assert state.is_collect_step(4, 18) == True
+    assert state.is_collect_step(4, 19) == False
+    print("✅ range-mode is_collect_step() works correctly")
     
     # Test token_pos_maps
     state.token_pos_maps = {
@@ -192,8 +202,12 @@ def test_3_freefuse_state():
     
     # Test reset
     state.similarity_maps = {"test": torch.randn(1, 10)}
+    state.collected_outputs["block_similarity_maps"] = {16: {"x": torch.randn(1, 4, 1)}}
+    state.collected_blocks.add(16)
     state.reset_collection()
     assert len(state.similarity_maps) == 0
+    assert len(state.collected_outputs.get("block_similarity_maps", {})) == 0
+    assert len(state.collected_blocks) == 0
     print("✅ reset_collection() works")
     
     print("\n✅ FreeFuseState works correctly!")

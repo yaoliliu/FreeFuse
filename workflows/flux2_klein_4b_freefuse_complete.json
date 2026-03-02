@@ -20,6 +20,7 @@
       "mode": 0,
       "inputs": [],
       "outputs": [],
+      "title": "Flux2/Klein 4B Model Guide",
       "properties": {
         "text": ""
       },
@@ -27,55 +28,7 @@
         "# FreeFuse Flux2.Klein 4B — Model Guide\n# FreeFuse Flux2.Klein 4B — 模型指南\n\nModel links synced from ComfyUI official Flux2-Klein workflow:\n- diffusion_models/flux-2-klein-base-4b.safetensors\n- diffusion_models/flux-2-klein-4b.safetensors\n- text_encoders/qwen_3_4b.safetensors\n- vae/flux2-vae.safetensors"
       ],
       "color": "#432",
-      "bgcolor": "#653",
-      "title": "Flux2/Klein 4B Model Guide"
-    },
-    {
-      "id": 1,
-      "type": "UNETLoader",
-      "pos": [
-        50,
-        100
-      ],
-      "size": [
-        315,
-        82
-      ],
-      "flags": {},
-      "order": 1,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "MODEL",
-          "type": "MODEL",
-          "slot_index": 0,
-          "links": [
-            1
-          ]
-        }
-      ],
-      "title": "Load Flux2/Klein 4B UNET",
-      "properties": {
-        "Node name for S&R": "UNETLoader",
-        "cnr_id": "comfy-core",
-        "models": [
-          {
-            "name": "flux-2-klein-base-4b.safetensors",
-            "url": "https://huggingface.co/Comfy-Org/flux2-klein/resolve/main/split_files/diffusion_models/flux-2-klein-base-4b.safetensors",
-            "directory": "diffusion_models"
-          },
-          {
-            "name": "flux-2-klein-4b.safetensors",
-            "url": "https://huggingface.co/Comfy-Org/flux2-klein/resolve/main/split_files/diffusion_models/flux-2-klein-4b.safetensors",
-            "directory": "diffusion_models"
-          }
-        ]
-      },
-      "widgets_values": [
-        "flux-2-klein-4b.safetensors",
-        "fp8_e4m3fn"
-      ]
+      "bgcolor": "#653"
     },
     {
       "id": 2,
@@ -89,7 +42,7 @@
         130
       ],
       "flags": {},
-      "order": 2,
+      "order": 1,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -132,7 +85,7 @@
         58
       ],
       "flags": {},
-      "order": 3,
+      "order": 2,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -362,7 +315,7 @@
         130
       ],
       "flags": {},
-      "order": 4,
+      "order": 3,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -827,10 +780,11 @@
         2200
       ],
       "flags": {},
-      "order": 5,
+      "order": 4,
       "mode": 0,
       "inputs": [],
       "outputs": [],
+      "title": "Flux2/Klein 4B Parameters",
       "properties": {
         "text": ""
       },
@@ -838,8 +792,7 @@
         "# FreeFuse Flux2.Klein 4B — Parameter Notes\n\nSynced to `test_freefuse_compare.py`:\n- steps=4, cfg=1.0, seed=77\n- collect_step=2, collect_block=6, temperature=0.0, top_k_ratio=0.1\n- attention bias: neg=3.0, pos=1.0, bidirectional=true"
       ],
       "color": "#224",
-      "bgcolor": "#335",
-      "title": "Flux2/Klein 4B Parameters"
+      "bgcolor": "#335"
     },
     {
       "id": 12,
@@ -850,7 +803,7 @@
       ],
       "size": [
         380,
-        666
+        710
       ],
       "flags": {},
       "order": 13,
@@ -880,6 +833,12 @@
           "name": "freefuse_data",
           "type": "FREEFUSE_DATA",
           "link": 14
+        },
+        {
+          "name": "sigmas",
+          "shape": 7,
+          "type": "SIGMAS",
+          "link": null
         }
       ],
       "outputs": [
@@ -922,6 +881,7 @@
         "euler",
         "simple",
         6,
+        6,
         "output_early ★ (recommended)",
         3,
         0,
@@ -951,7 +911,7 @@
         106
       ],
       "flags": {},
-      "order": 6,
+      "order": 5,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -1014,6 +974,53 @@
       },
       "widgets_values": [
         ""
+      ]
+    },
+    {
+      "id": 1,
+      "type": "UNETLoader",
+      "pos": [
+        50,
+        100
+      ],
+      "size": [
+        315,
+        82
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "slot_index": 0,
+          "links": [
+            1
+          ]
+        }
+      ],
+      "title": "Load Flux2/Klein 4B UNET",
+      "properties": {
+        "Node name for S&R": "UNETLoader",
+        "cnr_id": "comfy-core",
+        "models": [
+          {
+            "name": "flux-2-klein-base-4b.safetensors",
+            "url": "https://huggingface.co/Comfy-Org/flux2-klein/resolve/main/split_files/diffusion_models/flux-2-klein-base-4b.safetensors",
+            "directory": "diffusion_models"
+          },
+          {
+            "name": "flux-2-klein-4b.safetensors",
+            "url": "https://huggingface.co/Comfy-Org/flux2-klein/resolve/main/split_files/diffusion_models/flux-2-klein-4b.safetensors",
+            "directory": "diffusion_models"
+          }
+        ]
+      },
+      "widgets_values": [
+        "flux-2-klein-4b-fp8.safetensors",
+        "fp8_e4m3fn"
       ]
     }
   ],
@@ -1352,8 +1359,8 @@
     "ds": {
       "scale": 0.6288129863327355,
       "offset": [
-        -1025.4246527754556,
-        -144.5362040523662
+        445.9923088017461,
+        47.53575752460232
       ]
     },
     "info": {

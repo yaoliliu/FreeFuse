@@ -32,6 +32,8 @@ from .nodes import (
     # Mask application
     FreeFuseMaskApplicator,
     FreeFuseMaskDebug,
+    FreeFuseMaskTap,
+    FreeFuseMaskReassemble,
     # Preview
     FreeFuseMaskPreview,
     # Mappings
@@ -39,6 +41,7 @@ from .nodes import (
     NODE_DISPLAY_NAME_MAPPINGS,
 )
 
-__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
-__version__ = "0.2.1"
+WEB_DIRECTORY = "./web"
 
+__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
+__version__ = "0.2.1"

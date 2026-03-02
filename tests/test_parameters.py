@@ -203,6 +203,7 @@ class TestConfig:
     bias_scale: float
     positive_bias_scale: float
     description: str = ""
+    collect_block_end: Optional[int] = None
 
 
 # Test configurations for different scenarios
@@ -290,6 +291,21 @@ BLOCK_TESTS = [
         use_morphological_cleaning=False, balance_iterations=15,
         bias_scale=5.0, positive_bias_scale=1.0,
         description="Single stream block (Flux only)"
+    ),
+    TestConfig(
+        name="block_range_16_20",
+        width=1024, height=1024,
+        collect_block=16,
+        collect_block_end=20,
+        temperature=0,
+        top_k_ratio=0.3,
+        disable_lora_phase1=True,
+        bg_scale=0.95,
+        use_morphological_cleaning=False,
+        balance_iterations=15,
+        bias_scale=5.0,
+        positive_bias_scale=1.0,
+        description="Flux range-mode collection (16..20)"
     ),
 ]
 
@@ -447,12 +463,14 @@ def _make_klein_test(
     balance_iterations: int = 15,
     bias_scale: float = 1.0,
     positive_bias_scale: float = 1.0,
+    collect_block_end: Optional[int] = None,
 ) -> TestConfig:
     return TestConfig(
         name=name,
         width=width,
         height=height,
         collect_block=collect_block,
+        collect_block_end=collect_block_end,
         temperature=temperature,
         top_k_ratio=top_k_ratio,
         disable_lora_phase1=disable_lora_phase1,
@@ -505,6 +523,12 @@ KLEIN4B_BLOCK_TESTS = [
         "klein4b_block_9", 1024, 1024, 9,
         "Klein4B later single-stream block",
         top_k_ratio=0.1, bias_scale=4.0, positive_bias_scale=2.0,
+    ),
+    _make_klein_test(
+        "klein4b_block_range_4_8", 1024, 1024, 4,
+        "Klein4B range-mode collection (single blocks 4..8)",
+        top_k_ratio=0.1, bias_scale=4.0, positive_bias_scale=2.0,
+        collect_block_end=8,
     ),
 ]
 
@@ -626,6 +650,12 @@ KLEIN9B_BLOCK_TESTS = [
         "klein9b_block_6", 1024, 1024, 6,
         "Klein9B later single-stream block",
         top_k_ratio=0.1, bias_scale=1.0, positive_bias_scale=1.0,
+    ),
+    _make_klein_test(
+        "klein9b_block_range_2_5", 1024, 1024, 2,
+        "Klein9B range-mode collection (single blocks 2..5)",
+        top_k_ratio=0.1, bias_scale=1.0, positive_bias_scale=1.0,
+        collect_block_end=5,
     ),
 ]
 
@@ -768,6 +798,15 @@ ZIMAGE_BLOCK_TESTS = [
         use_morphological_cleaning=True, balance_iterations=15,
         bias_scale=4.0, positive_bias_scale=2.0,
         description="Z-Image late block"
+    ),
+    TestConfig(
+        name="zimg_block_range_16_20",
+        width=1024, height=1024,
+        collect_block=16, collect_block_end=20, temperature=0, top_k_ratio=0.1,
+        disable_lora_phase1=True, bg_scale=0.95,
+        use_morphological_cleaning=True, balance_iterations=15,
+        bias_scale=4.0, positive_bias_scale=2.0,
+        description="Z-Image range-mode collection (layers 16..20)"
     ),
 ]
 
@@ -1281,7 +1320,16 @@ def run_single_test(
     print(f"Description: {config.description}")
     print(f"{'='*70}")
     print(f"  Width: {config.width}, Height: {config.height}")
-    print(f"  Block: {config.collect_block}, Temp: {config.temperature}, TopK: {config.top_k_ratio}")
+    block_end = (
+        config.collect_block_end
+        if config.collect_block_end is not None
+        else config.collect_block
+    )
+    if block_end != config.collect_block:
+        block_desc = f"{config.collect_block}..{block_end}"
+    else:
+        block_desc = str(config.collect_block)
+    print(f"  Block: {block_desc}, Temp: {config.temperature}, TopK: {config.top_k_ratio}")
     print(f"  LoRA Phase1: {'disabled' if config.disable_lora_phase1 else 'enabled'}")
     print(f"  BG Scale: {config.bg_scale}, Morph: {config.use_morphological_cleaning}, Iters: {config.balance_iterations}")
     print(f"  Bias: neg={config.bias_scale}, pos={config.positive_bias_scale}")
@@ -1359,6 +1407,11 @@ def run_single_test(
                 scheduler=p1_scheduler,
                 sigmas=p1_sigmas,
                 collect_block=config.collect_block,
+                collect_block_end=(
+                    config.collect_block_end
+                    if config.collect_block_end is not None
+                    else config.collect_block
+                ),
                 temperature=config.temperature,
                 top_k_ratio=config.top_k_ratio,
                 disable_lora_phase1=config.disable_lora_phase1,

@@ -20,6 +20,7 @@
       "mode": 0,
       "inputs": [],
       "outputs": [],
+      "title": "Flux2/Klein 9B Model Guide",
       "properties": {
         "text": ""
       },
@@ -27,8 +28,7 @@
         "# FreeFuse Flux2.Klein 9B — Model Guide\n# FreeFuse Flux2.Klein 9B — 模型指南\n\nModel links synced from ComfyUI official Flux2-Text2Image 9B workflow:\n- diffusion_models/flux-2-klein-base-9b-fp8.safetensors\n- diffusion_models/flux-2-klein-9b-fp8.safetensors\n- text_encoders/qwen_3_8b_fp8mixed.safetensors\n- vae/flux2-vae.safetensors\n\nNote: 9B diffusion links are repo pages in the source workflow and may require accepting BFL terms first."
       ],
       "color": "#432",
-      "bgcolor": "#653",
-      "title": "Flux2/Klein 9B Model Guide"
+      "bgcolor": "#653"
     },
     {
       "id": 1,
@@ -302,92 +302,6 @@
       ]
     },
     {
-      "id": 6,
-      "type": "FreeFuseConceptMap",
-      "pos": [
-        850,
-        100
-      ],
-      "size": [
-        380,
-        424.0000000000001
-      ],
-      "flags": {},
-      "order": 11,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "freefuse_data",
-          "shape": 7,
-          "type": "FREEFUSE_DATA",
-          "link": 10
-        }
-      ],
-      "outputs": [
-        {
-          "name": "freefuse_data",
-          "type": "FREEFUSE_DATA",
-          "slot_index": 0,
-          "links": [
-            11
-          ]
-        }
-      ],
-      "title": "Concept Mapping",
-      "properties": {
-        "Node name for S&R": "FreeFuseConceptMap"
-      },
-      "widgets_values": [
-        "harry_klein",
-        "harry potter, an European photorealistic style teenage wizard boy with messy black hair, round wire-frame glasses, and bright green eyes, wearing a white shirt, burgundy and gold striped tie, and dark robes",
-        "shalnark_klein",
-        "shalnark, an anime boy with blonde bob haircut and turquoise eyes, wearing purple and teal futuristic uniform, determined expression, digital anime art style",
-        "",
-        "",
-        "",
-        "",
-        true,
-        ""
-      ]
-    },
-    {
-      "id": 20,
-      "type": "PrimitiveNode",
-      "pos": [
-        850,
-        500
-      ],
-      "size": [
-        380,
-        130
-      ],
-      "flags": {},
-      "order": 4,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "STRING",
-          "type": "STRING",
-          "widget": {
-            "name": "prompt"
-          },
-          "slot_index": 0,
-          "links": [
-            35,
-            36
-          ]
-        }
-      ],
-      "title": "Main Prompt",
-      "properties": {
-        "Run widget replace on values": false
-      },
-      "widgets_values": [
-        "A picture of two characters, a starry night scene with northern lights: harry potter, an European photorealistic style teenage wizard boy with messy black hair, round wire-frame glasses, and bright green eyes, wearing a white shirt, burgundy and gold striped tie, and dark robes and shalnark, an anime boy with blonde bob haircut and turquoise eyes, wearing purple and teal futuristic uniform, determined expression, digital anime art style"
-      ]
-    },
-    {
       "id": 8,
       "type": "FreeFuseTokenPositions",
       "pos": [
@@ -436,7 +350,7 @@
         "Node name for S&R": "FreeFuseTokenPositions"
       },
       "widgets_values": [
-        "A picture of two characters, a starry night scene with northern lights: harry potter, an European photorealistic style teenage wizard boy with messy black hair, round wire-frame glasses, and bright green eyes, wearing a white shirt, burgundy and gold striped tie, and dark robes and shalnark, an anime boy with blonde bob haircut and turquoise eyes, wearing purple and teal futuristic uniform, determined expression, digital anime art style",
+        "A picture of two characters, a starry night scene with northern lights: harry potter, an European photorealistic style teenage wizard boy with messy black hair, round wire-frame glasses, and bright green eyes, wearing a white shirt, burgundy and gold striped tie, and dark robes and shalnark, an anime boy with blonde haircut and turquoise eyes, wearing purple and teal futuristic uniform, determined expression, digital anime art style",
         true,
         true
       ]
@@ -486,7 +400,7 @@
         "Node name for S&R": "CLIPTextEncode"
       },
       "widgets_values": [
-        "A picture of two characters, a starry night scene with northern lights: harry potter, an European photorealistic style teenage wizard boy with messy black hair, round wire-frame glasses, and bright green eyes, wearing a white shirt, burgundy and gold striped tie, and dark robes and shalnark, an anime boy with blonde bob haircut and turquoise eyes, wearing purple and teal futuristic uniform, determined expression, digital anime art style"
+        "A picture of two characters, a starry night scene with northern lights: harry potter, an European photorealistic style teenage wizard boy with messy black hair, round wire-frame glasses, and bright green eyes, wearing a white shirt, burgundy and gold striped tie, and dark robes and shalnark, an anime boy with blonde haircut and turquoise eyes, wearing purple and teal futuristic uniform, determined expression, digital anime art style"
       ]
     },
     {
@@ -827,10 +741,11 @@
         2200
       ],
       "flags": {},
-      "order": 5,
+      "order": 4,
       "mode": 0,
       "inputs": [],
       "outputs": [],
+      "title": "Flux2/Klein 9B Parameters",
       "properties": {
         "text": ""
       },
@@ -838,8 +753,7 @@
         "# FreeFuse Flux2.Klein 9B — Parameter Notes\n\nSynced to `test_freefuse_compare.py`:\n- steps=4, cfg=1.0, seed=0\n- collect_step=2, collect_block=3, temperature=0.0, top_k_ratio=0.1\n- attention bias: neg=3.0, pos=1.0, bidirectional=true"
       ],
       "color": "#224",
-      "bgcolor": "#335",
-      "title": "Flux2/Klein 9B Parameters"
+      "bgcolor": "#335"
     },
     {
       "id": 12,
@@ -850,7 +764,7 @@
       ],
       "size": [
         380,
-        666
+        710
       ],
       "flags": {},
       "order": 13,
@@ -880,6 +794,12 @@
           "name": "freefuse_data",
           "type": "FREEFUSE_DATA",
           "link": 14
+        },
+        {
+          "name": "sigmas",
+          "shape": 7,
+          "type": "SIGMAS",
+          "link": null
         }
       ],
       "outputs": [
@@ -922,6 +842,7 @@
         "euler",
         "simple",
         3,
+        3,
         "output_early ★ (recommended)",
         3,
         0,
@@ -951,7 +872,7 @@
         106
       ],
       "flags": {},
-      "order": 6,
+      "order": 5,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -1014,6 +935,92 @@
       },
       "widgets_values": [
         ""
+      ]
+    },
+    {
+      "id": 6,
+      "type": "FreeFuseConceptMap",
+      "pos": [
+        850,
+        100
+      ],
+      "size": [
+        380,
+        424.0000000000001
+      ],
+      "flags": {},
+      "order": 11,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "freefuse_data",
+          "shape": 7,
+          "type": "FREEFUSE_DATA",
+          "link": 10
+        }
+      ],
+      "outputs": [
+        {
+          "name": "freefuse_data",
+          "type": "FREEFUSE_DATA",
+          "slot_index": 0,
+          "links": [
+            11
+          ]
+        }
+      ],
+      "title": "Concept Mapping",
+      "properties": {
+        "Node name for S&R": "FreeFuseConceptMap"
+      },
+      "widgets_values": [
+        "harry_klein",
+        "harry potter, an European photorealistic style teenage wizard boy with messy black hair, round wire-frame glasses, and bright green eyes, wearing a white shirt, burgundy and gold striped tie, and dark robes",
+        "shalnark_klein",
+        "shalnark, an anime boy with blonde haircut and turquoise eyes, wearing purple and teal futuristic uniform, determined expression, digital anime art style",
+        "",
+        "",
+        "",
+        "",
+        true,
+        ""
+      ]
+    },
+    {
+      "id": 20,
+      "type": "PrimitiveNode",
+      "pos": [
+        850,
+        500
+      ],
+      "size": [
+        380,
+        130
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "widget": {
+            "name": "prompt"
+          },
+          "slot_index": 0,
+          "links": [
+            35,
+            36
+          ]
+        }
+      ],
+      "title": "Main Prompt",
+      "properties": {
+        "Run widget replace on values": false
+      },
+      "widgets_values": [
+        "A picture of two characters, a starry night scene with northern lights: harry potter, an European photorealistic style teenage wizard boy with messy black hair, round wire-frame glasses, and bright green eyes, wearing a white shirt, burgundy and gold striped tie, and dark robes and shalnark, an anime boy with blonde haircut and turquoise eyes, wearing purple and teal futuristic uniform, determined expression, digital anime art style"
       ]
     }
   ],
@@ -1352,8 +1359,8 @@
     "ds": {
       "scale": 0.6288129863327355,
       "offset": [
-        -1025.4246527754556,
-        -144.5362040523662
+        434.87264738893197,
+        77.0432389273193
       ]
     },
     "info": {
