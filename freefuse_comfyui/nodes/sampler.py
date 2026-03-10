@@ -24,7 +24,7 @@ from ..freefuse_core.attention_replace import (
     compute_z_image_similarity_maps,
 )
 from ..freefuse_core.mask_utils import generate_masks
-from ..freefuse_core.token_utils import detect_model_type
+from ..freefuse_core.voting import create_consensus_similarity_maps
 
 # SDXL UNet region → ComfyUI (block_name, block_num) mapping
 # Each region contains N transformer blocks with cross-attention (attn2).
@@ -75,11 +75,14 @@ class FreeFusePhase1Sampler:
                 "scheduler": (comfy.samplers.KSampler.SCHEDULERS,),
             },
             "optional": {
-                "sigmas": ("SIGMAS",),
                 # Block selection — Flux
                 "collect_block": ("INT", {
                     "default": 18, "min": 0, "max": 56,
-                    "tooltip": "[Flux/Flux2 only] Flux uses transformer_blocks.<idx>; Flux2 uses single_transformer_blocks.<idx>. Ignored for SDXL."
+                    "tooltip": "[Flux only] Which double_block to collect attention from (0-56). Ignored for SDXL."
+                }),
+                "collect_block_end": ("INT", {
+                    "default": 18, "min": 0, "max": 56,
+                    "tooltip": "[Flux only] End block for range collection (inclusive). If > collect_block, collects from all blocks in range and uses pixel voting. Ignored for SDXL."
                 }),
                 # Block selection — SDXL
                 "collect_region": (list(SDXL_COLLECT_REGION_MAP.keys()), {
@@ -146,11 +149,17 @@ class FreeFusePhase1Sampler:
                     "default": 1.3, "min": 0.5, "max": 3.0, "step": 0.1,
                     "tooltip": "Horizontal stretch factor for spatial coordinates (>1 = prefer wider masks, <1 = prefer taller masks)"
                 }),
+                # Preview parameters
+                "preview_sensitivity": ("FLOAT", {
+                    "default": 5.0, "min": 1.0, "max": 20.0, "step": 0.5,
+                    "tooltip": "Contrast for mask preview visualization (higher = meer contrast)"
+                }),
             }
         }
     
-    RETURN_TYPES = ("MODEL", "FREEFUSE_MASKS", "IMAGE")
-    RETURN_NAMES = ("model", "masks", "mask_preview")
+    # 👇 4 outputs
+    RETURN_TYPES = ("MODEL", "FREEFUSE_MASKS", "IMAGE", "FREEFUSE_MASKS")
+    RETURN_NAMES = ("model", "masks", "mask_preview", "raw_similarity")
     FUNCTION = "collect_masks"
     CATEGORY = "FreeFuse"
     
@@ -160,8 +169,7 @@ Uses full sigma schedule (e.g., 28 steps) but stops early after collecting
 attention at collect_step. This ensures correct noise levels while saving time.
 
 Block Selection (model-type aware):
-- Flux: Use 'collect_block' (INT 0-56) to pick transformer_blocks.<idx>.
-- Flux2: Use 'collect_block' (INT 0-56) to pick single_transformer_blocks.<idx>.
+- Flux: Use 'collect_block' (INT 0-56) to pick a double_block.
 - SDXL: Use 'collect_region' + 'collect_tf_index' to pick a UNet cross-attention block.
   The recommended default is output_early (region) + 3 (tf_index).
   Other parameters for the non-active model type are simply ignored.
@@ -183,19 +191,22 @@ Mask Balancing Parameters (Advanced):
 - border_penalty: Penalize concept assignment near borders
 - anisotropy: Horizontal stretch factor (>1 prefers wider masks)
 
+Preview Parameters:
+- preview_sensitivity: Contrast enhancement for mask preview visualization
+
 After this node, connect the model output to a standard KSampler
 for Phase 2 generation with the same seed and steps."""
     
     def collect_masks(self, model, conditioning, neg_conditioning, latent,
                       freefuse_data, seed, steps, collect_step, cfg, sampler_name, scheduler,
-                      collect_block=18, 
+                      collect_block=18, collect_block_end=18,
                       collect_region="output_early ★ (recommended)", collect_tf_index=3,
                       temperature=0.0, top_k_ratio=0.3,
-                      disable_lora_phase1=True, bg_scale=0.95, 
+                      disable_lora_phase1=True, bg_scale=0.95,
                       use_morphological_cleaning=True, balance_iterations=15,
                       balance_lr=0.01, gravity_weight=0.00004, spatial_weight=0.00004,
                       momentum=0.2, centroid_margin=0.0, border_penalty=0.0,
-                      anisotropy=1.3, sigmas=None):
+                      anisotropy=1.3, preview_sensitivity=5.0):
         
         concepts = freefuse_data.get("concepts", {})
         settings = freefuse_data.get("settings", {})
@@ -206,7 +217,8 @@ for Phase 2 generation with the same seed and steps."""
             print("[FreeFuse] Warning: No concepts defined, returning empty masks")
             empty_masks = {}
             preview = torch.zeros(1, 64, 64, 3)
-            return (model, {"masks": empty_masks}, preview)
+            empty_raw = {"masks": {}, "similarity_maps": {}}
+            return (model, {"masks": empty_masks}, preview, empty_raw)
         
         # Check if token positions are available
         if not token_pos_maps:
@@ -215,11 +227,12 @@ for Phase 2 generation with the same seed and steps."""
             # Create fallback uniform masks
             latent_image = latent["samples"]
             latent_h, latent_w = latent_image.shape[2], latent_image.shape[3]
-            img_h, img_w = self._latent_to_image_size(model, latent_h, latent_w)
+            img_h, img_w = latent_h * 8, latent_w * 8
             
             masks = {name: torch.ones(latent_h, latent_w) for name in concepts}
-            preview = self._create_preview(masks, img_w, img_h)
-            return (model, {"masks": masks}, preview)
+            preview = self._create_argmax_preview(masks, img_w, img_h, sensitivity=preview_sensitivity)
+            empty_raw = {"masks": {}, "similarity_maps": {}}
+            return (model, {"masks": masks}, preview, empty_raw)
         
         # Clone model to add attention hooks
         model_clone = model.clone()
@@ -239,30 +252,38 @@ for Phase 2 generation with the same seed and steps."""
         freefuse_state.phase = "collect"
         # Collect at the specified step (0-indexed internally)
         freefuse_state.collect_step = collect_step - 1  # Convert to 0-indexed
-        freefuse_state.collect_block = collect_block  # Used by Flux
+        # Block range for Flux: if collect_block_end > collect_block, collect from all blocks in range
+        freefuse_state.collect_block = collect_block  # Start block (used by Flux)
+        freefuse_state.collect_block_end = collect_block_end  # End block (used by Flux)
+        freefuse_state.block_voting_maps = {}  # Store per-block winner maps for voting
+        freefuse_state.collect_region = collect_region  # Used by SDXL
+        freefuse_state.collect_tf_index = collect_tf_index  # Used by SDXL
         freefuse_state.token_pos_maps = token_pos_maps
         freefuse_state.include_background = include_background
+        # Track which blocks have been collected (for range mode)
+        freefuse_state.collected_blocks = set()
         
-        # Detect model type first (needed for default temperature and block routing).
-        model_type = detect_model_type(
-            model=model_clone,
-            model_type_hint=freefuse_data.get("model_type"),
-        )
-        if model_type == "unknown":
+        # Detect model type first (needed for default temperature and block routing)
+        model_type = "auto"
+        model_name = model_clone.model.__class__.__name__.lower()
+        # Check Qwen-Image FIRST (before Flux) as Qwen-Image may have flux-like class names
+        if "qwenimage" in model_name or "qwen_image" in model_name or "qwen" in model_name:
+            model_type = "qwen_image"
+        elif "nextdit" in model_name or "lumina" in model_name:
+            model_type = "z_image"
+        elif "flux2" in model_name:
+            model_type = "flux2"
+        elif "flux" in model_name:
+            model_type = "flux"
+        else:
             model_type = "sdxl"
 
-        # Internal patch route aliases.
-        if model_type == "qwen3":
-            patch_model_type = "z_image"
-        else:
-            patch_model_type = model_type
-        
         # Use user-provided parameters, with auto-detection for temperature=0
-        # Default temperature differs by model type: Flux=4000, SDXL=300, Z-Image=4000
+        # Default temperature differs by model type: Flux=4000, SDXL=300, Z-Image=4000, Qwen-Image=4000
         if temperature == 0.0:
-            if patch_model_type == "z_image":
+            if model_type == "z_image" or model_type == "qwen_image":
                 auto_temperature = 4000.0   # matches reference FreeFuseZImageAttnProcessor
-            elif patch_model_type in ("flux", "flux2"):
+            elif model_type == "flux":
                 auto_temperature = 4000.0
             else:
                 auto_temperature = 300.0
@@ -274,7 +295,7 @@ for Phase 2 generation with the same seed and steps."""
         
         # Build SDXL collect_blocks from region + tf_index (only used for SDXL)
         sdxl_collect_blocks = None
-        if patch_model_type == "sdxl":
+        if model_type == "sdxl":
             region_info = SDXL_COLLECT_REGION_MAP.get(collect_region)
             if region_info is None:
                 # Fallback to recommended default
@@ -289,27 +310,74 @@ for Phase 2 generation with the same seed and steps."""
             sdxl_collect_blocks = [(block_name, block_num, tf_idx)]
             print(f"[FreeFuse] SDXL collect block: ({block_name}, {block_num}, {tf_idx}) "
                   f"from region='{collect_region}'")
-            
+
+        # For Flux: determine block range
+        flux_collect_blocks = None
+        if model_type == "flux" and collect_block_end > collect_block:
+            flux_collect_blocks = list(range(collect_block, collect_block_end + 1))
+            print(f"[FreeFuse] Flux range mode: collecting from blocks {collect_block} to {collect_block_end} "
+                  f"({len(flux_collect_blocks)} blocks)")
+
+        # Qwen-Image: Phase 1 mask collection is NOT compatible due to 5D tensor format
+        # Return fallback masks and let Phase 2 handle mask application
+        if model_type == "qwen_image":
+            print("[FreeFuse] Qwen-Image: Phase 1 mask collection is not compatible.")
+            print("[FreeFuse] Qwen-Image: Use manual masks with FreeFuseMaskApplicator instead.")
+            print("[FreeFuse] Qwen-Image: Returning split masks (left/right) for Phase 2.")
+
+            # Get latent info for fallback masks
+            latent_image = latent["samples"]
+            latent_h, latent_w = latent_image.shape[2], latent_image.shape[3]
+            img_h, img_w = latent_h * 8, latent_w * 8
+
+            # Create split masks: first concept on left, others on right
+            masks = {}
+            concept_list = list(concepts.keys())
+
+            for i, name in enumerate(concept_list):
+                mask = torch.zeros(latent_h, latent_w, device=latent_image.device)
+                if i == 0:
+                    # First concept: left half
+                    mask[:, :latent_w // 2] = 1.0
+                    print(f"[FreeFuse] Qwen-Image: '{name}' → LEFT side")
+                else:
+                    # Other concepts: right half
+                    mask[:, latent_w // 2:] = 1.0
+                    print(f"[FreeFuse] Qwen-Image: '{name}' → RIGHT side")
+                masks[name] = mask
+
+            # Background: full image at low weight
+            if include_background:
+                masks["__background__"] = torch.ones(latent_h, latent_w, device=latent_image.device) * 0.1
+                print(f"[FreeFuse] Qwen-Image: '__background__' → full image (10%)")
+
+            # Create colored preview showing left/right split
+            preview = self._create_argmax_preview(masks, img_w, img_h, sensitivity=preview_sensitivity)
+            empty_raw = {"masks": {}, "similarity_maps": {}}
+
+            return (model_clone, {"masks": masks}, preview, empty_raw)
+
+        # For Qwen-Image: determine block range (not used, kept for compatibility)
+        qwen_collect_blocks = None
+
         apply_freefuse_replace_patches(
-            model_clone, freefuse_state, 
-            model_type=patch_model_type,
+            model_clone, freefuse_state,
+            model_type=model_type,
             sdxl_collect_blocks=sdxl_collect_blocks,
+            flux_collect_blocks=flux_collect_blocks,
+            qwen_collect_blocks=qwen_collect_blocks,
         )
-        
+
         # Get latent info
         latent_image = latent["samples"]
         batch_size = latent_image.shape[0]
         
         # Calculate image dimensions
         latent_h, latent_w = latent_image.shape[2], latent_image.shape[3]
-        img_h, img_w = self._latent_to_image_size(model_clone, latent_h, latent_w)
-
-        # For Flux2 single-stream extraction, cache img sequence length for txt_len resolution.
-        if patch_model_type == "flux2":
-            freefuse_state.collected_outputs["img_seq_len"] = latent_h * latent_w
+        img_h, img_w = latent_h * 8, latent_w * 8
         
         # For Z-Image: store sequence lengths in state so block_replace can access them
-        if patch_model_type == "z_image":
+        if model_type == "z_image":
             z_img_seq_len = latent_h * latent_w
             # Estimate cap_seq_len from token positions map
             z_cap_seq_len = 256  # Default
@@ -322,24 +390,19 @@ for Phase 2 generation with the same seed and steps."""
             freefuse_state.collected_outputs["latent_h"] = latent_h
             freefuse_state.collected_outputs["latent_w"] = latent_w
             print(f"[FreeFuse] Z-Image sequence info: img_seq_len={z_img_seq_len}, cap_seq_len={z_cap_seq_len}")
-        
-        block_info = (
-            f"double_block {collect_block}"
-            if patch_model_type == "flux"
-            else (
-                f"single_transformer_blocks.{collect_block}"
-                if patch_model_type == "flux2"
-                else (
-                    f"layer {collect_block}"
-                    if patch_model_type == "z_image"
-                    else f"{collect_region} tf={collect_tf_index}"
-                )
-            )
-        )
+
+        # Block info for logging
+        if model_type == "flux":
+            block_info = f"double_block {collect_block}"
+        elif model_type == "z_image":
+            block_info = f"layer {collect_block}"
+        else:
+            block_info = f"{collect_region} tf={collect_tf_index}"
+
         print(f"[FreeFuse] Phase 1: {steps} total steps, collecting at step {collect_step}, {block_info}")
         print(f"[FreeFuse] Concepts: {list(concepts.keys())}")
         print(f"[FreeFuse] Token positions: {token_pos_maps}")
-        print(f"[FreeFuse] Model type: {model_type} (patch route: {patch_model_type})")
+        print(f"[FreeFuse] Model type: {model_type}")
         print(f"[FreeFuse] Settings: temperature={auto_temperature}, top_k_ratio={top_k_ratio}, disable_lora={disable_lora_phase1}")
         
         # Optionally disable LoRA during Phase 1 to get clean base model attention patterns
@@ -358,6 +421,10 @@ for Phase 2 generation with the same seed and steps."""
         def step_callback(step, x0, x, total_steps):
             freefuse_state.current_step = step
             # Check if we've collected similarity maps and can stop early
+            # In range mode (Flux), wait until all blocks have been collected
+            if flux_collect_blocks and len(freefuse_state.collected_blocks) < len(flux_collect_blocks):
+                return  # Continue sampling until all blocks collected
+            # In single-block mode, check if we collected at the target step
             if freefuse_state.similarity_maps and step > freefuse_state.collect_step:
                 print(f"[FreeFuse] Early stopping at step {step + 1} (collected at step {collect_step})")
                 raise EarlyStopException("Similarity maps collected, stopping early")
@@ -381,7 +448,6 @@ for Phase 2 generation with the same seed and steps."""
                 last_step=steps,
                 force_full_denoise=False,
                 noise_mask=None,
-                sigmas=sigmas,
                 callback=step_callback,
                 seed=seed,
             )
@@ -398,40 +464,101 @@ for Phase 2 generation with the same seed and steps."""
                 bypass_manager.enable_lora()
             # Return empty masks on error
             empty_masks = {name: torch.ones(latent_h, latent_w) for name in concepts}
-            preview = self._create_preview(empty_masks, img_w, img_h)
-            return (model_clone, {"masks": empty_masks}, preview)
+            preview = self._create_argmax_preview(empty_masks, img_w, img_h, sensitivity=preview_sensitivity)
+            empty_raw = {"masks": {}, "similarity_maps": {}}
+            return (model_clone, {"masks": empty_masks}, preview, empty_raw)
         
         # Get similarity maps directly from freefuse_state
         similarity_maps = freefuse_state.similarity_maps
 
-        # Optional debug dump for Z-Image
-        if os.environ.get("FREEFUSE_DEBUG_ZIMAGE") == "1" and patch_model_type == "z_image":
-            debug_dir = os.path.join(os.getcwd(), "debug_z_image_comfyui")
-            os.makedirs(debug_dir, exist_ok=True)
-            try:
-                # Save token positions + concepts
-                debug_meta = {
-                    "concepts": concepts,
-                    "token_pos_maps": token_pos_maps,
-                    "collect_block": collect_block,
-                    "collect_step": collect_step,
-                    "top_k_ratio": top_k_ratio,
-                    "temperature": auto_temperature,
+        # === RANGE MODE: Perform majority voting across blocks ===
+        # Uses the proven consensus algorithm from blocks_analysis.py
+        # Only Flux supports range mode (Qwen-Image returns early)
+        if flux_collect_blocks and len(flux_collect_blocks) > 1:
+            print(f"[FreeFuse] Range mode: aggregating {len(flux_collect_blocks)} blocks via majority voting")
+
+            # Get all block-specific similarity maps
+            block_sim_maps = freefuse_state.collected_outputs.get("block_similarity_maps", {})
+
+            if block_sim_maps:
+                # Get ALL concept names (including background)
+                concept_names = [c for c in freefuse_state.token_pos_maps.keys() if not c.startswith("__")]
+                if freefuse_state.include_background:
+                    concept_names.append("__background__")
+
+                # Use shared voting utility (same as blocks_analysis.py)
+                latent_h, latent_w = latent_image.shape[2], latent_image.shape[3]
+                similarity_maps = create_consensus_similarity_maps(
+                    all_blocks_masks=block_sim_maps,
+                    concept_names=concept_names,
+                    latent_h=latent_h,
+                    latent_w=latent_w,
+                    device=latent_image.device,
+                )
+                
+                # Generate masks ONCE from the voting result (no second stabilization needed)
+                # The voting already produced clean hard masks
+                masks = {}
+                for name, sim_map in similarity_maps.items():
+                    # Convert (B, img_len, 1) to (H, W) directly
+                    mask = sim_map[0].squeeze(-1).view(latent_h, latent_w)
+                    masks[name] = mask
+                
+                print(f"[FreeFuse] Majority voting complete. Aggregated {len(block_sim_maps)} blocks.")
+                
+                # Skip the normal generate_masks() call - we already have clean masks from voting
+                # Jump directly to preview generation
+                preview = self._create_argmax_preview(masks, img_w, img_h, sensitivity=preview_sensitivity)
+                
+                # Update state for Phase 2
+                freefuse_state.phase = "generate"
+                freefuse_state.masks = masks
+
+                # Re-enable LoRA for Phase 2 generation (if it was disabled)
+                if bypass_manager is not None and disable_lora_phase1:
+                    bypass_manager.enable_lora()
+                    print("[FreeFuse] Phase 1 complete: LoRA re-enabled for Phase 2")
+
+                # Store masks in model options for Phase 2
+                if "transformer_options" not in model_clone.model_options:
+                    model_clone.model_options["transformer_options"] = {}
+                model_clone.model_options["transformer_options"]["freefuse_masks"] = masks
+                model_clone.model_options["freefuse_state"] = freefuse_state
+
+                print(f"[FreeFuse] Phase 1 complete. Generated {len(masks)} masks.")
+                print(f"[FreeFuse] Mask keys: {list(masks.keys())}")
+                for name, mask in masks.items():
+                    coverage = mask.sum() / mask.numel() * 100
+                    print(f"   {name}: coverage={coverage:.1f}%")
+
+                # Return early - range mode complete
+                raw_similarity_data = {
+                    "masks": similarity_maps,
+                    "similarity_maps": similarity_maps,
+                    "is_raw": True
                 }
-                with open(os.path.join(debug_dir, "phase1_meta.json"), "w", encoding="utf-8") as f:
-                    json.dump(debug_meta, f, ensure_ascii=False, indent=2)
-                # Save similarity maps
-                if similarity_maps:
-                    sim_cpu = {k: v.detach().cpu() for k, v in similarity_maps.items()}
-                    torch.save(sim_cpu, os.path.join(debug_dir, "similarity_maps.pt"))
-            except Exception as e:
-                print(f"[FreeFuse Z-Image Debug] Failed to save debug artifacts: {e}")
-        
+                return (
+                    model_clone,
+                    {"masks": masks, "similarity_maps": similarity_maps},
+                    preview,
+                    raw_similarity_data
+                )
+            else:
+                print(f"[FreeFuse] Warning: Range mode enabled but no block_similarity_maps found")
+
+        # Single-block mode (non-range): continue with normal processing
         # Debug: Show raw similarity maps
         print(f"[FreeFuse] Raw similarity maps: {list(similarity_maps.keys())}")
         for name, sim_map in similarity_maps.items():
             if sim_map is not None:
                 print(f"   {name}: shape={sim_map.shape}, min={sim_map.min():.6f}, max={sim_map.max():.6f}, mean={sim_map.mean():.6f}")
+        
+        # 👇 BEWAAR DE RAAUWE SIMILARITY MAPS VOORDAT ZE WORDEN VERWERKT!
+        raw_similarity_data = {
+            "masks": similarity_maps,  # Hergebruik dezelfde structuur
+            "similarity_maps": similarity_maps,
+            "is_raw": True  # Optionele flag
+        }
         
         # Generate masks directly from raw similarity maps
         # The new generate_masks can handle (B, N, 1) format and includes:
@@ -468,7 +595,7 @@ for Phase 2 generation with the same seed and steps."""
                 masks["_background_"] = torch.zeros(latent_h, latent_w, device=latent_image.device)
 
         # Optional debug dump for masks
-        if os.environ.get("FREEFUSE_DEBUG_ZIMAGE") == "1" and patch_model_type == "z_image":
+        if os.environ.get("FREEFUSE_DEBUG_ZIMAGE") == "1" and model_type == "z_image":
             try:
                 debug_dir = os.path.join(os.getcwd(), "debug_z_image_comfyui")
                 os.makedirs(debug_dir, exist_ok=True)
@@ -476,9 +603,18 @@ for Phase 2 generation with the same seed and steps."""
                 torch.save(mask_cpu, os.path.join(debug_dir, "masks.pt"))
             except Exception as e:
                 print(f"[FreeFuse Z-Image Debug] Failed to save masks: {e}")
+
+        if os.environ.get("FREEFUSE_DEBUG_QWEN_IMAGE") == "1" and model_type == "qwen_image":
+            try:
+                debug_dir = os.path.join(os.getcwd(), "debug_qwen_image_comfyui")
+                os.makedirs(debug_dir, exist_ok=True)
+                mask_cpu = {k: v.detach().cpu() for k, v in masks.items()}
+                torch.save(mask_cpu, os.path.join(debug_dir, "masks.pt"))
+            except Exception as e:
+                print(f"[FreeFuse Qwen-Image Debug] Failed to save masks: {e}")
         
-        # Create preview image
-        preview = self._create_preview(masks, img_w, img_h)
+        # 🔥 ARGMAX WINNER PREVIEW (zelfde als overlay node)
+        preview = self._create_argmax_preview(masks, img_w, img_h, sensitivity=preview_sensitivity)
         
         # Update state for Phase 2
         freefuse_state.phase = "generate"
@@ -504,31 +640,9 @@ for Phase 2 generation with the same seed and steps."""
         return (
             model_clone, 
             {"masks": masks, "similarity_maps": similarity_maps}, 
-            preview
+            preview,
+            raw_similarity_data  # 👈 EXTRA UITGANG!
         )
-
-    @staticmethod
-    def _get_latent_downscale_ratio(model_patcher, fallback_ratio: int = 8) -> int:
-        """Resolve latent->image downscale ratio from model latent_format."""
-        latent_format = None
-        try:
-            latent_format = model_patcher.get_model_object("latent_format")
-        except Exception:
-            latent_format = getattr(getattr(model_patcher, "model", None), "latent_format", None)
-
-        ratio = getattr(latent_format, "spacial_downscale_ratio", fallback_ratio)
-        try:
-            ratio = int(ratio)
-            if ratio > 0:
-                return ratio
-        except Exception:
-            pass
-        return fallback_ratio
-
-    @classmethod
-    def _latent_to_image_size(cls, model_patcher, latent_h: int, latent_w: int) -> tuple:
-        ratio = cls._get_latent_downscale_ratio(model_patcher)
-        return latent_h * ratio, latent_w * ratio
     
     @staticmethod
     def _infer_spatial_size_from_latent(
@@ -612,43 +726,76 @@ for Phase 2 generation with the same seed and steps."""
         print(f"[FreeFuse] Processed {len(result)} similarity maps to spatial format")
         return result
     
-    def _create_preview(self, masks, width, height):
-        """Create color-coded mask preview."""
+    def _create_argmax_preview(self, masks, width, height, sensitivity=5.0):
+        """Create argmax winner preview (zelfde als overlay node).
+        
+        Toont per pixel welke concept wint (harde segmentatie).
+        Inclusief background als aparte kleur.
+        
+        Args:
+            masks: Dict of concept name -> binary mask tensor (H, W)
+            width, height: Target preview size
+            sensitivity: Contrast enhancement (niet gebruikt voor binaire masks, maar voor compatibiliteit)
+        """
         colors = [
-            (1.0, 0.0, 0.0),   # Red
-            (0.0, 1.0, 0.0),   # Green
-            (0.0, 0.0, 1.0),   # Blue
-            (1.0, 1.0, 0.0),   # Yellow
+            (1.0, 0.0, 0.0),   # Rood
+            (0.0, 1.0, 0.0),   # Groen
+            (0.0, 0.0, 1.0),   # Blauw
+            (1.0, 1.0, 0.0),   # Geel
             (1.0, 0.0, 1.0),   # Magenta
-            (0.0, 1.0, 1.0),   # Cyan
-            (0.25, 0.25, 0.25),  # Gray (background)
+            (0.0, 1.0, 1.0),   # Cyaan
+            (1.0, 0.5, 0.0),   # Oranje
+            (0.5, 0.0, 1.0),   # Paars
+            (1.0, 0.0, 0.5),   # Roze
+            (0.5, 1.0, 0.0),   # Lichtgroen
+            (0.3, 0.3, 0.3),   # Donkergrijs (background)
         ]
         
-        device = next(iter(masks.values())).device if masks else "cpu"
+        if not masks:
+            return torch.zeros(1, height, width, 3)
+        
+        device = next(iter(masks.values())).device
         preview = torch.zeros(3, height, width, device=device)
         
-        for i, (name, mask) in enumerate(masks.items()):
-            color = colors[i % len(colors)]
+        # Prepare all masks (inclusief background!)
+        concept_masks = []
+        concept_names = []
+        
+        for name, mask in masks.items():
+            concept_names.append(name)
             
-            # Handle different mask dimensions
-            if mask.dim() == 2:
-                m = mask.unsqueeze(0).unsqueeze(0)
-            elif mask.dim() == 3:
-                m = mask.unsqueeze(0)
-            else:
-                m = mask
+            # Ensure mask is 2D
+            if mask.dim() == 3:
+                mask = mask[0]
             
-            # Resize mask
+            # Resize mask to target size (nearest for binary masks)
             mask_resized = F.interpolate(
-                m.float(),
+                mask.unsqueeze(0).unsqueeze(0).float(),
                 size=(height, width),
                 mode='nearest'
-            ).squeeze()
+            ).squeeze(0).squeeze(0)
             
-            for c in range(3):
-                preview[c] += mask_resized * color[c]
+            concept_masks.append(mask_resized)
         
-        # Convert to ComfyUI format: (B, H, W, C)
+        # Create winner image
+        if concept_masks:
+            # Stack masks: (C, H, W)
+            stacked = torch.stack(concept_masks, dim=0)
+            
+            # Find winner (concept with highest value at each pixel)
+            # Voor binaire masks: elk pixel hoort bij exact één concept
+            winner_indices = torch.argmax(stacked, dim=0)  # (H, W)
+            
+            # Color each pixel according to winner
+            for idx, color in enumerate(colors[:len(concept_names)]):
+                # Create mask for pixels where this concept wins
+                mask = (winner_indices == idx).float()
+                
+                # Add color to preview
+                for c in range(3):
+                    preview[c] += mask * color[c]
+        
+        # Clamp en converteer naar ComfyUI format
         preview = preview.clamp(0, 1).permute(1, 2, 0).unsqueeze(0)
         
         return preview.cpu()

@@ -18,10 +18,10 @@ from .attention import (
 from .attention_replace import (
     FreeFuseState,
     FreeFuseFluxBlockReplace,
-    FreeFuseFluxSingleBlockReplace,
     FreeFuseFluxAttentionReplace,
     FreeFuseSDXLAttnReplace,
     FreeFuseZImageBlockReplace,
+    FreeFuseQwenImageBlockReplace,
     apply_freefuse_replace_patches,
     compute_flux_similarity_maps_from_outputs,
     compute_flux_similarity_maps_with_qkv,
@@ -84,6 +84,7 @@ from .attention_bias_patch import (
     FreeFuseFluxBiasBlockReplace,
     FreeFuseFluxBiasSingleBlockReplace,
     FreeFuseSDXLBiasAttnReplace,
+    FreeFuseZImageBiasBlockReplace,
     apply_attention_bias_patches,
 )
 
@@ -98,10 +99,10 @@ __all__ = [
     # New replace patch based hooks (recommended)
     "FreeFuseState",
     "FreeFuseFluxBlockReplace",
-    "FreeFuseFluxSingleBlockReplace",
     "FreeFuseFluxAttentionReplace",
     "FreeFuseSDXLAttnReplace",
     "FreeFuseZImageBlockReplace",
+    "FreeFuseQwenImageBlockReplace",
     "apply_freefuse_replace_patches",
     "compute_flux_similarity_maps_from_outputs",
     "compute_flux_similarity_maps_with_qkv",
@@ -143,5 +144,6 @@ __all__ = [
     "FreeFuseFluxBiasBlockReplace",
     "FreeFuseFluxBiasSingleBlockReplace",
     "FreeFuseSDXLBiasAttnReplace",
+    "FreeFuseZImageBiasBlockReplace",
     "apply_attention_bias_patches",
 ]

@@ -36,37 +36,56 @@ class FreeFuseState:
         self.phase: str = "collect"  # "collect" or "generate"
         self.current_step: int = 0
         self.collect_step: int = 4  # Which step to collect attention at
-        self.collect_block: int = 18  # Which block to collect from (for Flux)
-        
+        self.collect_block: int = 18  # Start block for range collection (for Flux)
+        self.collect_block_end: int = 18  # End block for range collection (for Flux)
+        self.collect_region: str = None  # UNet region for SDXL
+        self.collect_tf_index: int = None  # Transformer index for SDXL
+
         # Concept information
         self.token_pos_maps: Dict[str, List[List[int]]] = {}
         self.background_positions: Optional[List[int]] = None
-        
+
         # Collected data
         self.similarity_maps: Dict[str, torch.Tensor] = {}
         self.collected_outputs: Dict[str, torch.Tensor] = {}
-        
+        # For range mode: per-block similarity maps
+        self.collected_outputs["block_similarity_maps"] = {}
+        # Track which blocks have been collected
+        self.collected_blocks: set = set()
+        # Store per-block winner maps for voting analysis
+        self.block_voting_maps: Dict[int, Dict[str, torch.Tensor]] = {}
+
         # Generated masks
         self.masks: Dict[str, torch.Tensor] = {}
-        
+
         # Settings
         self.top_k_ratio: float = 0.1
         self.temperature: float = 4000.0
         self.include_background: bool = True
-        
+
     def reset_collection(self):
         """Reset collected data for new generation."""
         self.similarity_maps = {}
         self.collected_outputs = {}
-        
+        self.collected_outputs["block_similarity_maps"] = {}
+        self.block_voting_maps = {}
+        self.collected_blocks = set()
+
     def is_collect_step(self, step: int, block_index: int = None) -> bool:
         """Check if we should collect at this step/block."""
         if self.phase != "collect":
             return False
         if step != self.collect_step:
             return False
-        if block_index is not None and block_index != self.collect_block:
-            return False
+        # In range mode, collect from all blocks in the range
+        if block_index is not None:
+            if self.collect_block_end > self.collect_block:
+                # Range mode: collect if block_index is within [collect_block, collect_block_end]
+                if not (self.collect_block <= block_index <= self.collect_block_end):
+                    return False
+            elif block_index != self.collect_block:
+                # Single block mode
+                return False
         return True
 
 
@@ -224,7 +243,17 @@ class FreeFuseFluxBlockReplace:
                         num_heads=block.num_heads,
                     )
                     state.similarity_maps.update(sim_maps)
-                    
+
+                    # Store per-block similarity maps for range mode voting
+                    if 'block_similarity_maps' in state.collected_outputs:
+                        state.collected_outputs['block_similarity_maps'][block_index] = sim_maps.copy()
+                    if hasattr(state, 'block_voting_maps'):
+                        state.block_voting_maps[block_index] = sim_maps.copy()
+
+                    # Mark this block as collected
+                    if hasattr(state, 'collected_blocks'):
+                        state.collected_blocks.add(block_index)
+
                     logging.info(f"[FreeFuse] Collected similarity maps at block {block_index}, "
                                f"step {current_step}: {list(sim_maps.keys())}")
                 
@@ -236,296 +265,6 @@ class FreeFuseFluxBlockReplace:
             # Run original block for the actual output
             return original_block(args)
         
-        return block_replace
-
-
-class FreeFuseFluxSingleBlockReplace:
-    """
-    Replace patch for Flux/Flux2 SingleStreamBlock.
-
-    Flux single-stream blocks run on concatenated [text, image] tokens.
-    For Flux2/Klein we collect similarity maps from `single_transformer_blocks.N`,
-    where N is wired from `collect_block`.
-    """
-
-    def __init__(self, state: FreeFuseState, block, block_index: int = 0):
-        self.state = state
-        self.block = block  # Actual SingleStreamBlock reference
-        self.block_index = block_index
-
-    @staticmethod
-    def _normalize_seq_len(value: Any, total_seq_len: int) -> Optional[int]:
-        """Normalize various seq-len payloads from transformer_options to int."""
-        if value is None:
-            return None
-
-        try:
-            if isinstance(value, torch.Tensor):
-                if value.numel() == 0:
-                    return None
-                value = int(value.flatten()[0].item())
-            elif isinstance(value, (list, tuple)):
-                if not value:
-                    return None
-                value = int(value[0])
-            else:
-                value = int(value)
-        except Exception:
-            return None
-
-        if 0 < value < total_seq_len:
-            return value
-        return None
-
-    @staticmethod
-    def _infer_txt_len_from_tokens(
-        token_pos_maps: Dict[str, List[List[int]]], total_seq_len: int
-    ) -> Optional[int]:
-        """Best-effort fallback when runtime does not expose txt_len."""
-        if not token_pos_maps:
-            return None
-
-        max_pos = -1
-        for positions_list in token_pos_maps.values():
-            if not positions_list:
-                continue
-            pos = positions_list[0]
-            if pos:
-                max_pos = max(max_pos, max(pos))
-
-        if max_pos < 0:
-            return None
-
-        # Keep a small right margin to avoid clipping the last concept token.
-        inferred = max_pos + 8
-        inferred = max(inferred, max_pos + 1)
-        inferred = min(inferred, total_seq_len - 1)
-        if inferred <= 0 or inferred >= total_seq_len:
-            return None
-        return inferred
-
-    def _resolve_txt_len(self, transformer_options: Dict, total_seq_len: int) -> Optional[int]:
-        """Resolve text sequence length for [txt, img] single-stream sequence."""
-        # 1) Prefer exact values from runtime options.
-        if isinstance(transformer_options, dict):
-            for key in ("txt_len", "cap_seq_len", "text_seq_len"):
-                txt_len = self._normalize_seq_len(transformer_options.get(key), total_seq_len)
-                if txt_len is not None:
-                    return txt_len
-
-        # 2) Use cached img length to back-compute txt_len.
-        cached_img_len = self._normalize_seq_len(
-            self.state.collected_outputs.get("img_seq_len"), total_seq_len
-        )
-        if cached_img_len is not None:
-            txt_len_from_img = total_seq_len - cached_img_len
-            if 0 < txt_len_from_img < total_seq_len:
-                return txt_len_from_img
-
-        # 3) Fallback to previously cached txt_len.
-        cached = self._normalize_seq_len(
-            self.state.collected_outputs.get("txt_len"), total_seq_len
-        )
-        if cached is not None:
-            return cached
-
-        # 4) Last-resort inference from token positions.
-        inferred = self._infer_txt_len_from_tokens(self.state.token_pos_maps, total_seq_len)
-        if inferred is not None:
-            logging.warning(
-                f"[FreeFuse] Single block {self.block_index} inferred txt_len={inferred} "
-                f"(fallback; total_seq_len={total_seq_len})."
-            )
-        return inferred
-
-    @staticmethod
-    def _compute_attention_output(
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        pe: Optional[torch.Tensor],
-        attn_mask: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Compute single-stream attention output and return (q_rope, k_rope, attn_out).
-
-        q/k/v shape: (B, heads, seq_len, head_dim)
-        returns:
-          q_rope/k_rope: (B, heads, seq_len, head_dim)
-          attn_out:      (B, seq_len, hidden_dim)
-        """
-        from comfy.ldm.flux.math import attention, apply_rope
-
-        if pe is not None:
-            q_rope, k_rope = apply_rope(q, k, pe)
-        else:
-            q_rope, k_rope = q, k
-
-        attn_out = None
-        attention_call_variants = []
-        if attn_mask is not None:
-            attention_call_variants.extend(
-                [
-                    {"pe": pe, "mask": attn_mask},
-                    {"pe": pe, "attn_mask": attn_mask},
-                ]
-            )
-        attention_call_variants.append({"pe": pe})
-
-        for kwargs in attention_call_variants:
-            try:
-                attn_out = attention(q, k, v, **kwargs)
-                break
-            except TypeError:
-                continue
-
-        # Fallback path (rare): manual attention if signature mismatches.
-        if attn_out is None:
-            head_dim = q_rope.shape[-1]
-            scores = torch.einsum("bhid,bhjd->bhij", q_rope, k_rope) / (head_dim ** 0.5)
-            if attn_mask is not None:
-                mask = attn_mask
-                if mask.dtype == torch.bool:
-                    float_mask = torch.zeros_like(mask, dtype=q.dtype)
-                    float_mask.masked_fill_(~mask, torch.finfo(q.dtype).min)
-                    mask = float_mask
-                if mask.dim() == 2:
-                    mask = mask.unsqueeze(1).unsqueeze(1)
-                elif mask.dim() == 3:
-                    mask = mask.unsqueeze(1)
-                if mask.device != scores.device:
-                    mask = mask.to(scores.device)
-                if mask.dtype != scores.dtype:
-                    mask = mask.to(scores.dtype)
-                scores = scores + mask
-            weights = F.softmax(scores, dim=-1)
-            out_4d = torch.einsum("bhij,bhjd->bhid", weights, v)
-            attn_out = out_4d.transpose(1, 2).reshape(out_4d.shape[0], out_4d.shape[2], -1)
-
-        if isinstance(attn_out, tuple):
-            attn_out = attn_out[0]
-        if isinstance(attn_out, dict):
-            if "img" in attn_out:
-                attn_out = attn_out["img"]
-            elif "x" in attn_out:
-                attn_out = attn_out["x"]
-            else:
-                raise RuntimeError("Unsupported attention() dict output for single-block extraction.")
-
-        if attn_out is None:
-            raise RuntimeError("attention() returned no output for single-block extraction.")
-
-        # Normalize output shape to (B, seq_len, hidden_dim)
-        if attn_out.dim() == 4:
-            # Usually (B, heads, seq, head_dim)
-            if attn_out.shape[1] == q.shape[1]:
-                attn_out = attn_out.transpose(1, 2).reshape(attn_out.shape[0], attn_out.shape[2], -1)
-            # Or (B, seq, heads, head_dim)
-            else:
-                attn_out = attn_out.reshape(attn_out.shape[0], attn_out.shape[1], -1)
-
-        return q_rope, k_rope, attn_out
-
-    def create_block_replace(self) -> Callable:
-        """Create a block replace function for Flux/Flux2 SingleStreamBlock."""
-        state = self.state
-        block = self.block
-        block_index = self.block_index
-
-        def block_replace(args: Dict, extra_args: Dict) -> Dict:
-            # In Comfy Flux single block, concatenated [txt, img] is passed via "img".
-            x = args["img"]
-            vec = args["vec"]
-            pe = args["pe"]
-            attn_mask = args.get("attn_mask")
-            transformer_options = args.get("transformer_options", {})
-            original_block = extra_args["original_block"]
-
-            current_step = transformer_options.get("sigmas_index", state.current_step)
-            should_collect = state.is_collect_step(current_step, block_index)
-            if not should_collect:
-                return original_block(args)
-
-            try:
-                if block is None:
-                    logging.warning(
-                        f"[FreeFuse] Single block {block_index} missing block reference; skip collection."
-                    )
-                    return original_block(args)
-
-                B, total_seq_len, hidden_size = x.shape
-                txt_len = self._resolve_txt_len(transformer_options, total_seq_len)
-                if txt_len is None:
-                    logging.warning(
-                        f"[FreeFuse] Single block {block_index} missing txt_len "
-                        f"(total_seq_len={total_seq_len}); skip collection."
-                    )
-                    return original_block(args)
-                img_len = total_seq_len - txt_len
-                if img_len <= 0:
-                    logging.warning(
-                        f"[FreeFuse] Single block {block_index} invalid lengths "
-                        f"(total={total_seq_len}, txt={txt_len}); skip collection."
-                    )
-                    return original_block(args)
-
-                # Cache exact txt_len for downstream use (e.g. later single blocks).
-                state.collected_outputs["txt_len"] = txt_len
-
-                # Recompute single-stream QKV exactly from this block.
-                modulation = getattr(block, "modulation", None)
-                if modulation is not None and callable(modulation):
-                    mod, _ = modulation(vec)
-                    x_mod = (1 + mod.scale) * block.pre_norm(x) + mod.shift
-                else:
-                    x_mod = block.pre_norm(x)
-
-                qkv_mlp = block.linear1(x_mod)
-                qkv = qkv_mlp[..., : 3 * hidden_size]
-                q, k, v = qkv.view(B, total_seq_len, 3, block.num_heads, -1).permute(2, 0, 3, 1, 4)
-                q, k = block.norm(q, k, v)
-
-                # q_rope/k_rope: (B, heads, seq, head_dim)
-                # attn_out: (B, seq, hidden_dim)
-                q_rope, k_rope, attn_out = self._compute_attention_output(
-                    q=q,
-                    k=k,
-                    v=v,
-                    pe=pe,
-                    attn_mask=attn_mask,
-                )
-
-                # Convert to (B, seq, heads, head_dim) and split [txt, img].
-                q_rope_seq = q_rope.transpose(1, 2)
-                k_rope_seq = k_rope.transpose(1, 2)
-                img_q = q_rope_seq[:, txt_len:, :, :]
-                txt_k = k_rope_seq[:, :txt_len, :, :]
-                img_attn_out = attn_out[:, txt_len:, :]
-
-                if state.token_pos_maps:
-                    sim_maps = compute_z_image_similarity_maps_with_qkv(
-                        img_q=img_q,
-                        txt_k=txt_k,
-                        img_attn_out=img_attn_out,
-                        cap_len=txt_len,
-                        img_len=img_len,
-                        token_pos_maps=state.token_pos_maps,
-                        top_k_ratio=state.top_k_ratio,
-                        temperature=state.temperature,
-                        n_heads=block.num_heads,
-                    )
-                    state.similarity_maps.update(sim_maps)
-                    logging.info(
-                        f"[FreeFuse] Collected single-block similarity maps at block {block_index}, "
-                        f"step {current_step}: {list(sim_maps.keys())}"
-                    )
-            except Exception as e:
-                logging.warning(f"[FreeFuse] Failed to extract single-block QKV: {e}")
-                import traceback
-                traceback.print_exc()
-
-            return original_block(args)
-
         return block_replace
 
 
@@ -1459,6 +1198,298 @@ class FreeFuseZImageBlockReplace:
                              f"min={sm.min():.6f}, max={sm.max():.6f}")
 
 
+class FreeFuseQwenImageBlockReplace:
+    """
+    AGGRESSIVE block replace for Qwen-Image (MMDiT) similarity map collection.
+
+    Qwen-Image uses a dual-stream MMDiT architecture with separate image and
+    text streams that attend jointly. Each block has:
+      - Separate modulation (img_mod, txt_mod) for each stream
+      - Separate normalization (img_norm1/2, txt_norm1/2)
+      - Joint attention via QwenDoubleStreamAttnProcessor2_0
+      - Separate MLPs (img_mlp, txt_mlp)
+
+    Strategy:
+      1. Register a pre-hook on the target block to capture input states
+         (hidden_states, encoder_hidden_states, timestep, etc.)
+      2. Register a double_block patch callback that:
+         a) Retrieves cached layer inputs
+         b) Reproduces the QKV computation from both streams
+         c) Applies QK-norm and RoPE (with 3D frequencies for FHW)
+         d) Computes similarity maps using cross-attention between img_q and txt_k
+      3. Stores similarity maps on state.similarity_maps
+
+    Usage:
+        replacer = FreeFuseQwenImageBlockReplace(state, block=layer, block_index=18)
+        replacer.install(model_patcher)
+    """
+
+    def __init__(
+        self,
+        state: FreeFuseState,
+        block,                # QwenImageTransformerBlock reference
+        block_index: int = 18,
+    ):
+        self.state = state
+        self.block = block
+        self.block_index = block_index
+
+        # Cache filled by the pre-hook before the block executes
+        self._cached_input: Optional[Dict[str, torch.Tensor]] = None
+        self._hook_handle = None
+
+    # ------------------------------------------------------------------
+    # Installation
+    # ------------------------------------------------------------------
+    def install(self, model_patcher) -> None:
+        """Register pre-hook and double_block patch for Qwen-Image."""
+        # Pre-hook on the target block
+        self._hook_handle = self.block.register_forward_pre_hook(
+            self._pre_hook, with_kwargs=True
+        )
+        # double_block patch
+        model_patcher.set_model_double_block_patch(self.create_double_block_patch())
+
+        logging.info(f"[FreeFuse Qwen-Image] Installed QKV-based block replace "
+                     f"on layer {self.block_index} "
+                     f"(type={type(self.block).__name__})")
+
+    def remove(self) -> None:
+        """Remove the pre-hook."""
+        if self._hook_handle is not None:
+            self._hook_handle.remove()
+            self._hook_handle = None
+
+    # ------------------------------------------------------------------
+    # Pre-hook: capture layer input
+    # ------------------------------------------------------------------
+    def _pre_hook(self, module, args, kwargs=None):
+        """Capture Qwen-Image block inputs.
+
+        QwenImageTransformerBlock.forward signature:
+          hidden_states, encoder_hidden_states, encoder_hidden_states_mask, 
+          temb, image_rotary_emb, timestep_zero_index, transformer_options
+        """
+        if self.state.phase != "collect":
+            return
+
+        if kwargs is None:
+            kwargs = {}
+
+        # Capture the inputs we need
+        # Args: hidden_states, encoder_hidden_states, encoder_hidden_states_mask, temb, image_rotary_emb
+        if len(args) >= 4:
+            self._cached_input = {
+                "hidden_states": args[0].detach(),           # (B, img_seq, dim)
+                "encoder_hidden_states": args[1].detach(),   # (B, txt_seq, dim)
+                "temb": args[3].detach() if args[3] is not None else None,  # timestep embedding
+                "image_rotary_emb": args[4] if len(args) > 4 and args[4] is not None else None,
+                "timestep_zero_index": kwargs.get("timestep_zero_index", None),
+            }
+        elif len(args) >= 2:
+            # Fallback with minimal args
+            self._cached_input = {
+                "hidden_states": args[0].detach(),
+                "encoder_hidden_states": args[1].detach(),
+                "temb": kwargs.get("temb", None),
+                "image_rotary_emb": kwargs.get("image_rotary_emb", None),
+                "timestep_zero_index": kwargs.get("timestep_zero_index", None),
+            }
+
+    # ------------------------------------------------------------------
+    # double_block patch callback
+    # ------------------------------------------------------------------
+    def create_double_block_patch(self) -> Callable:
+        """Return a callback compatible with set_model_double_block_patch."""
+        state = self.state
+        collect_block_index = self.block_index
+        parent = self
+
+        def double_block_patch(patch_args: Dict) -> Dict:
+            block_index = patch_args.get("block_index", -1)
+            if block_index != collect_block_index:
+                return {}
+
+            transformer_options = patch_args.get("transformer_options", {})
+            current_step = transformer_options.get("sigmas_index", state.current_step)
+
+            should_collect = state.is_collect_step(current_step, collect_block_index)
+            if not should_collect:
+                return {}
+
+            # === COLLECTION MODE ===
+            cached = parent._cached_input
+            if cached is None:
+                logging.warning("[FreeFuse Qwen-Image] No cached input for QKV computation")
+                return {}
+
+            try:
+                parent._extract_and_compute(patch_args, cached)
+            except Exception as e:
+                logging.error(f"[FreeFuse Qwen-Image] QKV extraction failed: {e}")
+                import traceback
+                traceback.print_exc()
+            finally:
+                parent._cached_input = None
+
+            return {}
+
+        return double_block_patch
+
+    # ------------------------------------------------------------------
+    # Core: recompute QKV and extract similarity maps
+    # ------------------------------------------------------------------
+    def _extract_and_compute(self, patch_args: Dict, cached: Dict) -> None:
+        """Recompute QKV from cached inputs and build sim maps for Qwen-Image."""
+        from comfy.ldm.flux.math import apply_rope
+
+        block = self.block
+        state = self.state
+
+        img_hidden = cached["hidden_states"]           # (B, img_seq, dim)
+        txt_hidden = cached["encoder_hidden_states"]   # (B, txt_seq, dim)
+        temb = cached.get("temb")                      # timestep embedding
+        image_rotary_emb = cached.get("image_rotary_emb")  # RoPE frequencies
+        timestep_zero_index = cached.get("timestep_zero_index")
+
+        img_len = img_hidden.shape[1]
+        cap_len = txt_hidden.shape[1]
+
+        logging.info(f"[FreeFuse Qwen-Image] QKV extraction at block {self.block_index}: "
+                     f"img_len={img_len}, cap_len={cap_len}")
+
+        # Get the attention processor
+        attn = block.attn
+
+        # Apply modulation using temb
+        # Qwen-Image: img_mod and txt_mod output 6 chunks (scale_msa, gate_msa, scale_mlp, gate_mlp for each stream)
+        img_mod1 = None
+        txt_mod1 = None
+        if hasattr(block, "img_mod") and temb is not None:
+            img_mod_params = block.img_mod(temb)
+            img_mod1, img_mod2 = img_mod_params.chunk(2, dim=-1)
+        if hasattr(block, "txt_mod") and temb is not None:
+            txt_mod_params = block.txt_mod(temb)
+            txt_mod1, txt_mod2 = txt_mod_params.chunk(2, dim=-1)
+
+        # Apply normalization and modulation
+        if hasattr(block, "img_norm1") and hasattr(block, "_modulate"):
+            img_attn_in, img_gate1 = block._modulate(block.img_norm1(img_hidden), img_mod1, timestep_zero_index)
+        elif hasattr(block, "img_norm1"):
+            img_attn_in = block.img_norm1(img_hidden)
+            if img_mod1 is not None:
+                # Fallback modulation
+                img_scale = img_mod1.chunk(2, dim=-1)[0] if img_mod1.dim() > 1 else img_mod1
+                img_attn_in = img_attn_in * (1 + img_scale.unsqueeze(1))
+        else:
+            img_attn_in = img_hidden
+
+        if hasattr(block, "txt_norm1") and hasattr(block, "_modulate"):
+            txt_attn_in, txt_gate1 = block._modulate(block.txt_norm1(txt_hidden), txt_mod1, timestep_zero_index)
+        elif hasattr(block, "txt_norm1"):
+            txt_attn_in = block.txt_norm1(txt_hidden)
+            if txt_mod1 is not None:
+                txt_scale = txt_mod1.chunk(2, dim=-1)[0] if txt_mod1.dim() > 1 else txt_mod1
+                txt_attn_in = txt_attn_in * (1 + txt_scale.unsqueeze(1))
+        else:
+            txt_attn_in = txt_hidden
+
+        # QKV projection - Qwen-Image uses MMDiT with separate projections for image/text
+        # Image stream: to_q, to_k, to_v
+        # Text stream (MMDiT): add_q_proj, add_k_proj, add_v_proj
+        to_q = getattr(attn, 'to_q', None)
+        to_k = getattr(attn, 'to_k', None)
+        to_v = getattr(attn, 'to_v', None)
+        add_q_proj = getattr(attn, 'add_q_proj', None)
+        add_k_proj = getattr(attn, 'add_k_proj', None)
+        add_v_proj = getattr(attn, 'add_v_proj', None)
+
+        if to_q is None or to_k is None or to_v is None:
+            logging.warning("[FreeFuse Qwen-Image] Missing main QKV projection layers")
+            return
+
+        if add_q_proj is None or add_k_proj is None or add_v_proj is None:
+            # Fallback: try using same projections for both streams
+            logging.info("[FreeFuse Qwen-Image] Missing add_* projections, using fallback")
+            txt_q = to_q(txt_attn_in)
+            txt_k = to_k(txt_attn_in)
+            txt_v = to_v(txt_attn_in)
+        else:
+            # Use MMDiT-style separate projections
+            txt_q = add_q_proj(txt_attn_in)
+            txt_k = add_k_proj(txt_attn_in)
+            txt_v = add_v_proj(txt_attn_in)
+
+        # Image stream QKV
+        img_q = to_q(img_attn_in)
+        img_k = to_k(img_attn_in)
+        img_v = to_v(img_attn_in)
+
+        # Reshape to multi-head
+        n_heads = getattr(attn, 'num_heads', 24)
+        head_dim = img_q.shape[-1] // n_heads
+
+        img_q = img_q.view(img_q.shape[0], img_q.shape[1], n_heads, head_dim)
+        img_k = img_k.view(img_k.shape[0], img_k.shape[1], n_heads, head_dim)
+        img_v = img_v.view(img_v.shape[0], img_v.shape[1], n_heads, head_dim)
+
+        txt_q = txt_q.view(txt_q.shape[0], txt_q.shape[1], n_heads, head_dim)
+        txt_k = txt_k.view(txt_k.shape[0], txt_k.shape[1], n_heads, head_dim)
+        txt_v = txt_v.view(txt_v.shape[0], txt_v.shape[1], n_heads, head_dim)
+
+        # Apply QK-norm if available
+        if hasattr(attn, "q_norm"):
+            img_q = attn.q_norm(img_q)
+            txt_q = attn.q_norm(txt_q)
+        if hasattr(attn, "k_norm"):
+            img_k = attn.k_norm(img_k)
+            txt_k = attn.k_norm(txt_k)
+
+        # Apply RoPE using image_rotary_emb
+        if image_rotary_emb is not None:
+            try:
+                img_q, img_k = apply_rope(img_q, img_k, image_rotary_emb[0])
+                txt_q, txt_k = apply_rope(txt_q, txt_k, image_rotary_emb[0])
+            except Exception as e:
+                logging.warning(f"[FreeFuse Qwen-Image] RoPE application failed: {e}")
+
+        # Concatenate for joint attention
+        q = torch.cat([img_q, txt_q], dim=1)  # (B, img+txt, H, D)
+        k = torch.cat([img_k, txt_k], dim=1)
+        v = torch.cat([img_v, txt_v], dim=1)
+
+        # Transpose for SDPA: (B, H, seq, D)
+        q_4d = q.transpose(1, 2)
+        k_4d = k.transpose(1, 2)
+        v_4d = v.transpose(1, 2)
+
+        attn_out_4d = F.scaled_dot_product_attention(q_4d, k_4d, v_4d, dropout_p=0.0)
+        attn_out = attn_out_4d.transpose(1, 2).reshape(img_hidden.shape[0], -1, n_heads * head_dim)
+
+        # Split back: img_attn_out = first img_len tokens
+        img_attn_out = attn_out[:, :img_len, :]  # (B, img_len, dim)
+
+        # Compute similarity maps
+        if state.token_pos_maps:
+            sim_maps = compute_qwen_image_similarity_maps_with_qkv(
+                img_q=img_q[:, :img_len, :, :],    # (B, img_len, H, D)
+                txt_k=txt_k,                       # (B, cap_len, H, D)
+                img_attn_out=img_attn_out,         # (B, img_len, dim)
+                cap_len=cap_len,
+                img_len=img_len,
+                token_pos_maps=state.token_pos_maps,
+                top_k_ratio=state.top_k_ratio,
+                temperature=state.temperature,
+                n_heads=n_heads,
+            )
+            state.similarity_maps.update(sim_maps)
+
+            logging.info(f"[FreeFuse Qwen-Image] Collected {len(sim_maps)} similarity maps")
+            for name, sm in sim_maps.items():
+                logging.info(f"   {name}: shape={sm.shape}, "
+                             f"min={sm.min():.6f}, max={sm.max():.6f}")
+
+
 def compute_z_image_similarity_maps_with_qkv(
     img_q: torch.Tensor,         # (B, img_len, H, D)  after RoPE
     txt_k: torch.Tensor,         # (B, cap_len, H, D)  after RoPE
@@ -1714,139 +1745,272 @@ def compute_z_image_similarity_maps(
     return concept_sim_maps
 
 
+def compute_qwen_image_similarity_maps_with_qkv(
+    img_q: torch.Tensor,         # (B, img_len, H, D)  after RoPE
+    txt_k: torch.Tensor,         # (B, cap_len, H, D)  after RoPE
+    img_attn_out: torch.Tensor,  # (B, img_len, dim)   attention output
+    cap_len: int,
+    img_len: int,
+    token_pos_maps: Dict[str, List[List[int]]],
+    top_k_ratio: float = 0.1,
+    temperature: float = 4000.0,
+    n_heads: int = 24,
+) -> Dict[str, torch.Tensor]:
+    """
+    Compute similarity maps for Qwen-Image using the FreeFuse algorithm
+    with dual-stream QKV extraction.
+
+    Qwen-Image uses a dual-stream MMDiT architecture where image and text
+    streams are processed separately but attend jointly. This function computes
+    similarity maps from the cross-attention between image queries and text keys.
+
+    Algorithm:
+      1. Cross-attention: img_Q_rope @ concept_text_K_rope^T → per-head
+         softmax → average over heads & concept tokens → per-image-token score.
+      2. Competitive exclusion among concepts.
+      3. Top-k selection of image tokens.
+      4. Concept attention: core_hidden @ all_img_hidden^T → average over
+         core tokens → softmax with temperature → sim_map.
+
+    Args:
+        img_q:   Image queries after QK-norm + RoPE  (B, img_len, H, head_dim)
+        txt_k:   Text keys after QK-norm + RoPE      (B, cap_len, H, head_dim)
+        img_attn_out: Attention output (image part)   (B, img_len, dim)
+        cap_len: Number of text tokens
+        img_len: Number of image tokens
+        token_pos_maps: {lora_name: [[positions], ...]}
+        top_k_ratio: Fraction of image tokens to select as core
+        temperature: Softmax temperature for final sim map
+        n_heads: Number of attention heads
+
+    Returns:
+        {lora_name: (B, img_len, 1)}
+    """
+    concept_sim_maps: Dict[str, torch.Tensor] = {}
+    if not token_pos_maps:
+        return concept_sim_maps
+
+    device = img_q.device
+    B = img_q.shape[0]
+    scale = 1.0 / 1000.0
+
+    # First pass: cross-attn scores per concept
+    all_cross_attn_scores: Dict[str, torch.Tensor] = {}
+
+    for lora_name, positions_list in token_pos_maps.items():
+        if lora_name.startswith("__"):
+            continue
+        pos = positions_list[0] if positions_list else []
+        if not pos:
+            continue
+
+        pos_t = torch.tensor(pos, device=device, dtype=torch.long)
+        pos_t = pos_t.clamp(0, cap_len - 1)
+
+        # Concept keys at token positions: (B, n_concept, H, D)
+        concept_k = txt_k[:, pos_t, :, :]
+
+        # Multi-head cross-attention: img_q @ concept_k^T
+        # img_q: (B, img_len, H, D), concept_k: (B, n_concept, H, D)
+        # → (B, H, img_len, n_concept)
+        weights = torch.einsum("bihd,bjhd->bhij", img_q, concept_k) * scale
+        weights = F.softmax(weights, dim=2)            # softmax over img dim
+        scores = weights.mean(dim=1).mean(dim=-1)      # (B, img_len)
+        all_cross_attn_scores[lora_name] = scores
+
+    # Second pass: contrastive top-k + concept attention
+    n_concepts = len(all_cross_attn_scores)
+
+    for lora_name in list(all_cross_attn_scores.keys()):
+        scores = all_cross_attn_scores[lora_name] * max(1, n_concepts)
+        for other in all_cross_attn_scores:
+            if other != lora_name:
+                scores = scores - all_cross_attn_scores[other]
+
+        k_count = max(1, int(img_len * top_k_ratio))
+        _, topk_idx = torch.topk(scores, k_count, dim=-1)   # (B, k)
+
+        # Gather core tokens: (B, k, dim)
+        expanded = topk_idx.unsqueeze(-1).expand(-1, -1, img_attn_out.shape[-1])
+        core_tokens = torch.gather(img_attn_out, dim=1, index=expanded)
+
+        # Self-modal similarity: core @ all_img^T
+        self_modal_sim = torch.bmm(core_tokens, img_attn_out.transpose(-1, -2))  # (B, k, img_len)
+        sim_avg = self_modal_sim.mean(dim=1, keepdim=True).transpose(1, 2)  # (B, img_len, 1)
+
+        # Apply softmax with temperature
+        sim_map = F.softmax(sim_avg / temperature, dim=1)
+        concept_sim_maps[lora_name] = sim_map
+
+    # Handle background positions
+    for bg_key in ["__background__", "__bg__", "__eos__"]:
+        if bg_key in token_pos_maps:
+            bg_pos = token_pos_maps[bg_key][0] if token_pos_maps[bg_key] else []
+            if bg_pos:
+                bg_pos_t = torch.tensor(bg_pos, device=device, dtype=torch.long)
+                bg_pos_t = bg_pos_t.clamp(0, cap_len - 1)
+
+                bg_k = txt_k[:, bg_pos_t, :, :]
+                bg_weights = torch.einsum("bihd,bjhd->bhij", img_q, bg_k) * scale
+                bg_weights = F.softmax(bg_weights, dim=2)
+                bg_scores = bg_weights.mean(dim=1).mean(dim=-1)
+
+                k_count = max(1, int(img_len * top_k_ratio))
+                _, bg_topk = torch.topk(bg_scores, k_count, dim=-1)
+
+                bg_exp = bg_topk.unsqueeze(-1).expand(-1, -1, img_attn_out.shape[-1])
+                bg_core = torch.gather(img_attn_out, dim=1, index=bg_exp)
+
+                bg_sim = torch.bmm(bg_core, img_attn_out.transpose(-1, -2))
+                bg_sim_avg = bg_sim.mean(dim=1, keepdim=True).transpose(1, 2)
+                bg_sim_map = F.softmax(bg_sim_avg / temperature, dim=1)
+
+                concept_sim_maps[bg_key] = bg_sim_map
+                break
+
+    return concept_sim_maps
+
+
 def apply_freefuse_replace_patches(
     model,
     state: FreeFuseState,
     model_type: str = "auto",
     sdxl_collect_blocks: Optional[List[Tuple]] = None,
+    flux_collect_blocks: Optional[List[int]] = None,
+    qwen_collect_blocks: Optional[List[int]] = None,
 ) -> None:
     """
     Apply FreeFuse replace patches to a ComfyUI model.
-    
+
     This uses an AGGRESSIVE approach: we directly access the model's internal
     blocks and their projection layers to compute QKV ourselves.
-    
+
     Args:
         model: ComfyUI ModelPatcher object
         state: FreeFuse state
-        model_type: "flux", "flux2", "sdxl", "z_image", or "auto"
+        model_type: "flux", "sdxl", "z_image", "qwen_image", or "auto"
         sdxl_collect_blocks: Optional list of (block_name, block_num, tf_index)
                             tuples for SDXL. If None, uses default.
+        flux_collect_blocks: Optional list of block indices for Flux range collection.
+                            If None, uses state.collect_block (single block mode).
+        qwen_collect_blocks: Optional list of block indices for Qwen-Image range collection.
+                            If None, uses state.collect_block (single block mode).
     """
     # Auto-detect model type
     if model_type == "auto":
         model_name = model.model.__class__.__name__.lower()
         if "nextdit" in model_name or "lumina" in model_name:
             model_type = "z_image"
-        elif "flux2" in model_name:
-            model_type = "flux2"
+        elif "qwenimage" in model_name or "qwen_image" in model_name:
+            model_type = "qwen_image"
         elif "flux" in model_name:
             model_type = "flux"
         else:
             model_type = "sdxl"
-    
+
     logging.info(f"[FreeFuse] Applying AGGRESSIVE replace patches for {model_type} model")
-    
+
     if model_type == "z_image":
         # Z-Image uses NextDiT (Lumina) architecture with layers array
         # We use the AGGRESSIVE QKV-based approach: pre-hook + double_block patch
         diffusion_model = model.model.diffusion_model
-        
+
         block_index = state.collect_block
         if hasattr(diffusion_model, 'layers') and len(diffusion_model.layers) > block_index:
             block = diffusion_model.layers[block_index]
-            
+
             # Create replacer with QKV extraction and register both
             # the pre-hook and the double_block patch
             replacer = FreeFuseZImageBlockReplace(state, block=block, block_index=block_index)
             replacer.install(model)
-            
+
             logging.info(f"[FreeFuse] Set QKV-based block replace for Z-Image layer {block_index}")
             logging.info(f"[FreeFuse] Block type: {type(block).__name__}")
         else:
             logging.error(f"[FreeFuse] Cannot find layers[{block_index}] in Z-Image diffusion model")
-    
+
+    elif model_type == "qwen_image":
+        # Qwen-Image uses MMDiT architecture with separate image/text streams
+        # Use the AGGRESSIVE QKV-based block replace approach (same as Z-Image)
+        diffusion_model = model.model.diffusion_model
+
+        # Determine which blocks to patch (range mode or single block mode)
+        if qwen_collect_blocks is None:
+            # Single block mode
+            qwen_collect_blocks = [state.collect_block]
+
+        # Find the transformer blocks array (Qwen-Image uses 'transformer_blocks' or 'layers')
+        target_blocks = None
+        if hasattr(diffusion_model, 'transformer_blocks'):
+            target_blocks = diffusion_model.transformer_blocks
+        elif hasattr(diffusion_model, 'layers'):
+            target_blocks = diffusion_model.layers
+
+        if target_blocks is not None and len(target_blocks) > 0:
+            max_idx = len(target_blocks) - 1
+
+            for block_index in qwen_collect_blocks:
+                # Clamp block index if needed
+                if block_index > max_idx:
+                    logging.warning(
+                        f"[FreeFuse] block_index={block_index} out of range for "
+                        f"{len(target_blocks)} transformer blocks; "
+                        f"skipping."
+                    )
+                    continue
+
+                block = target_blocks[block_index]
+
+                # Create replacer with actual block reference
+                replacer = FreeFuseQwenImageBlockReplace(state, block=block, block_index=block_index)
+                replacer.install(model)
+
+                logging.info(f"[FreeFuse] Set QKV-based block replace for Qwen-Image layer {block_index}")
+                logging.info(f"[FreeFuse] Block type: {type(block).__name__}")
+        else:
+            logging.error(f"[FreeFuse] Cannot find transformer_blocks or layers in Qwen-Image diffusion model")
+
     elif model_type == "flux":
         # Get the actual diffusion model
         diffusion_model = model.model.diffusion_model
+
+        # Determine which blocks to patch (range mode or single block mode)
+        if flux_collect_blocks is None:
+            # Single block mode
+            flux_collect_blocks = [state.collect_block]
         
-        # Get the target block
-        block_index = state.collect_block
+        # Apply block replace for each block in the range
         if hasattr(diffusion_model, 'double_blocks') and len(diffusion_model.double_blocks) > 0:
             max_idx = len(diffusion_model.double_blocks) - 1
-            if block_index > max_idx:
-                logging.warning(
-                    f"[FreeFuse] collect_block={block_index} out of range for "
-                    f"{len(diffusion_model.double_blocks)} double_blocks; "
-                    f"clamping to {max_idx}."
+            
+            for block_index in flux_collect_blocks:
+                # Clamp block index if needed
+                if block_index > max_idx:
+                    logging.warning(
+                        f"[FreeFuse] block_index={block_index} out of range for "
+                        f"{len(diffusion_model.double_blocks)} double_blocks; "
+                        f"skipping."
+                    )
+                    continue
+                
+                block = diffusion_model.double_blocks[block_index]
+
+                # Create replacer with actual block reference
+                replacer = FreeFuseFluxBlockReplace(state, block=block, block_index=block_index)
+                block_replace = replacer.create_block_replace()
+
+                # Set the replace patch using ComfyUI's API
+                model.set_model_patch_replace(
+                    block_replace,
+                    "dit",
+                    "double_block",
+                    block_index,
                 )
-                block_index = max_idx
-                state.collect_block = block_index
-            block = diffusion_model.double_blocks[block_index]
-            
-            # Create replacer with actual block reference
-            replacer = FreeFuseFluxBlockReplace(state, block=block, block_index=block_index)
-            block_replace = replacer.create_block_replace()
-            
-            # Set the replace patch using ComfyUI's API
-            model.set_model_patch_replace(
-                block_replace,
-                "dit",
-                "double_block",
-                block_index,
-            )
-            
-            logging.info(f"[FreeFuse] Set AGGRESSIVE block replace for double_block {block_index}")
-            logging.info(f"[FreeFuse] Block type: {type(block).__name__}")
+
+                logging.info(f"[FreeFuse] Set AGGRESSIVE block replace for double_block {block_index}")
+                logging.info(f"[FreeFuse] Block type: {type(block).__name__}")
         else:
-            logging.error(f"[FreeFuse] Cannot find double_blocks[{block_index}] in diffusion model")
-
-    elif model_type == "flux2":
-        diffusion_model = model.model.diffusion_model
-
-        block_index = state.collect_block
-
-        # Comfy Flux2 exposes single-stream stack as `single_blocks`.
-        # Keep compatibility with potential alternative naming.
-        single_blocks = getattr(diffusion_model, "single_blocks", None)
-        if (single_blocks is None or len(single_blocks) == 0) and hasattr(
-            diffusion_model, "single_transformer_blocks"
-        ):
-            single_blocks = diffusion_model.single_transformer_blocks
-
-        if single_blocks is not None and len(single_blocks) > 0:
-            max_idx = len(single_blocks) - 1
-            if block_index > max_idx:
-                logging.warning(
-                    f"[FreeFuse] collect_block={block_index} out of range for "
-                    f"{len(single_blocks)} single_transformer_blocks; clamping to {max_idx}."
-                )
-                block_index = max_idx
-                state.collect_block = block_index
-
-            block = single_blocks[block_index]
-            replacer = FreeFuseFluxSingleBlockReplace(
-                state,
-                block=block,
-                block_index=block_index,
-            )
-            block_replace = replacer.create_block_replace()
-
-            model.set_model_patch_replace(
-                block_replace,
-                "dit",
-                "single_block",
-                block_index,
-            )
-
-            logging.info(
-                f"[FreeFuse] Set AGGRESSIVE block replace for single_transformer_blocks.{block_index}"
-            )
-            logging.info(f"[FreeFuse] Block type: {type(block).__name__}")
-        else:
-            logging.error(
-                f"[FreeFuse] Cannot find single_transformer_blocks[{block_index}] in diffusion model"
-            )
+            logging.error(f"[FreeFuse] Cannot find double_blocks in diffusion model")
         
     else:
         # For SDXL, use attn1_output_patch + attn2 replace with SelfConcept method
@@ -1860,13 +2024,14 @@ def apply_freefuse_replace_patches(
 __all__ = [
     "FreeFuseState",
     "FreeFuseFluxBlockReplace",
-    "FreeFuseFluxSingleBlockReplace",
     "FreeFuseFluxAttentionReplace",
     "FreeFuseSDXLAttnReplace",
     "FreeFuseZImageBlockReplace",
+    "FreeFuseQwenImageBlockReplace",
     "compute_flux_similarity_maps_from_outputs",
     "compute_flux_similarity_maps_with_qkv",
     "compute_z_image_similarity_maps",
     "compute_z_image_similarity_maps_with_qkv",
+    "compute_qwen_image_similarity_maps_with_qkv",
     "apply_freefuse_replace_patches",
 ]

@@ -11,7 +11,7 @@ Design: Reuse ComfyUI internals as much as possible.
 
 Workflow:
 1. Load model
-2. FreeFuseLoRALoader for each character LoRA
+2. FreeFuse6LoraLoader for stacked LoRAs (up to 6 per adapter)
 3. FreeFuseConceptMap to define trigger words
 4. FreeFuseTokenPositions to compute token positions
 5. FreeFusePhase1Sampler to collect attention and generate masks
@@ -23,6 +23,8 @@ from .nodes import (
     # LoRA loaders
     FreeFuseLoRALoader,
     FreeFuseLoRALoaderSimple,
+    FreeFuse6LoraLoader,
+    FreeFuseBackgroundLoader,
     # Concept mapping
     FreeFuseConceptMap,
     FreeFuseTokenPositions,
@@ -32,8 +34,25 @@ from .nodes import (
     # Mask application
     FreeFuseMaskApplicator,
     FreeFuseMaskDebug,
+    # Mask debug nodes
+    FreeFuseMaskBankDebug,
+    FreeFuseBankInspector,
+    # Research nodes
+    FreeFuseBlocksAnalysis,
+    FreeFuseBaseAnalysis,
+    FreeFuseRawSimilarityOverlay,
+    # Attention bias nodes
+    FreeFuseAttentionBias,
+    FreeFuseAttentionBiasVisualize,
+    # Test/Debug nodes
+    FreeFuseTestSimilarityMaps,
+    FreeFuseQwenSimilarityExtractor,
+    FreeFuseQwenBlockGridExtractor,
     # Preview
     FreeFuseMaskPreview,
+    # Utility nodes
+    FreeFuseMaskTap,
+    FreeFuseMaskReassemble,
     # Mappings
     NODE_CLASS_MAPPINGS,
     NODE_DISPLAY_NAME_MAPPINGS,
@@ -41,4 +60,3 @@ from .nodes import (
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
 __version__ = "0.2.1"
-

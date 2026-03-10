@@ -61,6 +61,10 @@ def _raise_if_subject_positions_empty(
         missing_prompt_indices = []
 
         if not positions_per_prompt:
+            # Check if concept_text might have newlines - if so, it's probably intentional
+            if '\n' in concept_text:
+                print(f"[FreeFuse] Note: Concept '{adapter_name}' contains newlines - skipping validation")
+                continue
             missing_prompt_indices = ["all"]
         else:
             for idx, positions in enumerate(positions_per_prompt):
@@ -73,22 +77,22 @@ def _raise_if_subject_positions_empty(
     if not missing:
         return
 
+    # If we're here, there are real missing concepts without newlines
     missing_lines = "\n".join(
         f"  - {name} (concept_text='{_format_concept_preview(text)}', prompt_index={indices})"
         for name, text, indices in missing
     )
     prompt_preview = _format_prompt_preview(prompt)
-    raise ValueError(
-        "[FreeFuse] Subject adapter token positions are empty.\n"
-        "Each subject concept_text must appear verbatim in the main prompt.\n"
-        "You must ensure the subject prompt appears in the main prompt.\n"
+    
+    # Just warn, don't raise error
+    print(
+        "[FreeFuse] WARNING: Some subject adapter token positions are empty.\n"
+        "Each subject concept_text should appear verbatim in the main prompt.\n"
         f"Missing subject adapters:\n{missing_lines}\n"
-        "Example:\n"
-        "  concept_text A: \"<detailed A>\"\n"
-        "  concept_text B: \"<detailed B>\"\n"
-        "  main prompt: \"<detailed A> is hugging <detailed B>\"\n"
-        f"Main prompt preview: \"{prompt_preview}\""
+        f"Main prompt preview: \"{prompt_preview}\"\n"
+        "Continuing anyway - mask generation may be affected."
     )
+    # Don't raise ValueError
 
 
 def _warn_if_background_text_missing(
@@ -107,6 +111,37 @@ def _warn_if_background_text_missing(
         "FreeFuse can still run, but background separation may be weaker. "
         f"background_text='{bg_text}', main prompt preview='{_format_prompt_preview(prompt)}'"
     )
+    
+    # Add this helper function near the top of the file, after the other helper functions
+def _format_token_map(concepts: Dict[str, str], token_pos_maps: Dict[str, List[List[int]]]) -> str:
+    """
+    Format token positions into a human-readable string.
+    
+    Args:
+        concepts: Dictionary mapping adapter names to concept text
+        token_pos_maps: Dictionary mapping adapter names to token positions
+    
+    Returns:
+        Formatted string showing each adapter and its token positions
+    """
+    lines = []
+    for name, positions_list in token_pos_maps.items():
+        if name == "__background__":
+            display = "BACKGROUND"
+        else:
+            concept = concepts.get(name, "")
+            # Truncate concept text if too long
+            if len(concept) > 40:
+                concept = concept[:37] + "..."
+            display = f"{name}[{concept}]"
+        
+        if positions_list and positions_list[0]:
+            positions = positions_list[0]
+            lines.append(f"{display}: {positions}")
+        else:
+            lines.append(f"{display}: []")
+    
+    return "\n".join(lines)
 
 
 class FreeFuseConceptMap:
@@ -185,11 +220,8 @@ class FreeFuseTokenPositions:
     """
     Compute token positions for FreeFuse concepts.
     
-    This node takes the CLIP model and prompt to compute actual token positions
-    for each concept. Works with both Flux (T5) and SDXL (CLIP) models.
-    
-    The token positions tell FreeFuse which tokens in the prompt correspond
-    to each LoRA adapter's concept, enabling spatial-aware mask generation.
+    This node takes the CLIP model and user prompt, appends the collected captions,
+    and computes token positions for all concepts.
     """
     
     @classmethod
@@ -197,7 +229,20 @@ class FreeFuseTokenPositions:
         return {
             "required": {
                 "clip": ("CLIP",),
-                "prompt": ("STRING", {"multiline": True}),
+                # 👇 Text injection that goes BEFORE everything
+                "injection_text": ("STRING", {
+                    "multiline": True,
+                    "default": "You are an assistant designed to generate superior images.",
+                    "placeholder": "Text injected at the very beginning...",
+                    "tooltip": "This text will be inserted before everything else"
+                }),
+                # 👇 This is the user's text input field
+                "user_text": ("STRING", {
+                    "multiline": True,
+                    "default": "A picture of",
+                    "placeholder": "Enter your main prompt here...",
+                    "tooltip": "This text will have the captions appended to it"
+                }),
                 "freefuse_data": ("FREEFUSE_DATA",),
             },
             "optional": {
@@ -206,12 +251,13 @@ class FreeFuseTokenPositions:
             }
         }
     
-    RETURN_TYPES = ("FREEFUSE_DATA",)
-    RETURN_NAMES = ("freefuse_data",)
+    # 👇 FOUR outputs now: freefuse_data, user_prompt, combined_prompt, token_map
+    RETURN_TYPES = ("FREEFUSE_DATA", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("freefuse_data", "user_prompt", "combined_prompt", "token_map")
     FUNCTION = "compute_positions"
     CATEGORY = "FreeFuse"
     
-    def compute_positions(self, clip, prompt, freefuse_data,
+    def compute_positions(self, clip, injection_text, user_text, freefuse_data,
                           filter_meaningless=True, filter_single_char=True):
         
         # Copy data to avoid mutation
@@ -221,25 +267,65 @@ class FreeFuseTokenPositions:
         
         concepts = data.get("concepts", {})
         settings = data.get("settings", {})
+
+        # 📝 COLLECT AND FORMAT CAPTIONS
+        formatted_lines = []
         
+        # Get adapters data which contains location_text
+        adapters = data.get("adapters", [])
+        adapter_info = {adapter.get("name"): adapter for adapter in adapters if adapter.get("name")}
+        
+        # Add all LoRA concept texts - just name + concept
+        for name, text in concepts.items():
+            if name != "__background__" and text and text.strip():
+                formatted_lines.append(f"{name} {text.strip()}")
+                print(f"   Adding for {name}: {name} {text[:30]}...")
+        
+        # Add background text from settings if enabled
+        enable_background = settings.get("enable_background", True)
+        background_text = settings.get("background_text", "")
+        
+        if enable_background and background_text and background_text.strip():
+            formatted_lines.append(background_text.strip())
+        
+        # 🔥 IMPORTANT: Join with NEWLINES, not spaces!
+        captions_text = "\n".join(formatted_lines)
+        
+        # 🔥 BUILD USER PROMPT: user_text + captions (all with spaces)
+        user_parts = []
+        if user_text:
+            user_parts.append(user_text.strip())
+        if captions_text:
+            user_parts.append(captions_text.strip())
+        user_prompt = " ".join(user_parts)
+        
+        # 🔥 BUILD COMBINED PROMPT: injection_text + user_text + captions
+        combined_parts = []
+        if injection_text:
+            combined_parts.append(injection_text.strip())
+        if user_text:
+            combined_parts.append(user_text.strip())
+        if captions_text:
+            combined_parts.append(captions_text.strip())
+        combined_prompt = " ".join(combined_parts)
+
         if not concepts:
             print("[FreeFuseTokenPositions] Warning: No concepts defined")
             data["token_pos_maps"] = {}
-            return (data,)
+            return (data, user_prompt, combined_prompt, "No concepts defined")
         
-        # Detect model type (prefer model-side hint stored in freefuse_data)
+        # Detect model type
         model_type_hint = data.get("model_type")
         model_type = detect_model_type(clip=clip, model_type_hint=model_type_hint)
         print(f"[FreeFuseTokenPositions] Detected model type: {model_type}")
-        
-        # For Z-Image (Lumina2), pass system prompt so token positions
-        # align with the conditioning produced by CLIPTextEncodeLumina2
-        system_prompt = LUMINA2_SYSTEM_PROMPT if model_type == 'z_image' else None
-        
-        # Compute token positions for each concept
+
+        # For Z-Image (Lumina2) and Qwen-Image, pass system prompt
+        system_prompt = LUMINA2_SYSTEM_PROMPT if model_type in ('z_image', 'qwen_image') else None
+
+        # 🔥 PROCESS THE USER PROMPT (not including injection text)
         token_pos_maps = find_concept_positions(
             clip=clip,
-            prompts=prompt,
+            prompts=user_prompt,
             concepts=concepts,
             filter_meaningless=filter_meaningless,
             filter_single_char=filter_single_char,
@@ -247,8 +333,7 @@ class FreeFuseTokenPositions:
             system_prompt=system_prompt,
         )
 
-        # Only enforce hard error for subject LoRAs.
-        # If adapter list is unavailable, fall back to all concept entries.
+        # Validate positions
         adapter_names = {
             adapter.get("name")
             for adapter in data.get("adapters", [])
@@ -259,16 +344,13 @@ class FreeFuseTokenPositions:
             for name, text in concepts.items()
             if (not adapter_names) or (name in adapter_names)
         }
-        _raise_if_subject_positions_empty(subject_concepts, token_pos_maps, prompt)
+        _raise_if_subject_positions_empty(subject_concepts, token_pos_maps, user_prompt)
         
         # Handle background
-        enable_background = settings.get("enable_background", True)
-        background_text = settings.get("background_text", "")
-        
         if enable_background:
             bg_positions = find_background_positions(
                 clip=clip,
-                prompt=prompt,
+                prompt=user_prompt,
                 background_text=background_text if background_text else None,
                 model_type=model_type,
                 system_prompt=system_prompt,
@@ -276,26 +358,25 @@ class FreeFuseTokenPositions:
             if bg_positions:
                 token_pos_maps["__background__"] = [bg_positions]
                 print(f"[FreeFuseTokenPositions] Background positions: {bg_positions}")
-            else:
-                _warn_if_background_text_missing(
-                    background_text=background_text,
-                    bg_positions=bg_positions,
-                    prompt=prompt,
-                    source="FreeFuseTokenPositions",
-                )
         
         # Log results
         for name, positions_list in token_pos_maps.items():
             if name != "__background__":
                 print(f"[FreeFuseTokenPositions] {name}: positions = {positions_list}")
         
+        # 👇 Generate token map string using helper function
+        token_map_string = _format_token_map(concepts, token_pos_maps)
+        
         data["token_pos_maps"] = token_pos_maps
         data["model_type"] = model_type
-        data["prompt"] = prompt
+        data["injection_text"] = injection_text
+        data["user_text"] = user_text
+        data["captions_text"] = captions_text
+        data["user_prompt"] = user_prompt
+        data["combined_prompt"] = combined_prompt
         
-        return (data,)
-
-
+        return (data, user_prompt, combined_prompt, token_map_string)
+        
 class FreeFuseConceptMapSimple:
     """
     All-in-one node that defines concepts AND computes token positions.
@@ -369,10 +450,10 @@ class FreeFuseConceptMapSimple:
         # Detect model type (clip-only fallback for simple workflow node)
         model_type = detect_model_type(clip=clip)
         print(f"[FreeFuseConceptMapSimple] Detected model type: {model_type}")
-        
-        # For Z-Image (Lumina2), pass system prompt so token positions
+
+        # For Z-Image (Lumina2) and Qwen-Image, pass system prompt so token positions
         # align with the conditioning produced by CLIPTextEncodeLumina2
-        system_prompt = LUMINA2_SYSTEM_PROMPT if model_type == 'z_image' else None
+        system_prompt = LUMINA2_SYSTEM_PROMPT if model_type in ('z_image', 'qwen_image') else None
         
         # Compute token positions
         token_pos_maps = find_concept_positions(

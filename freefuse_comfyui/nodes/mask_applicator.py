@@ -130,49 +130,54 @@ When enabled, constructs soft attention bias to guide cross-attention:
     ):
         # Extract data
         mask_dict = masks.get("masks", {})
+        similarity_maps = masks.get("similarity_maps", {})
         adapters = freefuse_data.get("adapters", [])
         token_pos_maps = freefuse_data.get("token_pos_maps", {})
-        
-        if not mask_dict:
-            print("[FreeFuse] Warning: No masks provided, returning model unchanged")
+
+        # Always use argmax_masks (hard masks)
+        source_dict = mask_dict
+        print(f"[FreeFuse] Using argmax masks for masking (hard masks)")
+
+        if not source_dict:
+            print("[FreeFuse] Warning: No masks/similarity maps available, returning model unchanged")
             return (model,)
-        
+
         if not adapters:
             print("[FreeFuse] Warning: No adapters registered, returning model unchanged")
             return (model,)
-        
+
         # Determine latent size from masks or latent input
-        latent_size = self._get_latent_size(mask_dict, latent)
+        latent_size = self._get_latent_size(source_dict, latent)
         if latent_size is None:
             print("[FreeFuse] Warning: Could not determine latent size")
             return (model,)
-        
+
         # Clone the model
         model_clone = model.clone()
-        
+
         # Detect model type (prefer workflow/model-side hint).
         model_type = self._detect_model_type(
             model_clone,
             model_type_hint=freefuse_data.get("model_type"),
         )
         print(f"[FreeFuse] Detected model type: {model_type}")
-        
+
         # Get adapter name to mask mapping
         adapter_mask_map = {}
         for adapter_info in adapters:
             name = adapter_info.get("name")
-            if name and name in mask_dict:
+            if name and name in source_dict:
                 adapter_mask_map[name] = {
-                    "mask": mask_dict[name],
+                    "mask": source_dict[name],
                     "info": adapter_info,
                 }
             elif name:
-                print(f"[FreeFuse] Warning: No mask found for adapter '{name}'")
-        
+                print(f"[FreeFuse] Warning: No mask/similarity found for adapter '{name}'")
+
         if not adapter_mask_map:
             print("[FreeFuse] Warning: No adapter-mask mappings, returning model unchanged")
             return (model,)
-        
+
         # Apply masks using the hook system
         self._apply_masks_to_model(
             model_clone,
@@ -180,15 +185,15 @@ When enabled, constructs soft attention bias to guide cross-attention:
             latent_size,
             token_pos_maps if enable_token_masking else None,
         )
-        
+
         print(f"[FreeFuse] Applied masks to {len(adapter_mask_map)} adapters")
         print(f"[FreeFuse] Latent size: {latent_size}")
-        
+
         # Apply attention bias if enabled
         if enable_attention_bias and bias_blocks != "none":
             self._apply_attention_bias(
                 model_clone,
-                mask_dict,
+                source_dict,
                 token_pos_maps,
                 latent_size,
                 model_type,
@@ -198,7 +203,7 @@ When enabled, constructs soft attention bias to guide cross-attention:
                 use_positive_bias=use_positive_bias,
                 bias_blocks=bias_blocks,
             )
-        
+
         return (model_clone,)
     
     def _detect_model_type(self, model_patcher, model_type_hint: Optional[str] = None) -> str:
@@ -277,14 +282,14 @@ When enabled, constructs soft attention bias to guide cross-attention:
         elif model_type == "z_image":
             # Z-Image uses unified [img, txt] sequence (image FIRST)
             img_seq_len = latent_h * latent_w
-            
+
             # Estimate cap_seq_len from token_pos_maps
             cap_seq_len = 256  # Default for Qwen3 tokenizer
             for positions_list in token_pos_maps.values():
                 if positions_list and positions_list[0]:
                     max_pos = max(positions_list[0])
                     cap_seq_len = max(cap_seq_len, max_pos + 10)
-            
+
             # Flatten masks to (B, img_seq_len)
             lora_masks_flat = {}
             for name, mask in mask_dict.items():
@@ -294,7 +299,7 @@ When enabled, constructs soft attention bias to guide cross-attention:
                     mask = mask[0]
                 mask_flat = mask.reshape(-1)
                 lora_masks_flat[name] = mask_flat.unsqueeze(0)  # Add batch dim
-            
+
             apply_attention_bias_patches(
                 model_patcher=model_patcher,
                 attention_bias=None,
@@ -307,7 +312,41 @@ When enabled, constructs soft attention bias to guide cross-attention:
             print(f"[FreeFuse] Applied attention bias for Z-Image "
                   f"(bias_scale={bias_scale}, positive_scale={positive_bias_scale}, "
                   f"bidirectional={bidirectional}, img_seq={img_seq_len}, cap_seq={cap_seq_len})")
-        
+
+        elif model_type == "qwen_image":
+            # Qwen-Image uses dual-stream MMDiT architecture
+            img_seq_len = latent_h * latent_w
+
+            # Estimate cap_seq_len from token_pos_maps
+            cap_seq_len = 256  # Default for Qwen2.5-VL tokenizer
+            for positions_list in token_pos_maps.values():
+                if positions_list and positions_list[0]:
+                    max_pos = max(positions_list[0])
+                    cap_seq_len = max(cap_seq_len, max_pos + 10)
+
+            # Flatten masks to (B, img_seq_len)
+            lora_masks_flat = {}
+            for name, mask in mask_dict.items():
+                if name.startswith("_"):
+                    continue
+                if mask.dim() == 3:
+                    mask = mask[0]
+                mask_flat = mask.reshape(-1)
+                lora_masks_flat[name] = mask_flat.unsqueeze(0)  # Add batch dim
+
+            apply_attention_bias_patches(
+                model_patcher=model_patcher,
+                attention_bias=None,
+                config=config,
+                txt_seq_len=cap_seq_len,
+                model_type="qwen_image",
+                lora_masks=lora_masks_flat,
+                token_pos_maps=token_pos_maps,
+            )
+            print(f"[FreeFuse] Applied attention bias for Qwen-Image "
+                  f"(bias_scale={bias_scale}, positive_scale={positive_bias_scale}, "
+                  f"bidirectional={bidirectional}, img_seq={img_seq_len}, cap_seq={cap_seq_len})")
+
         else:  # SDXL
             # For SDXL, use the direct SDXL bias patches
             apply_attention_bias_patches(
@@ -575,16 +614,19 @@ class FreeFuseMaskDebug:
         mask_dict = masks.get("masks", {})
         sim_maps = masks.get("similarity_maps", {})
         
-        # Build info string
+        # Build info string (move tensors to CPU for stats)
         info_lines = ["FreeFuse Mask Debug:"]
         info_lines.append(f"  Masks: {len(mask_dict)}")
         for name, mask in mask_dict.items():
-            info_lines.append(f"    {name}: shape={tuple(mask.shape)}, "
-                            f"min={mask.min():.3f}, max={mask.max():.3f}")
+            # Move to CPU for statistics to avoid device issues
+            mask_cpu = mask.cpu() if mask.device.type == 'cuda' else mask
+            info_lines.append(f"    {name}: shape={tuple(mask_cpu.shape)}, "
+                            f"min={mask_cpu.min():.3f}, max={mask_cpu.max():.3f}")
         
         info_lines.append(f"  Similarity maps: {len(sim_maps)}")
         for name, sim in sim_maps.items():
-            info_lines.append(f"    {name}: shape={tuple(sim.shape)}")
+            sim_cpu = sim.cpu() if sim.device.type == 'cuda' else sim
+            info_lines.append(f"    {name}: shape={tuple(sim_cpu.shape)}")
         
         info = "\n".join(info_lines)
         
@@ -598,6 +640,10 @@ class FreeFuseMaskDebug:
         if not masks:
             return torch.zeros(1, target_size, target_size, 3)
         
+        # Get device from first mask
+        first_mask = next(iter(masks.values()))
+        device = first_mask.device
+        
         colors = [
             (1.0, 0.3, 0.3),   # Red
             (0.3, 1.0, 0.3),   # Green
@@ -608,15 +654,17 @@ class FreeFuseMaskDebug:
             (0.5, 0.5, 0.5),   # Gray
         ]
         
-        # Create combined visualization
-        combined = torch.zeros(3, target_size, target_size)
+        # Create combined visualization on the same device
+        combined = torch.zeros(3, target_size, target_size, device=device)
         
         for i, (name, mask) in enumerate(masks.items()):
             color = colors[i % len(colors)]
+            color_tensor = torch.tensor(color, device=device).view(3, 1, 1)
             
-            # Ensure mask is 2D
+            # Ensure mask is 2D and on correct device
             if mask.dim() == 3:
                 mask = mask[0]
+            mask = mask.to(device)
             
             # Resize to target
             mask_resized = F.interpolate(
@@ -627,8 +675,7 @@ class FreeFuseMaskDebug:
             ).squeeze()
             
             # Add colored mask
-            for c in range(3):
-                combined[c] += mask_resized * color[c]
+            combined += mask_resized * color_tensor
         
         # Normalize
         combined = combined.clamp(0, 1)

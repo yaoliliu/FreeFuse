@@ -8,6 +8,40 @@ import torch
 import torch.nn.functional as F
 
 
+def make_freefuse_masks_json_serializable(masks_data: dict) -> dict:
+    """
+    Convert FREEFUSE_MASKS data to JSON-serializable format.
+    
+    This converts PyTorch tensors to lists so the data can be stored
+    in ComfyUI workflow metadata without causing JSON serialization errors.
+    
+    Args:
+        masks_data: Dictionary containing 'masks' and/or 'similarity_maps' with tensors
+        
+    Returns:
+        Dictionary with tensors converted to lists
+    """
+    if not isinstance(masks_data, dict):
+        return masks_data
+    
+    result = {}
+    for key, value in masks_data.items():
+        if isinstance(value, dict):
+            result[key] = {}
+            for name, tensor in value.items():
+                if isinstance(tensor, torch.Tensor):
+                    # Convert tensor to list (CPU, float32)
+                    result[key][name] = tensor.cpu().float().numpy().tolist()
+                else:
+                    result[key][name] = tensor
+        elif isinstance(value, torch.Tensor):
+            result[key] = value.cpu().float().numpy().tolist()
+        else:
+            result[key] = value
+    
+    return result
+
+
 def linear_normalize(x, dim=1):
     """
     Normalize tensor to [0, 1] range along specified dimension.
