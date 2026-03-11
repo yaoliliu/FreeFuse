@@ -71,19 +71,11 @@ def main():
 
     rapstangled_subject_prompt = "rapstangled2010 in her signature purple dress"
     tifa_subject_prompt = "Tifa Lockhart with long dark hair and crimson eyes"
+    background_prompt = "a sunny park with green grass and blue sky"
 
     prompt = (
-        "An animated cinematic medium two-shot in a mountain cabin kitchen at night, "
-        "with a crackling campfire glowing through open wooden doors and cool misty blue mountains outside. "
-        f"{rapstangled_subject_prompt} sits beside the fire, warm orange light flickering across her face, "
-        "twirling a strand of hair before speaking with a soft smile: "
-        "\"This is the first lora I have trained.\" "
-        f"{tifa_subject_prompt} is already in motion in the same scene, bending to pick up a dropped receipt, "
-        "rising smoothly and turning toward her with a playful deadpan smirk as steam drifts from a nearby coffee mug. "
-        "She flicks the receipt lightly and replies with dry comedic rhythm about not needing a receipt for a doughnut. "
-        "They exchange eye contact, react to each other, and share a brief laugh. "
-        "The camera tracks in a slow continuous front-left to front-right arc, with natural body motion, expressive faces, "
-        "clean lip sync, and coherent dialogue timing between both characters."
+        f"{rapstangled_subject_prompt} and {tifa_subject_prompt} "
+        f"standing in {background_prompt}, talking to each other."
     )
     negative_prompt = (
         "shaky, glitchy, low quality, worst quality, deformed, distorted, motion smear, static"
@@ -119,8 +111,9 @@ def main():
         # FreeFuse controls
         freefuse_enabled=bool(freefuse_concept_map),
         freefuse_concept_map=freefuse_concept_map if freefuse_concept_map else None,
+        freefuse_background_text=background_prompt,
         freefuse_top_k_ratio=0.1,
-        freefuse_phase1_step=20,
+        freefuse_phase1_step=10,
         freefuse_attention_bias_scale=4.0,
         freefuse_attention_bias_positive_scale=2.0,
         freefuse_use_av_cross_attention_bias=False,

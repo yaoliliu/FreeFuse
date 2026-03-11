@@ -1292,8 +1292,22 @@ class FreeFuseLTX2Pipeline(LTX2Pipeline):
                 prompt=prompt,
                 concept_map={"__bg__": freefuse_background_text},
                 max_sequence_length=max_sequence_length,
+                filter_meaningless=False,
+                filter_single_char=False,
             )
-            freefuse_background_token_positions = bg_map["__bg__"][0] if "__bg__" in bg_map else None
+            bg_positions = bg_map.get("__bg__", [[]])[0]
+            if bg_positions:
+                freefuse_background_token_positions = bg_positions
+                print(
+                    f"[FreeFuse] Background text matched {len(bg_positions)} token positions "
+                    f"from: {freefuse_background_text!r}"
+                )
+            else:
+                print(
+                    f"[FreeFuse] WARNING: Background text {freefuse_background_text!r} "
+                    f"was NOT found as a substring of the prompt. "
+                    f"Falling back to EOS token for background."
+                )
 
         if freefuse_eos_token_index is None and isinstance(prompt, str):
             freefuse_eos_token_index = self.find_eos_token_index(prompt, max_sequence_length=max_sequence_length)
