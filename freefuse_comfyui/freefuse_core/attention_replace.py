@@ -20,6 +20,8 @@ import torch.nn.functional as F
 from typing import Dict, Any, Optional, Tuple, List, Callable
 import logging
 
+from .tensor_debug import format_tensor_stats
+
 
 class FreeFuseState:
     """
@@ -1066,8 +1068,8 @@ class FreeFuseSDXLAttnReplace:
             concept_sim_map = self_modal_sim.mean(dim=1)  # (B, img_len)
             
             logging.info(f"[SelfConcept] {lora_name}: hidden_states shape={hidden_states.shape}, "
-                        f"self_modal_sim range=[{self_modal_sim.min():.2f}, {self_modal_sim.max():.2f}], "
-                        f"mean={concept_sim_map.mean():.2f}")
+                        f"self_modal_sim range=[{format(self_modal_sim.min().item(), '.2f')}, {format(self_modal_sim.max().item(), '.2f')}], "
+                        f"mean={format(concept_sim_map.mean().item(), '.2f')}")
             
             # Apply softmax with temperature
             concept_sim_map = F.softmax(concept_sim_map / state.temperature, dim=-1)
@@ -1476,8 +1478,7 @@ class FreeFuseZImageBlockReplace:
 
             logging.info(f"[FreeFuse Z-Image] Collected {len(sim_maps)} similarity maps")
             for name, sm in sim_maps.items():
-                logging.info(f"   {name}: shape={sm.shape}, "
-                             f"min={sm.min():.6f}, max={sm.max():.6f}")
+                logging.info(f"   {name}: {format_tensor_stats(sm, include_shape=True)}")
 
 
 def compute_z_image_similarity_maps_with_qkv(

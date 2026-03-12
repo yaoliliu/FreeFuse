@@ -24,6 +24,7 @@ from ..freefuse_core.attention_replace import (
     compute_z_image_similarity_maps,
 )
 from ..freefuse_core.mask_utils import generate_masks
+from ..freefuse_core.tensor_debug import format_tensor_stats, tensor_scalar_to_float
 from ..freefuse_core.token_utils import detect_model_type
 from ..freefuse_core.voting import create_consensus_similarity_maps
 
@@ -577,7 +578,7 @@ for Phase 2 generation with the same seed and steps."""
         print(f"[FreeFuse] Raw similarity maps: {list(similarity_maps.keys())}")
         for name, sim_map in similarity_maps.items():
             if sim_map is not None:
-                print(f"   {name}: shape={sim_map.shape}, min={sim_map.min():.6f}, max={sim_map.max():.6f}, mean={sim_map.mean():.6f}")
+                print(f"   {name}: {format_tensor_stats(sim_map, include_shape=True, include_mean=True)}")
         
         # Generate masks directly from raw similarity maps
         # The new generate_masks can handle (B, N, 1) format and includes:
@@ -644,7 +645,7 @@ for Phase 2 generation with the same seed and steps."""
         print(f"[FreeFuse] Phase 1 complete. Generated {len(masks)} masks.")
         print(f"[FreeFuse] Mask keys: {list(masks.keys())}")
         for name, mask in masks.items():
-            coverage = mask.sum() / mask.numel() * 100
+            coverage = tensor_scalar_to_float(mask.sum()) / mask.numel() * 100
             print(f"   {name}: coverage={coverage:.1f}%")
         
         try:

@@ -11,6 +11,8 @@ import torch
 import torch.nn.functional as F
 from typing import Dict, List, Tuple
 
+from ..freefuse_core.tensor_debug import tensor_scalar_to_float
+
 
 class FreeFuseMaskPreview:
     """
@@ -98,7 +100,7 @@ Background mask (if present) is always gray."""
             print("[FreeFuse Mask Preview] Coverage statistics:")
             for name in sorted_names:
                 mask = mask_dict[name]
-                coverage = mask.sum() / mask.numel() * 100
+                coverage = tensor_scalar_to_float(mask.sum()) / mask.numel() * 100
                 print(f"  {name}: {coverage:.1f}% coverage")
         
         # Create combined preview

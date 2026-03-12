@@ -7,6 +7,8 @@ Ported from diffusers FreeFuse pipeline implementation.
 import torch
 import torch.nn.functional as F
 
+from .tensor_debug import format_tensor_stats
+
 
 def linear_normalize(x, dim=1):
     """
@@ -401,7 +403,7 @@ def generate_masks(
     if debug:
         print(f"[generate_masks] {C} concepts, shape={target_shape}")
         for i, name in enumerate(concept_names):
-            print(f"  {name}: min={stacked[i].min():.6f}, max={stacked[i].max():.6f}")
+            print(f"  {name}: {format_tensor_stats(stacked[i])}")
     
     if method == "stabilized":
         # Use the sophisticated stabilized_balanced_argmax from diffusers
