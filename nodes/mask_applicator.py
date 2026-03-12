@@ -33,6 +33,7 @@ from ..freefuse_core.attention_bias import (
 from ..freefuse_core.attention_bias_patch import (
     apply_attention_bias_patches,
 )
+from ..freefuse_core.tensor_debug import tensor_scalar_to_float
 from ..freefuse_core.token_utils import detect_model_type
 
 
@@ -580,7 +581,7 @@ class FreeFuseMaskDebug:
         info_lines.append(f"  Masks: {len(mask_dict)}")
         for name, mask in mask_dict.items():
             info_lines.append(f"    {name}: shape={tuple(mask.shape)}, "
-                            f"min={mask.min():.3f}, max={mask.max():.3f}")
+                            f"min={tensor_scalar_to_float(mask.min()):.3f}, max={tensor_scalar_to_float(mask.max()):.3f}")
         
         info_lines.append(f"  Similarity maps: {len(sim_maps)}")
         for name, sim in sim_maps.items():

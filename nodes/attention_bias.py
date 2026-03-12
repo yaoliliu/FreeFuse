@@ -22,6 +22,7 @@ from ..freefuse_core.attention_bias import (
 from ..freefuse_core.attention_bias_patch import (
     apply_attention_bias_patches,
 )
+from ..freefuse_core.tensor_debug import tensor_scalar_to_float
 from ..freefuse_core.token_utils import detect_model_type
 
 
@@ -342,8 +343,8 @@ Regions:
         info_lines = [
             "Attention Bias Info:",
             f"  Shape: {tuple(bias_tensor.shape)}",
-            f"  Min: {bias_tensor.min():.3f}",
-            f"  Max: {bias_tensor.max():.3f}",
+            f"  Min: {tensor_scalar_to_float(bias_tensor.min()):.3f}",
+            f"  Max: {tensor_scalar_to_float(bias_tensor.max()):.3f}",
             f"  Config: {config}",
         ]
         info = "\n".join(info_lines)
