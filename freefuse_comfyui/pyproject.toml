@@ -1,7 +1,7 @@
 [project]
 name = "freefuse"
-description = "FreeFuse: Easily multi LoRA multi subject Generation! 🤗"
-version = "1.0.12"
+description = "FreeFuse: Easily multi LoRA multi subject Generation! 🤗\n Attention: Upgrade to v1.0.13 if you face the 'TypeError: unsupported format string passed to GGMLTensor.format' error."
+version = "1.0.13"
 license = {file = "LICENSE"} 
 # classifiers = [
 #     # For OS-independent nodes (works on all operating systems)
