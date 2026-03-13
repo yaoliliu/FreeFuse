@@ -132,6 +132,9 @@ class FreeFuseMaskReassemble:
                 "mask_06": ("MASK",),
                 "mask_07": ("MASK",),
                 "freefuse_data": ("FREEFUSE_DATA",),
+            },
+            "optional": {
+                "latent": ("LATENT",),
             }
         }
 
@@ -140,7 +143,7 @@ class FreeFuseMaskReassemble:
     FUNCTION = "reassemble_masks"
     CATEGORY = "FreeFuse/Utils"
 
-    def reassemble_masks(self, mask_00, mask_01, mask_02, mask_03, mask_04, mask_05, mask_06, mask_07, freefuse_data):
+    def reassemble_masks(self, mask_00, mask_01, mask_02, mask_03, mask_04, mask_05, mask_06, mask_07, freefuse_data, latent=None):
         # Collect all input masks
         input_masks = [mask_00, mask_01, mask_02, mask_03, mask_04, mask_05, mask_06, mask_07]
 
@@ -149,7 +152,20 @@ class FreeFuseMaskReassemble:
         adapter_names = []
         seen = set()
         token_pos_maps = {}
-        target_size = 64  # Default latent size for 512px image
+        
+        # Calculate target size from latent input (most reliable method)
+        # Mask size = latent_size / 2 (or image_size / 16)
+        target_size = 64  # fallback
+        if latent is not None and isinstance(latent, dict):
+            samples = latent.get("samples")
+            if samples is not None and len(samples.shape) >= 3:
+                # Latent samples are [B, C, H, W]
+                latent_h = samples.shape[2]
+                # Mask resolution = latent / 2
+                target_size = latent_h // 2
+                print(f"[FreeFuseMaskReassemble] Target size from latent: {target_size}x{target_size} (latent_h={latent_h})")
+
+        # Always extract adapter names from freefuse_data (regardless of target_size source)
         if freefuse_data is not None and isinstance(freefuse_data, dict):
             adapters = freefuse_data.get("adapters", [])
             for a in adapters:
@@ -163,12 +179,12 @@ class FreeFuseMaskReassemble:
                     adapter_names.append(name)
                     seen.add(name)
             token_pos_maps = freefuse_data.get("token_pos_maps", {})
-            # Get target size from settings if available
-            settings = freefuse_data.get("settings", {})
-            if isinstance(settings, dict):
-                # Latent size is typically image_size / 8
-                image_size = settings.get("image_size", 512)
-                target_size = image_size // 8
+            # Only use settings for target_size if latent didn't provide it
+            if target_size == 64:
+                settings = freefuse_data.get("settings", {})
+                if isinstance(settings, dict):
+                    image_size = settings.get("image_size", 512)
+                    target_size = image_size // 8
 
         # Also add __background__ if it exists in the workflow (common pattern)
         # It will be at position after all LoRA adapters

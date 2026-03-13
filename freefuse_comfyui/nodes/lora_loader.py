@@ -22,9 +22,7 @@ import comfy.lora
 import comfy.lora_convert
 
 # Use our fixed bypass loader instead of ComfyUI's buggy version
-from ..freefuse_core.bypass_lora_loader import (
-    load_bypass_lora_for_models_fixed,
-)
+from ..freefuse_core.bypass_lora_loader import load_bypass_lora_for_models_fixed
 from ..freefuse_core.token_utils import detect_model_type
 
 
@@ -72,7 +70,7 @@ class FreeFuseLoRALoader:
     CATEGORY = "FreeFuse"
     
     DESCRIPTION = """Load LoRA in bypass mode for FreeFuse multi-concept composition.
-
+    
 Chain multiple loaders together. The adapter_name MUST match
 the concept name in FreeFuseConceptMap for mask application to work.
 
@@ -102,21 +100,6 @@ Example workflow:
         if lora is None:
             lora = comfy.utils.load_torch_file(lora_path, safe_load=True)
             self.loaded_lora = (lora_path, lora)
-
-        raw_single = sum(
-            1
-            for k in lora.keys()
-            if "single_blocks." in k or "single_transformer_blocks." in k
-        )
-        raw_double = sum(
-            1
-            for k in lora.keys()
-            if "double_blocks." in k or "transformer_blocks." in k
-        )
-        logging.info(
-            f"[FreeFuse] LoRA '{adapter_name}' raw key groups: "
-            f"single={raw_single}, double={raw_double}, total={len(lora)}"
-        )
         
         # Use FreeFuse's fixed bypass mode - correctly handles Flux fused QKV weights
         # Original ComfyUI's load_bypass_lora_for_models() doesn't support tuple keys
@@ -146,12 +129,9 @@ Example workflow:
         key_map = {}
         if model is not None:
             key_map = comfy.lora.model_lora_keys_unet(model.model, key_map)
-
+        
         lora_converted = comfy.lora_convert.convert_lora(lora)
         loaded = comfy.lora.load_lora(lora_converted, key_map)
-        logging.info(
-            f"[FreeFuse] LoRA '{adapter_name}' matched {len(loaded)} keys"
-        )
         
         # Store the adapter keys for this adapter
         adapter_key_list = list(loaded.keys())
@@ -222,7 +202,7 @@ class FreeFuseLoRALoaderSimple:
     CATEGORY = "FreeFuse"
     
     DESCRIPTION = """Simplified LoRA loader using standard patching.
-
+    
 Use this as fallback if bypass mode has issues. FreeFuse masks
 will be applied via attention modulation instead."""
     
