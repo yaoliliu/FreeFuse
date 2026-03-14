@@ -86,6 +86,9 @@ def _normalize_model_type(model_type: Optional[str]) -> Optional[str]:
         "sd1.5": "sd1",
         "sd2": "sd1",
         "sd2.x": "sd1",
+        "ltx": "ltx_video",
+        "ltx-video": "ltx_video",
+        "ltxv": "ltx_video",
     }
     return aliases.get(value, value)
 
@@ -105,7 +108,7 @@ def detect_model_type_from_model(model) -> str:
         model: ComfyUI model patcher or inner model object
 
     Returns:
-        'flux', 'flux2', 'sdxl', 'z_image', 'qwen_image', or 'unknown'
+        'flux', 'flux2', 'sdxl', 'z_image', 'qwen_image', 'ltx_video', or 'unknown'
     """
     core_model = _extract_model_core(model)
     if core_model is None:
@@ -121,6 +124,9 @@ def detect_model_type_from_model(model) -> str:
         return "flux2"
     if "flux" in model_cls:
         return "flux"
+    # Check for LTX-Video (AVTransformer3DModel)
+    if "ltx" in model_cls or "avtransformer" in model_cls:
+        return "ltx_video"
 
     dm = getattr(core_model, "diffusion_model", None)
     if dm is not None:
@@ -134,6 +140,9 @@ def detect_model_type_from_model(model) -> str:
             return "flux2"
         if "flux" in dm_cls:
             return "flux"
+        # Check for LTX-Video
+        if "ltx" in dm_cls or "avtransformer" in dm_cls:
+            return "ltx_video"
         # Qwen-Image: has double_blocks but NOT single_blocks (unlike Flux)
         # Also check for Qwen-specific attributes
         if hasattr(dm, "double_blocks") and not hasattr(dm, "single_blocks"):
@@ -174,7 +183,7 @@ def detect_model_type(clip=None, model=None, model_type_hint: Optional[str] = No
         model_type_hint: Explicit override or hint from workflow data
 
     Returns:
-        'flux', 'flux2', 'sdxl', 'z_image', 'qwen_image', 'qwen3', 'sd1', or 'unknown'
+        'flux', 'flux2', 'sdxl', 'z_image', 'qwen_image', 'qwen3', 'ltx_video', 'sd1', or 'unknown'
     """
     normalized_hint = _normalize_model_type(model_type_hint)
     if normalized_hint is not None:
@@ -197,6 +206,9 @@ def detect_model_type(clip=None, model=None, model_type_hint: Optional[str] = No
         return "flux2"
     if "flux" in cond_stage_name:
         return "flux"
+    # Check for LTX-Video (uses Gemma text encoder)
+    if "ltx" in cond_stage_name or "gemma" in cond_stage_name:
+        return "ltx_video"
 
     tokenizer = getattr(clip, "tokenizer", None)
     if tokenizer is None:
@@ -288,11 +300,11 @@ def _resolve_qwen3_tokenizer(tokenizer):
 def get_tokenizer_for_model(clip, model_type: str = None):
     """
     Get the appropriate tokenizer object from CLIP.
-    
+
     Args:
         clip: ComfyUI CLIP object
-        model_type: Optional override ('flux', 'flux2', 'sdxl', 'sd1', 'z_image', 'qwen3')
-        
+        model_type: Optional override ('flux', 'flux2', 'sdxl', 'sd1', 'z_image', 'qwen3', 'ltx_video')
+
     Returns:
         The underlying tokenizer object
     """
@@ -306,6 +318,22 @@ def get_tokenizer_for_model(clip, model_type: str = None):
         raise ValueError("Could not find clip.tokenizer on CLIP object.")
 
     if model_type in ("z_image", "flux2", "qwen3", "qwen_image"):
+        resolved = _resolve_qwen3_tokenizer(tokenizer)
+        if resolved is not None:
+            return resolved
+
+    # LTX-Video uses Gemma tokenizer
+    if model_type == "ltx_video":
+        # Try to find Gemma tokenizer
+        if hasattr(tokenizer, "gemma_3"):
+            resolved = _extract_nested_tokenizer(tokenizer.gemma_3)
+            if resolved is not None:
+                return resolved
+        if hasattr(tokenizer, "gemma"):
+            resolved = _extract_nested_tokenizer(tokenizer.gemma)
+            if resolved is not None:
+                return resolved
+        # Fallback to qwen3 resolver (similar chat template behavior)
         resolved = _resolve_qwen3_tokenizer(tokenizer)
         if resolved is not None:
             return resolved
@@ -686,7 +714,7 @@ def find_concept_positions_qwen3(
                 chunks = token_weight_pairs['qwen3_4b']
             else:
                 chunks = token_weight_pairs
-            
+
             # Flatten chunks to get token IDs
             token_ids = []
             for chunk in chunks:
@@ -697,8 +725,14 @@ def find_concept_positions_qwen3(
                         token_ids.append(int(item))
         except Exception as e:
             # Fallback: tokenize directly
-            print(f"[FreeFuse] Warning: clip.tokenize failed, using direct tokenization: {e}")
-            encoded = tokenizer(wrapped_text, add_special_tokens=True)
+            # This is normal for Qwen3/Gemma tokenizers which may not support clip.tokenize
+            print(f"[FreeFuse] Using direct tokenization (normal for Qwen3/Gemma): {e}")
+            # Gemma/SPieceTokenizer doesn't support add_special_tokens argument
+            try:
+                encoded = tokenizer(wrapped_text)
+            except TypeError:
+                # Some tokenizers require add_special_tokens
+                encoded = tokenizer(wrapped_text, add_special_tokens=True)
             token_ids = encoded['input_ids'] if hasattr(encoded, 'keys') else encoded.input_ids
             if hasattr(token_ids, 'tolist'):
                 token_ids = token_ids.tolist()
@@ -779,6 +813,158 @@ def find_concept_positions_qwen3(
     return concept_pos_map
 
 
+def find_concept_positions_ltx(
+    clip,
+    tokenizer,
+    prompts: Union[str, List[str]],
+    concepts: Dict[str, str],
+    filter_meaningless: bool = True,
+    filter_single_char: bool = True,
+    system_prompt: Optional[str] = None,
+) -> Dict[str, List[List[int]]]:
+    """
+    Find token positions for LTX-Video (Gemma 3 tokenizer).
+
+    LTX-Video uses Gemma 3 tokenizer. This function:
+    1. Optionally prepends system prompt if provided
+    2. Tokenizes using clip.tokenize() or direct tokenizer
+    3. Builds concat_text by decoding tokens
+    4. Finds concept text and maps back to token positions
+
+    Args:
+        clip: ComfyUI CLIP object
+        tokenizer: Gemma 3 tokenizer instance
+        prompts: Single prompt or list of prompts
+        concepts: Dict mapping concept name to concept text
+        filter_meaningless: Whether to filter stopwords/punctuation
+        filter_single_char: Whether to filter single-char tokens
+        system_prompt: Optional system prompt to prepend
+
+    Returns:
+        Dict mapping concept name to list of position lists (one per prompt)
+    """
+    if isinstance(prompts, str):
+        prompts = [prompts]
+
+    # Build prompt data
+    prompt_data_list = []
+    for prompt in prompts:
+        # Prepend system prompt if provided
+        if system_prompt:
+            tokenize_prompt = f"{system_prompt} {prompt}"
+        else:
+            tokenize_prompt = prompt
+
+        # Tokenize using the ComfyUI clip's tokenize method
+        try:
+            token_weight_pairs = clip.tokenize(tokenize_prompt)
+            # Try to find the token data
+            if isinstance(token_weight_pairs, dict):
+                # Try common keys
+                for key in ['gemma_3', 'gemma', 'qwen3_4b', 'ltx']:
+                    if key in token_weight_pairs:
+                        chunks = token_weight_pairs[key]
+                        break
+                else:
+                    # Use first available key
+                    chunks = next(iter(token_weight_pairs.values()))
+            else:
+                chunks = token_weight_pairs
+
+            # Flatten chunks to get token IDs
+            token_ids = []
+            for chunk in chunks:
+                for item in chunk:
+                    if isinstance(item, (tuple, list)):
+                        token_ids.append(int(item[0]))
+                    else:
+                        token_ids.append(int(item))
+        except Exception as e:
+            # Fallback: tokenize directly
+            # This is normal for Gemma/SPiece tokenizers which may not support clip.tokenize
+            print(f"[FreeFuse LTX] Using direct tokenization (normal for Gemma): {e}")
+            # Gemma/SPieceTokenizer doesn't support add_special_tokens argument
+            try:
+                encoded = tokenizer(tokenize_prompt)
+            except TypeError:
+                encoded = tokenizer(tokenize_prompt, add_special_tokens=True)
+            token_ids = encoded['input_ids'] if hasattr(encoded, 'keys') else encoded.input_ids
+            if hasattr(token_ids, 'tolist'):
+                token_ids = token_ids.tolist()
+
+        # Decode each token individually to build char offsets
+        token_texts = [tokenizer.decode([tid]) for tid in token_ids]
+
+        # Filter out padding tokens
+        active_indices = list(range(len(token_ids)))
+        active_token_texts = token_texts
+
+        # Reconstruct the concatenated decoded string and track spans
+        concat_text = ""
+        token_spans = []  # (start_in_concat, end_in_concat) per token
+        for tt in active_token_texts:
+            start = len(concat_text)
+            concat_text += tt
+            token_spans.append((start, len(concat_text)))
+
+        prompt_data_list.append({
+            "raw": prompt,
+            "tokenize_prompt": tokenize_prompt,
+            "active_indices": active_indices,
+            "active_token_texts": active_token_texts,
+            "concat_text": concat_text,
+            "token_spans": token_spans,
+        })
+
+    # Find positions for each concept
+    concept_pos_map = {}
+    for concept_name, concept_text in concepts.items():
+        concept_pos_map[concept_name] = []
+
+        for pd in prompt_data_list:
+            positions = []
+            positions_with_text = []
+
+            # Find concept_text inside concat_text (case-sensitive)
+            search_start = 0
+            while True:
+                idx = pd["concat_text"].find(concept_text, search_start)
+                if idx == -1:
+                    break
+                c_start, c_end = idx, idx + len(concept_text)
+
+                for tok_i, (ts, te) in enumerate(pd["token_spans"]):
+                    if te > c_start and ts < c_end and tok_i not in positions:
+                        positions.append(tok_i)
+                        positions_with_text.append(
+                            (tok_i, pd["active_token_texts"][tok_i])
+                        )
+
+                search_start = idx + 1
+
+            # Apply filtering
+            if filter_meaningless and positions_with_text:
+                filtered = [
+                    pos for pos, text in positions_with_text
+                    if not is_meaningless_token(text, check_single_char=filter_single_char)
+                ]
+                if not filtered:
+                    non_punct = [
+                        pos for pos, text in positions_with_text
+                        if clean_token_text(text) not in PUNCTUATION
+                    ]
+                    if non_punct:
+                        filtered = [non_punct[0]]
+                    elif positions_with_text:
+                        filtered = [positions_with_text[0][0]]
+                positions = filtered
+
+            positions.sort()
+            concept_pos_map[concept_name].append(positions)
+
+    return concept_pos_map
+
+
 def find_concept_positions(
     clip,
     prompts: Union[str, List[str]],
@@ -822,10 +1008,17 @@ def find_concept_positions(
         model_type = detect_model_type(clip=clip)
     else:
         model_type = _normalize_model_type(model_type) or model_type
-    
+
     tokenizer = get_tokenizer_for_model(clip, model_type)
-    
-    if model_type in ('z_image', 'flux2', 'qwen3', 'qwen_image'):
+
+    if model_type == 'ltx_video':
+        return find_concept_positions_ltx(
+            clip, tokenizer, prompts, concepts,
+            filter_meaningless=filter_meaningless,
+            filter_single_char=filter_single_char,
+            system_prompt=system_prompt,
+        )
+    elif model_type in ('z_image', 'flux2', 'qwen3', 'qwen_image'):
         return find_concept_positions_qwen3(
             clip, tokenizer, prompts, concepts,
             filter_meaningless=filter_meaningless,
@@ -847,7 +1040,7 @@ def find_concept_positions(
     else:
         raise ValueError(
             f"Unsupported model type: {model_type}. "
-            "Use 'flux', 'flux2', 'sdxl', 'z_image', 'qwen3', or 'sd1'."
+            "Use 'flux', 'flux2', 'sdxl', 'z_image', 'qwen3', 'qwen_image', 'ltx_video', or 'sd1'."
         )
 
 

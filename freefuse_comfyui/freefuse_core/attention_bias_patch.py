@@ -906,6 +906,12 @@ def apply_attention_bias_patches(
             logging.warning("[FreeFuse] Qwen-Image attention bias requires lora_masks and token_pos_maps")
             return
         _apply_qwen_image_bias_patches(model_patcher, lora_masks, token_pos_maps, config)
+    elif model_type == "ltx_video":
+        # LTX-Video uses CrossAttention with self-attention style
+        if lora_masks is None or token_pos_maps is None:
+            logging.warning("[FreeFuse] LTX-Video attention bias requires lora_masks and token_pos_maps")
+            return
+        _apply_ltx_video_bias_patches(model_patcher, lora_masks, token_pos_maps, config)
     elif model_type == "sdxl":
         if lora_masks is None or token_pos_maps is None or latent_size is None:
             logging.warning("[FreeFuse] SDXL attention bias requires lora_masks, token_pos_maps, and latent_size")
@@ -1148,13 +1154,27 @@ def _apply_qwen_image_bias_patches(
             blocks_attr = 'blocks'
         
         if blocks is None:
-            logging.warning("[FreeFuse] Could not find blocks in Qwen-Image model structure")
-            return
+            # Qwen-Image may use different block attribute names
+            # Try alternative attribute names for Qwen-Image
+            for attr_name in ['double_blocks', 'transformer_blocks', 'layers', 'blocks']:
+                if hasattr(diffusion_model, attr_name):
+                    blocks = getattr(diffusion_model, attr_name)
+                    blocks_attr = attr_name
+                    logging.info(f"[FreeFuse] Qwen-Image: Using '{attr_name}' for attention bias")
+                    break
+            
+            if blocks is None:
+                logging.info("[FreeFuse] Qwen-Image: Block structure not auto-detected, applying bias to all blocks (fallback mode)")
+                # Fallback: apply to all blocks using default count for Qwen-Image (60 blocks)
+                num_blocks = 60
+                blocks_attr = 'double_blocks'  # Default for Qwen-Image
             
         num_blocks = len(blocks)
     except AttributeError:
-        logging.warning("[FreeFuse] Could not access Qwen-Image model structure")
-        return
+        # Fallback for models with non-standard structure
+        logging.info("[FreeFuse] Qwen-Image: Using default block count (60 blocks)")
+        num_blocks = 60
+        blocks_attr = 'double_blocks'
 
     # Resolve block presets - use similar presets to Flux
     apply_to_blocks = config.apply_to_blocks
@@ -1200,3 +1220,91 @@ def _apply_qwen_image_bias_patches(
             patches_applied += 1
 
     logging.info(f"[FreeFuse] Applied attention bias to {patches_applied} Qwen-Image {blocks_attr}")
+
+
+def _apply_ltx_video_bias_patches(
+    model_patcher,
+    lora_masks: Dict[str, torch.Tensor],
+    token_pos_maps: Dict[str, List[List[int]]],
+    config: AttentionBiasConfig,
+):
+    """Apply attention bias patches for LTX-Video model.
+    
+    LTX-Video uses CrossAttention with self-attention style.
+    This function applies bias to guide text-image attention based on spatial masks.
+    """
+    if lora_masks is None or not lora_masks:
+        logging.warning("[FreeFuse] No LoRA masks provided for LTX-Video attention bias")
+        return
+
+    if token_pos_maps is None or not token_pos_maps:
+        logging.warning("[FreeFuse] No token position maps provided for LTX-Video attention bias")
+        return
+
+    # Get model structure
+    try:
+        diffusion_model = model_patcher.model.diffusion_model
+        if hasattr(diffusion_model, 'transformer_blocks'):
+            blocks = diffusion_model.transformer_blocks
+            blocks_attr = 'transformer_blocks'
+        elif hasattr(diffusion_model, 'layers'):
+            blocks = diffusion_model.layers
+            blocks_attr = 'layers'
+        else:
+            blocks = None
+            blocks_attr = None
+
+        if blocks is None:
+            logging.warning("[FreeFuse] Could not find transformer_blocks in LTX-Video model structure")
+            return
+
+        num_blocks = len(blocks)
+    except AttributeError:
+        logging.warning("[FreeFuse] Could not access LTX-Video model structure")
+        return
+
+    # Resolve block presets
+    apply_to_blocks = config.apply_to_blocks
+    if isinstance(apply_to_blocks, str):
+        preset = apply_to_blocks
+        if preset == "all":
+            apply_to_blocks = None
+        elif preset == "last_half":
+            apply_to_blocks = [f"{blocks_attr}.{i}" for i in range(num_blocks // 2, num_blocks)]
+        elif preset == "double_stream_only":
+            # For LTX-Video, apply to all blocks (no double/single stream distinction)
+            apply_to_blocks = None
+        else:
+            apply_to_blocks = [preset]
+        config = AttentionBiasConfig(
+            enabled=config.enabled,
+            bias_scale=config.bias_scale,
+            positive_bias_scale=config.positive_bias_scale,
+            bidirectional=config.bidirectional,
+            use_positive_bias=config.use_positive_bias,
+            apply_to_blocks=apply_to_blocks,
+        )
+
+    patches_applied = 0
+
+    for i in range(num_blocks):
+        block_name = f"{blocks_attr}.{i}"
+        if config.should_apply_to_block(block_name):
+            block = blocks[i]
+            # Use Flux bias replacer - LTX-Video uses similar attention mechanism
+            replacer = FreeFuseFluxBiasBlockReplace(
+                lora_masks=lora_masks,
+                token_pos_maps=token_pos_maps,
+                config=config,
+                block_index=i,
+                block=block,
+            )
+            model_patcher.set_model_patch_replace(
+                replacer.create_block_replace(),
+                "dit",
+                blocks_attr,
+                i,
+            )
+            patches_applied += 1
+
+    logging.info(f"[FreeFuse] Applied attention bias to {patches_applied} LTX-Video {blocks_attr}")

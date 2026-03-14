@@ -347,6 +347,59 @@ When enabled, constructs soft attention bias to guide cross-attention:
                   f"(bias_scale={bias_scale}, positive_scale={positive_bias_scale}, "
                   f"bidirectional={bidirectional}, img_seq={img_seq_len}, cap_seq={cap_seq_len})")
 
+        elif model_type == "ltx_video":
+            # LTX-Video uses CrossAttention with self-attention style
+            # For video: img_seq_len = T * H * W (but attention may operate at different resolution)
+            # Use mask dimensions to determine actual attention resolution
+            img_seq_len = latent_h * latent_w
+            
+            # Get actual sequence length from first mask
+            first_mask = None
+            for name, mask in mask_dict.items():
+                if not name.startswith("_"):
+                    first_mask = mask
+                    break
+            
+            if first_mask is not None:
+                if first_mask.dim() == 3:
+                    actual_seq_len = first_mask.shape[1] * first_mask.shape[2]
+                else:
+                    actual_seq_len = first_mask.numel()
+                # Use actual attention resolution if available
+                if actual_seq_len != img_seq_len:
+                    print(f"[FreeFuse] LTX-Video: Using attention resolution {actual_seq_len} (vs latent {img_seq_len})")
+                    img_seq_len = actual_seq_len
+
+            # Estimate cap_seq_len from token_pos_maps
+            cap_seq_len = 256  # Default for Gemma tokenizer
+            for positions_list in token_pos_maps.values():
+                if positions_list and positions_list[0]:
+                    max_pos = max(positions_list[0])
+                    cap_seq_len = max(cap_seq_len, max_pos + 10)
+
+            # Flatten masks to (B, img_seq_len)
+            lora_masks_flat = {}
+            for name, mask in mask_dict.items():
+                if name.startswith("_"):
+                    continue
+                if mask.dim() == 3:
+                    mask = mask[0]
+                mask_flat = mask.reshape(-1)
+                lora_masks_flat[name] = mask_flat.unsqueeze(0)  # Add batch dim
+
+            apply_attention_bias_patches(
+                model_patcher=model_patcher,
+                attention_bias=None,
+                config=config,
+                txt_seq_len=cap_seq_len,
+                model_type="ltx_video",
+                lora_masks=lora_masks_flat,
+                token_pos_maps=token_pos_maps,
+            )
+            print(f"[FreeFuse] Applied attention bias for LTX-Video "
+                  f"(bias_scale={bias_scale}, positive_scale={positive_bias_scale}, "
+                  f"img_seq={img_seq_len}, cap_seq={cap_seq_len})")
+
         else:  # SDXL
             # For SDXL, use the direct SDXL bias patches
             apply_attention_bias_patches(

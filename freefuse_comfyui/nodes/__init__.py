@@ -109,6 +109,16 @@ from .mask_refiner import (
     NODE_CLASS_MAPPINGS as MASK_REFINER_NODE_MAPPINGS,
     NODE_DISPLAY_NAME_MAPPINGS as MASK_REFINER_DISPLAY_MAPPINGS,
 )
+from .ltx_similarity_extractor import (
+    FreeFuseLTXSimilarityExtractor,
+    NODE_CLASS_MAPPINGS as LTX_SIM_NODE_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as LTX_SIM_DISPLAY_MAPPINGS,
+)
+from .ltx_block_grid_extractor import (
+    FreeFuseLTXBlockGridExtractor,
+    NODE_CLASS_MAPPINGS as LTX_GRID_NODE_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as LTX_GRID_DISPLAY_MAPPINGS,
+)
 
 # Combine all node mappings
 NODE_CLASS_MAPPINGS = {
@@ -154,6 +164,10 @@ NODE_CLASS_MAPPINGS = {
     "FreeFuseTestSimilarityMaps": FreeFuseTestSimilarityMaps,
     "FreeFuseQwenSimilarityExtractor": FreeFuseQwenSimilarityExtractor,
     "FreeFuseQwenBlockGridExtractor": FreeFuseQwenBlockGridExtractor,
+
+    # LTX-Video nodes
+    "FreeFuseLTXSimilarityExtractor": FreeFuseLTXSimilarityExtractor,
+    "FreeFuseLTXBlockGridExtractor": FreeFuseLTXBlockGridExtractor,
 
     # Mask exporter
     "FreeFuseMaskExporter": FreeFuseMaskExporter,
@@ -209,6 +223,12 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FreeFuseTestSimilarityMaps": "🧪 FreeFuse Test Similarity Maps",
     "FreeFuseQwenSimilarityExtractor": "🔬 FreeFuse Qwen Similarity Extractor",
     "FreeFuseQwenBlockGridExtractor": "🔍 Qwen Block Grid Extractor",
+
+    # LTX-Video nodes
+    "FreeFuseLTXSimilarityExtractor": "🎬 FreeFuse LTX Similarity Extractor",
+    "FreeFuseLTXBlockGridExtractor": "🎬 FreeFuse LTX Block Grid Extractor",
+
+    # Mask exporter
     "FreeFuseMaskExporter": "💾 FreeFuse Mask Exporter",
     "FreeFuseMaskRefiner": "🔧 FreeFuse Mask Refiner",
 
@@ -259,13 +279,17 @@ __all__ = [
     "FreeFuseQwenSimilarityExtractor",
     "FreeFuseQwenBlockGridExtractor",
 
+    # LTX-Video nodes
+    "FreeFuseLTXSimilarityExtractor",
+    "FreeFuseLTXBlockGridExtractor",
+
     # Preview
     "FreeFuseMaskPreview",
-    
+
     # Utility nodes
     "FreeFuseMaskTap",
     "FreeFuseMaskReassemble",
-    
+
     # Mappings
     "NODE_CLASS_MAPPINGS",
     "NODE_DISPLAY_NAME_MAPPINGS",

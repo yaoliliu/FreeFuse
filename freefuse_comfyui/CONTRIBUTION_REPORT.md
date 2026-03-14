@@ -85,7 +85,7 @@ This report presents a comprehensive analysis of the codebase differences betwee
 
 **Files Added:**
 - `nodes/lora_6_loader.py` (267 lines)
-- `nodes/lora_loader.py` (new)
+- `nodes/lora_loader_pipe.py` (new)
 
 **Features:**
 - ✅ Load up to 6 LoRAs per character adapter
@@ -264,11 +264,14 @@ FreeFuse6LoraLoader (1 node, 6 LoRAs)
 ```
 ⚠️ nodes/base_analysis.py              # Research tool
 ⚠️ nodes/blocks_analysis.py            # Research tool
+⚠️ nodes/concept_map_temp.py           # Alternative implementation
 ```
 
 ### 6.3 Files to Exclude (Not Used)
 
 ```
+❌ nodes/lora_loader.py                # UNUSED - Replaced by lora_6_loader
+❌ nodes/lora_loader_pipe.py           # UNUSED - Not in any workflow
 ❌ nodes/test_similarity_maps.py       # UNUSED - Test/debug utility only
 ```
 
@@ -308,8 +311,10 @@ freefuse_comfyui/
 │   ├── base_analysis.py           ← NEW (optional)
 │   ├── blocks_analysis.py         ← NEW (optional)
 │   ├── concept_map.py
+│   ├── concept_map_temp.py        ← NEW (optional)
 │   ├── lora_6_loader.py           ← NEW
-│   ├── lora_loader.py             ← NEW
+│   ├── lora_loader.py
+│   ├── lora_loader_pipe.py        ← NEW
 │   ├── mask_applicator.py
 │   ├── mask_debug.py              ← NEW
 │   ├── mask_exporter.py           ← NEW
@@ -495,10 +500,9 @@ This contribution represents a **significant enhancement** to the FreeFuse codeb
 
 ## Appendix A: File Inventory
 
-### New Files (20 total)
+### New Files (22 total)
 
-**Nodes to Merge (10):**
-- `lora_loader.py` ✅ Primary LoRA loader (bypass mode)
+**Nodes to Merge (9):**
 - `lora_6_loader.py` ✅ USED in all workflows
 - `background_loader.py` ✅
 - `mask_refiner.py` ✅
@@ -513,10 +517,12 @@ This contribution represents a **significant enhancement** to the FreeFuse codeb
 - `test_similarity_maps.py` ⚠️ Test utility (not used in workflows)
 - `base_analysis.py` ⚠️ Research tool
 - `blocks_analysis.py` ⚠️ Research tool
+- `concept_map_temp.py` ⚠️ Alternative implementation
 
-**Nodes Removed (2):**
-- `lora_loader_pipe.py` ❌ REMOVED - Not in any workflow
-- `concept_map_temp.py` ❌ REMOVED - Duplicate implementation
+**Nodes to Exclude (3):**
+- `lora_loader.py` ❌ UNUSED, replaced by lora_6_loader
+- `lora_loader_pipe.py` ❌ UNUSED, not in any workflow
+- `test_similarity_maps.py` ❌ UNUSED, test utility only (if not keeping research tools)
 
 **Core (2):**
 - `json_serialization.py`
@@ -539,6 +545,9 @@ This contribution represents a **significant enhancement** to the FreeFuse codeb
 
 **Assets (1):**
 - `qwen-image-workflow.png`
+
+**Exclude (1):**
+- `lora_loader_pipe.py` - UNUSED, not in any workflow
 
 ---
 

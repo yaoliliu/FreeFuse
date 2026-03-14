@@ -1,0 +1,29 @@
+Model links
+
+Models (dev)
+BF16: ltx-2-3-22b-dev-model.safetensors
+FP8: ltx-2.3-22b-dev_transformer_only_fp8_scaled.safetensors
+GGUF: ltx-2-3-22b-dev-XX_X.gguf
+
+Models (distilled)
+BF16: ltx-2-3-22b-distilled-model.safetensors
+FP8: ltx-2.3-22b-distilled_transformer_only_fp8_scaled.safetensors
+GGUF: ltx-2-3-22b-distilled-XX_X.gguf
+
+text_encoders
+gemma_3_12B_it.safetensors
+ltx-2-3-22b-text_encoder.safetensors
+
+vae
+ltx-2-3-22b-VAE.safetensors
+ltx-2-3-22b-audio_vae.safetensors
+
+loras
+ltx-2.3-22b-distilled-lora-384.safetensors
+
+latent_upscale_models
+ltx-2.3-spatial-upscaler-x2-1.0.safetensors
+ltx-2.3-spatial-upscaler-x1.5-1.0.safetensors
+
+Vocals Extraction
+MelBandRoformer_fp32.safetensors
