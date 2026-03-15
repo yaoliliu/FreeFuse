@@ -52,8 +52,8 @@ class FreeFuseLTXSimilarityExtractor:
                     "tooltip": "Step at which to collect attention (1 is enough)"
                 }),
                 "collect_block": ("INT", {
-                    "default": 24, "min": 0, "max": 47,
-                    "tooltip": "Which transformer block to collect from (0-47 for LTX-Video)"
+                    "default": 10, "min": 0, "max": 47,
+                    "tooltip": "Which transformer block to collect from (0-47 for 48-block LTX-Video, 8-15 recommended)"
                 }),
                 "cfg": ("FLOAT", {
                     "default": 3.5, "min": 0.0, "max": 20.0, "step": 0.1
@@ -69,8 +69,12 @@ class FreeFuseLTXSimilarityExtractor:
             },
             "optional": {
                 "temperature": ("FLOAT", {
-                    "default": 4000.0, "min": 0.0, "max": 10000.0, "step": 100.0,
+                    "default": 500.0, "min": 0.0, "max": 10000.0, "step": 100.0,
                     "tooltip": "Temperature for similarity computation"
+                }),
+                "use_cross_attention": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Use cross-attention (video→text) instead of self-attention. May give better concept separation for LTX-Video."
                 }),
                 "top_k_ratio": ("FLOAT", {
                     "default": 0.3, "min": 0.01, "max": 1.0, "step": 0.05,
@@ -101,8 +105,8 @@ class FreeFuseLTXSimilarityExtractor:
 Hooks into the model's attention mechanism at a specific block and step,
 then computes similarity maps using the FreeFuse algorithm.
 
-LTX-Video has 48 transformer blocks with 32 attention heads each.
-Recommended blocks: 20-30 for best concept separation.
+LTX-Video has 28 transformer blocks with 32 attention heads each.
+Recommended blocks: 10-16 for best concept separation.
 
 Use this to debug and visualize what the model is attending to for each concept."""
 
@@ -119,7 +123,8 @@ Use this to debug and visualize what the model is attending to for each concept.
                 cfg,
                 sampler_name,
                 scheduler,
-                temperature=4000.0,
+                temperature=500.0,
+                use_cross_attention=False,
                 top_k_ratio=0.3,
                 preview_size=512,
                 low_vram_mode=True,
@@ -139,9 +144,9 @@ Use this to debug and visualize what the model is attending to for each concept.
         print(f"  Concepts: {list(concepts.keys())}")
         print(f"  Token positions: {list(token_pos_maps.keys())}")
         print(f"  Collect step: {collect_step}/{steps}")
-        print(f"  Collect block: {collect_block}/47")
         print(f"  Temperature: {temperature}, top_k_ratio: {top_k_ratio}")
         print(f"  Low VRAM mode: {low_vram_mode}")
+
         if attention_head_index >= 0:
             print(f"  Using SINGLE HEAD {attention_head_index} (not averaged)")
 
@@ -157,15 +162,15 @@ Use this to debug and visualize what the model is attending to for each concept.
 
         # Get latent dimensions
         latent_tensor = latent["samples"]
-        
+
         # LTX-Video uses 5D latents: (B, C, T, H, W)
         if latent_tensor.dim() == 4:
             print(f"[FreeFuse LTX Extract] Adding temporal dimension to latent: {latent_tensor.shape}")
             latent_tensor = latent_tensor.unsqueeze(2)  # Insert T dimension at index 2
-        
+
         B, C, T, H, W = latent_tensor.shape
         img_len = T * H * W
-        
+
         print(f"[FreeFuse LTX Extract] Latent shape: {latent_tensor.shape}, seq_len: {img_len}")
 
         # Storage for collected similarity maps
@@ -178,21 +183,44 @@ Use this to debug and visualize what the model is attending to for each concept.
         # Check if this is actually an LTX model
         model_name = diffusion_model.__class__.__name__.lower()
         print(f"[FreeFuse LTX Extract] Model type: {model_name}")
+        print(f"[FreeFuse LTX Extract] Model class: {diffusion_model.__class__.__name__}")
 
         if "ltx" not in model_name and "avtransformer" not in model_name:
             print(f"[FreeFuse LTX Extract] WARNING: Model name doesn't contain 'ltx' or 'avtransformer'")
             print("  This node is designed for LTX-Video models")
+
+        # Debug: show available attributes
+        block_attrs = [a for a in dir(diffusion_model) if 'block' in a.lower() or 'layer' in a.lower() or 'transformer' in a.lower()]
+        print(f"[FreeFuse LTX Extract] Block-related attributes: {block_attrs}")
 
         # Try to find the transformer blocks array
         # LTX-Video uses 'transformer_blocks'
         target_blocks = None
         if hasattr(diffusion_model, 'transformer_blocks'):
             target_blocks = diffusion_model.transformer_blocks
+            print(f"[FreeFuse LTX Extract] transformer_blocks type: {type(target_blocks)}")
+            if hasattr(target_blocks, '__len__'):
+                print(f"[FreeFuse LTX Extract] transformer_blocks count: {len(target_blocks)}")
+            # Check if it's a ModuleList
+            if hasattr(target_blocks, '__iter__'):
+                block_types = set()
+                for i, blk in enumerate(target_blocks):
+                    block_types.add(type(blk).__name__)
+                    if i < 3 or i >= len(target_blocks) - 3:
+                        print(f"[FreeFuse LTX Extract]   Block {i}: {type(blk).__name__}")
+                    elif i == 3:
+                        print(f"[FreeFuse LTX Extract]   ... ({len(target_blocks) - 6} more blocks) ...")
+                print(f"[FreeFuse LTX Extract] Unique block types: {block_types}")
         elif hasattr(diffusion_model, 'layers'):
             target_blocks = diffusion_model.layers
+            print(f"[FreeFuse LTX Extract] layers type: {type(target_blocks)}")
+            if hasattr(target_blocks, '__len__'):
+                print(f"[FreeFuse LTX Extract] layers count: {len(target_blocks)}")
 
         if target_blocks is not None:
             print(f"[FreeFuse LTX Extract] Found {len(target_blocks)} transformer blocks")
+            print(f"  Collect block: {collect_block}/{len(target_blocks) - 1}")
+            print(f"  Recommended block range: {len(target_blocks) // 2}-{min(len(target_blocks) // 2 + 10, len(target_blocks) - 1)}")
 
             if collect_block >= len(target_blocks):
                 print(f"[FreeFuse LTX Extract] ERROR: collect_block {collect_block} >= num_blocks {len(target_blocks)}")
@@ -201,6 +229,7 @@ Use this to debug and visualize what the model is attending to for each concept.
 
             target_block = target_blocks[collect_block]
             print(f"[FreeFuse LTX Extract] Target block type: {type(target_block).__name__}")
+            print(f"[FreeFuse LTX Extract] Attention mode: {'cross-attention (video→text)' if use_cross_attention else 'self-attention (video→video)'}")
 
             # Install hook on target block
             hook = LTXAttentionHook(
@@ -212,6 +241,7 @@ Use this to debug and visualize what the model is attending to for each concept.
                 img_len=img_len,
                 collected_sim_maps=collected_sim_maps,
                 attention_head_index=attention_head_index,
+                use_cross_attention=use_cross_attention,
             )
             hook.install(model_clone)
             print(f"[FreeFuse LTX Extract] Hook installed on block {collect_block}")
@@ -298,12 +328,50 @@ Use this to debug and visualize what the model is attending to for each concept.
         for name, sim_map in collected_sim_maps.items():
             if isinstance(sim_map, torch.Tensor):
                 print(f"  {name}: shape={sim_map.shape}, min={sim_map.min():.6f}, max={sim_map.max():.6f}")
+        
+        # 🔥 CRITICAL: Show pathway detection summary for 1536x1536 and other resolutions
+        if collected_sim_maps:
+            first_sim = list(collected_sim_maps.values())[0]
+            if isinstance(first_sim, torch.Tensor):
+                seq_len = first_sim.shape[1]
+                print(f"[🔥 LTX Pathway Summary] seq_len={seq_len}")
+                
+                # Check for Path A (latent ST) and Path B (high-res) patterns
+                if T > 1:
+                    # Video mode: check if seq_len = T × spatial
+                    if seq_len % T == 0:
+                        spatial_tokens = seq_len // T
+                        spatial_size = int(spatial_tokens ** 0.5)
+                        if spatial_size * spatial_size == spatial_tokens:
+                            print(f"[🔥 LTX Pathway] ✅ Video detected: T={T}, spatial={spatial_size}x{spatial_size} ({spatial_tokens} tokens/frame)")
+                            print(f"[🔥 LTX Pathway]    Path A would be: {spatial_size}x{spatial_size} × {T} = {seq_len} tokens")
+                        else:
+                            # Non-square spatial
+                            for i in range(int(spatial_tokens ** 0.5), 0, -1):
+                                if spatial_tokens % i == 0:
+                                    h = i
+                                    w = spatial_tokens // i
+                                    print(f"[🔥 LTX Pathway] ⚠️ Video (non-square): T={T}, spatial={h}x{w} ({spatial_tokens} tokens/frame)")
+                                    break
+                    else:
+                        print(f"[🔥 LTX Pathway] ❗ seq_len {seq_len} not divisible by T={T}")
+                else:
+                    # Image mode: seq_len is pure spatial
+                    spatial_size = int(seq_len ** 0.5)
+                    if spatial_size * spatial_size == seq_len:
+                        print(f"[🔥 LTX Pathway] ✅ Image detected: spatial={spatial_size}x{spatial_size} ({seq_len} tokens)")
+                    else:
+                        print(f"[🔥 LTX Pathway] ⚠️ Image (non-square): seq_len={seq_len}")
 
         # Move similarity maps to CPU to free VRAM
         if low_vram_mode:
             print(f"[FreeFuse LTX Extract] Moving similarity maps to CPU...")
-            for name in collected_sim_maps:
-                collected_sim_maps[name] = collected_sim_maps[name].cpu()
+            for name in list(collected_sim_maps.keys()):
+                # Skip metadata entries (start with _)
+                if name.startswith("_"):
+                    continue
+                if isinstance(collected_sim_maps[name], torch.Tensor):
+                    collected_sim_maps[name] = collected_sim_maps[name].cpu()
             torch.cuda.empty_cache()
             free_mem, _ = torch.cuda.mem_get_info()
             print(f"[FreeFuse LTX Extract] VRAM after moving to CPU: {free_mem / 1024:.0f} MB available")
@@ -315,7 +383,9 @@ Use this to debug and visualize what the model is attending to for each concept.
         }
 
         # Create preview image (use first frame for video preview)
-        preview = self._create_preview(collected_sim_maps, T, H, W, preview_size)
+        # Filter out metadata entries (starting with _)
+        sim_maps_for_preview = {k: v for k, v in collected_sim_maps.items() if not k.startswith("_")}
+        preview = self._create_preview(sim_maps_for_preview, T, H, W, preview_size)
 
         return (result, model, preview)
 
@@ -323,39 +393,57 @@ Use this to debug and visualize what the model is attending to for each concept.
         """Create a colored preview image from similarity maps (first frame for video)."""
         import numpy as np
 
+        if not sim_maps:
+            print(f"[FreeFuse LTX Extract] Preview: No similarity maps available")
+            return torch.zeros(1, preview_size, preview_size, 3)
+
         # Get actual sequence length from first similarity map
         first_sim = list(sim_maps.values())[0]
         seq_len = first_sim.shape[1]
 
         print(f"[FreeFuse LTX Extract] Preview: T={T}, latent={H}x{W}, seq_len={seq_len}")
 
-        # The similarity maps might be at a different resolution than the latent
-        # Calculate spatial dimensions from sequence length
-        spatial_len = seq_len // T if T > 0 and seq_len > T else seq_len
+        # 🔥 FIX: For video, always divide by T first to get per-frame spatial tokens
+        # seq_len = T * spatial_tokens for video
+        # seq_len = spatial_tokens for image (T=1)
         
-        # Try to find factors for spatial dimensions
-        actual_H = actual_W = int(spatial_len ** 0.5)
-        if actual_H * actual_W != spatial_len:
-            # Try to find factors
-            for i in range(int(spatial_len ** 0.5), 0, -1):
-                if spatial_len % i == 0:
-                    actual_H = i
-                    actual_W = spatial_len // i
-                    break
-        
-        # If dimensions don't work, use the seq_len directly as 2D
-        if actual_H * actual_W != spatial_len:
-            actual_H = int(spatial_len ** 0.5)
-            actual_W = spatial_len // actual_H
-            print(f"[FreeFuse LTX Extract] Using calculated spatial: {actual_W}x{actual_H}")
+        if T > 1 and seq_len % T == 0:
+            # Video mode: seq_len = T * H * W
+            spatial_tokens = seq_len // T
+            attn_H = attn_W = int(spatial_tokens ** 0.5)
+            # Handle non-square
+            if attn_H * attn_W != spatial_tokens:
+                for i in range(int(spatial_tokens ** 0.5), 0, -1):
+                    if spatial_tokens % i == 0:
+                        attn_H = i
+                        attn_W = spatial_tokens // i
+                        break
+            tokens_per_frame = spatial_tokens
+            print(f"[FreeFuse LTX Extract] Video mode: {T} frames, {attn_W}x{attn_H} per frame")
+        else:
+            # Image mode or non-divisible: seq_len is pure spatial
+            attn_spatial = int(seq_len ** 0.5)
+            if attn_spatial * attn_spatial == seq_len:
+                attn_H = attn_W = attn_spatial
+            else:
+                # Non-square: find factors
+                attn_H = attn_W = attn_spatial
+                for i in range(attn_spatial, 0, -1):
+                    if seq_len % i == 0:
+                        attn_H = i
+                        attn_W = seq_len // i
+                        break
+            tokens_per_frame = seq_len
+            print(f"[FreeFuse LTX Extract] Image mode: {attn_W}x{attn_H}")
 
-        print(f"[FreeFuse LTX Extract] Preview spatial: {actual_W}x{actual_H}")
-
-        # Scale to preview size (longest side)
-        out_h, out_w = actual_H * 8, actual_W * 8
+        # Output size = attention resolution (not multiplied by 8)
+        # Then scale to preview_size
+        out_h, out_w = attn_H, attn_W
         scale = preview_size / max(out_h, out_w)
-        out_h = int(out_h * scale)
-        out_w = int(out_w * scale)
+        out_h = max(1, int(out_h * scale))
+        out_w = max(1, int(out_w * scale))
+
+        print(f"[FreeFuse LTX Extract] Preview output: {out_w}x{out_h} (scaled from {attn_W}x{attn_H})")
 
         # Create overlay on CPU for PIL conversion
         overlay = torch.zeros(3, out_h, out_w)
@@ -372,6 +460,10 @@ Use this to debug and visualize what the model is attending to for each concept.
 
         concept_maps = [(name, sim) for name, sim in sim_maps.items() if not name.startswith("__")]
 
+        if not concept_maps:
+            print(f"[FreeFuse LTX Extract] Preview: No concept maps found, returning black image")
+            return torch.zeros(1, preview_size, preview_size, 3)
+
         for idx, (name, sim) in enumerate(concept_maps[:len(colors)]):
             color = colors[idx % len(colors)]
 
@@ -383,39 +475,76 @@ Use this to debug and visualize what the model is attending to for each concept.
                 sim_flat = sim_cpu[0, :, 0]  # (seq_len,)
             else:
                 sim_flat = sim_cpu.view(-1)  # (seq_len,)
-            
-            # Take first frame's worth of tokens
-            tokens_per_frame = seq_len // T if T > 0 else seq_len
-            first_frame_tokens = sim_flat[:tokens_per_frame]
-            
-            # Reshape to spatial dimensions
+
+            # 🔥 CRITICAL FIX: Check for NaN/Inf values
+            if torch.isnan(sim_flat).any() or torch.isinf(sim_flat).any():
+                print(f"[FreeFuse LTX Extract] WARNING: {name} contains NaN/Inf, replacing with zeros")
+                sim_flat = torch.nan_to_num(sim_flat, nan=0.0, posinf=0.0, neginf=0.0)
+
+            # For video: use first frame's tokens
+            # For image: use full sequence
+            if T > 1 and seq_len % T == 0:
+                first_frame_tokens = sim_flat[:tokens_per_frame]
+            else:
+                first_frame_tokens = sim_flat
+
+            # Reshape to attention spatial dimensions, then upscale to preview size
             try:
-                sim_2d = first_frame_tokens.view(actual_H, actual_W)
-            except RuntimeError:
-                # Fallback: reshape to whatever fits
-                sim_2d = first_frame_tokens[:actual_H*actual_W].view(actual_H, actual_W)
+                sim_2d = first_frame_tokens.view(attn_H, attn_W)
 
-            # Resize to output size
-            sim_resized = F.interpolate(
-                sim_2d.unsqueeze(0).unsqueeze(0),
-                size=(out_h, out_w),
-                mode='bilinear',
-                align_corners=False
-            ).squeeze(0).squeeze(0)
+                # Resize to output preview size
+                sim_resized = F.interpolate(
+                    sim_2d.unsqueeze(0).unsqueeze(0),
+                    size=(out_h, out_w),
+                    mode='nearest'  # Use nearest for sharper edges
+                ).squeeze(0).squeeze(0)
 
-            # Normalize for visualization
+            except RuntimeError as e:
+                print(f"[FreeFuse LTX Extract] Reshape failed: {e}")
+                print(f"  tokens={first_frame_tokens.numel()}, attn_HxW={attn_H}x{attn_W}, out_hxw={out_h}x{out_w}")
+                # Fallback: use closest square
+                fallback_size = first_frame_tokens.numel()
+                fallback_h = fallback_w = int(fallback_size ** 0.5)
+                if fallback_h * fallback_w > fallback_size:
+                    fallback_h = fallback_w = int(fallback_size ** 0.5)
+                sim_2d = first_frame_tokens[:fallback_h*fallback_w].view(fallback_h, fallback_w)
+                sim_resized = F.interpolate(
+                    sim_2d.unsqueeze(0).unsqueeze(0),
+                    size=(out_h, out_w),
+                    mode='nearest',
+                    align_corners=False
+                ).squeeze(0).squeeze(0)
+
+            # 🔥 CRITICAL FIX: Normalize for visualization with better contrast
             sim_min = sim_resized.min()
             sim_max = sim_resized.max()
-            if sim_max > sim_min:
-                sim_norm = (sim_resized - sim_min) / (sim_max - sim_min)
+            
+            # Check for valid range and meaningful signal
+            if sim_max > sim_min and torch.isfinite(sim_min) and torch.isfinite(sim_max):
+                # Use percentile-based normalization for better contrast
+                # This prevents a few hot pixels from making everything else dark
+                sorted_vals = sim_resized.reshape(-1).sort()[0]
+                p95_idx = int(len(sorted_vals) * 0.95)
+                p95 = sorted_vals[min(p95_idx, len(sorted_vals)-1)]
+                
+                if p95 > sim_min:
+                    # Clip to 95th percentile for better contrast
+                    sim_clipped = (sim_resized - sim_min).clamp(0, p95 - sim_min)
+                    sim_norm = sim_clipped / (p95 - sim_min)
+                else:
+                    sim_norm = (sim_resized - sim_min) / (sim_max - sim_min)
+                    
+                # Apply gamma correction for better visibility
+                sim_norm = sim_norm ** 0.5
             else:
+                print(f"[FreeFuse LTX Extract] WARNING: Invalid sim range for {name}: min={sim_min}, max={sim_max}")
                 sim_norm = torch.ones_like(sim_resized) * 0.5
 
             # Add to overlay with color
             for c in range(3):
                 overlay[c] += sim_norm * color[c]
 
-        # Clamp and convert
+        # Clamp and convert to IMAGE format (B, H, W, C) in range [0, 1]
         overlay = overlay.clamp(0, 1).permute(1, 2, 0).numpy()
         preview = torch.from_numpy(overlay).unsqueeze(0)
 
@@ -446,6 +575,7 @@ class LTXAttentionHook:
         img_len: int,
         collected_sim_maps: Dict[str, torch.Tensor],
         attention_head_index: int = -1,
+        use_cross_attention: bool = False,
     ):
         self.target_block = target_block
         self.block_index = block_index
@@ -455,6 +585,7 @@ class LTXAttentionHook:
         self.img_len = img_len
         self.collected_sim_maps = collected_sim_maps
         self.attention_head_index = attention_head_index  # -1 = average all, 0-31 = specific head
+        self.use_cross_attention = use_cross_attention  # False = self-attention, True = cross-attention (video→text)
 
         self.cached_input = None
         self.hook_handle = None
@@ -491,52 +622,82 @@ class LTXAttentionHook:
     def _pre_hook(self, module, args, kwargs=None):
         """Capture LTX-Video block inputs before forward pass.
 
-        LTX-Video BasicAVTransformerBlock forward signature (kwargs):
-          - v_context: (B, img_seq, dim) - video/image stream
-          - a_context: (B, seq, dim) - audio/text stream  
-          - v_timestep: timestep for video
-          - a_timestep: timestep for audio
-          - v_pe: RoPE frequencies for video (tuple)
-          - a_pe: RoPE frequencies for audio (tuple)
+        LTX-Video BasicTransformerBlock forward signature:
+          - x: (B, img_seq, dim) - video/image stream
+          - context: (B, text_seq, dim) - text embeddings
           - attention_mask: optional
+          - timestep: timestep embedding
+          - pe: RoPE frequencies for video
+          - transformer_options: dict
         """
         if self.collected:
             return
 
-        # Capture LTX-Video specific parameter names
+        captured = False
+        
+        # Try kwargs first
         if kwargs:
-            # Use direct indexing instead of .get() - kwargs might be special dict
+            # Check for LTX-Video style kwargs (v_context, a_context)
+            if "v_context" in kwargs:
+                self.cached_input = {
+                    "hidden_states": kwargs["v_context"],
+                    "encoder_hidden_states": kwargs.get("a_context"),
+                    "timestep": kwargs.get("v_timestep"),
+                    "temb": kwargs.get("a_timestep"),
+                    "image_rotary_emb": kwargs.get("v_pe"),
+                    "attention_mask": kwargs.get("attention_mask"),
+                }
+                captured = True
+            # Check for BasicTransformerBlock style kwargs (x, context)
+            elif "x" in kwargs:
+                self.cached_input = {
+                    "hidden_states": kwargs["x"],
+                    "encoder_hidden_states": kwargs.get("context"),
+                    "timestep": kwargs.get("timestep"),
+                    "temb": None,
+                    "image_rotary_emb": kwargs.get("pe"),
+                    "attention_mask": kwargs.get("attention_mask"),
+                }
+                captured = True
+            # Fallback: try to find any tensor that looks like hidden states
+            else:
+                for key, value in kwargs.items():
+                    if isinstance(value, torch.Tensor) and value.dim() == 3:
+                        if self.cached_input is None:
+                            self.cached_input = {}
+                        if "hidden_states" not in self.cached_input:
+                            self.cached_input["hidden_states"] = value
+                        elif "encoder_hidden_states" not in self.cached_input:
+                            self.cached_input["encoder_hidden_states"] = value
+                        captured = True
+
+        # Fallback to positional args
+        if not captured and len(args) >= 1:
             self.cached_input = {
-                "hidden_states": kwargs["v_context"] if "v_context" in kwargs else None,  # Video/image stream
-                "encoder_hidden_states": kwargs["a_context"] if "a_context" in kwargs else None,  # Audio/text stream
-                "timestep": kwargs.get("v_timestep"),
-                "temb": kwargs.get("a_timestep"),
-                "image_rotary_emb": kwargs.get("v_pe"),  # RoPE for video
-                "attention_mask": kwargs.get("attention_mask"),
+                "hidden_states": args[0] if len(args) > 0 else None,
+                "encoder_hidden_states": args[1] if len(args) > 1 else None,
+                "timestep": kwargs.get("timestep") if kwargs else None,
+                "temb": None,
+                "image_rotary_emb": kwargs.get("pe") if kwargs else None,
+                "attention_mask": kwargs.get("attention_mask") if kwargs else None,
             }
-            
-            # Log what we captured
+            captured = True
+
+        # Log what we captured
+        if self.cached_input:
             hs = self.cached_input.get("hidden_states")
             txt = self.cached_input.get("encoder_hidden_states")
             if hs is not None and txt is not None:
-                logging.info(f"[LTXAttentionHook] Captured LTX: v_context={hs.shape}, a_context={txt.shape}")
+                seq_len = hs.shape[1]
+                text_len = txt.shape[1]
+                print(f"[🔥 LTXAttentionHook] Block {self.block_index}: captured x={hs.shape}, context={txt.shape} (seq_len={seq_len}, text_len={text_len})")
+            elif hs is not None:
+                print(f"[🔥 LTXAttentionHook] Block {self.block_index}: captured x={hs.shape} (seq_len={seq_len if 'seq_len' in dir() else 'N/A'}), context=None")
             else:
-                logging.warning(f"[LTXAttentionHook] Failed to capture: v_context={hs is not None}, a_context={txt is not None}")
-                logging.warning(f"[LTXAttentionHook] kwargs type: {type(kwargs)}, keys: {list(kwargs.keys()) if hasattr(kwargs, 'keys') else 'N/A'}")
-        elif len(args) >= 1:
-            # Fallback for positional args
-            self.cached_input = {
-                "hidden_states": args[0] if len(args) > 0 else None,
-                "encoder_hidden_states": args[1] if len(args) > 1 else kwargs.get("a_context") if kwargs else None,
-                "timestep": kwargs.get("v_timestep") if kwargs else None,
-                "temb": kwargs.get("a_timestep") if kwargs else None,
-                "image_rotary_emb": kwargs.get("v_pe") if kwargs else None,
-                "attention_mask": kwargs.get("attention_mask") if kwargs else None,
-            }
-            if self.cached_input["hidden_states"] is not None:
-                logging.info(f"[LTXAttentionHook] Captured from args: v_context={self.cached_input['hidden_states'].shape}")
+                logging.warning(f"[LTXAttentionHook] Block {self.block_index}: Failed to capture inputs")
+                logging.warning(f"  kwargs keys: {list(kwargs.keys()) if kwargs and hasattr(kwargs, 'keys') else 'N/A'}")
+                logging.warning(f"  args count: {len(args)}")
 
-        if self.cached_input:
             # Detach tensors to avoid gradient computation
             for key, value in self.cached_input.items():
                 if isinstance(value, torch.Tensor):
@@ -548,21 +709,30 @@ class LTXAttentionHook:
             return output
 
         try:
-            # Get the attention module - try multiple attribute names
-            attn = getattr(module, 'attn', None)
+            # LTX-Video uses ComfyUI's BasicTransformerBlock which has:
+            # - attn1: self-attention on video tokens
+            # - attn2: cross-attention between video and text (THIS is what we need)
+            attn = getattr(module, 'attn2', None)
+            
+            if attn is None:
+                # Fallback: try attn1 if attn2 doesn't exist
+                attn = getattr(module, 'attn1', None)
+            
+            if attn is None:
+                # Try other common names
+                attn = getattr(module, 'attn', None)
             if attn is None:
                 attn = getattr(module, 'attention', None)
             if attn is None:
-                # LTX-Video might use different naming
-                attn = getattr(module, 'attn1', None)
-            if attn is None:
                 attn = getattr(module, 'cross_attn', None)
-            
+
             if attn is None:
                 logging.warning("[LTXAttentionHook] No attention module found")
                 logging.warning(f"  Block type: {type(module).__name__}")
                 logging.warning(f"  Available attributes: {[a for a in dir(module) if not a.startswith('_') and 'attn' in a.lower()]}")
                 return output
+            
+            logging.info(f"[LTXAttentionHook] Using attention module: {type(attn).__name__}")
 
             # Debug: log attention module structure
             if not hasattr(self, '_logged_attn_structure'):
@@ -605,18 +775,18 @@ class LTXAttentionHook:
             temb = self.cached_input.get("temb")
             image_rotary_emb = self.cached_input.get("image_rotary_emb")
 
-            if img_hidden is None or txt_hidden is None:
-                logging.warning("[LTXAttentionHook] Missing cached inputs")
+            if img_hidden is None:
+                logging.warning("[LTXAttentionHook] Missing cached img_hidden")
                 logging.warning(f"  cached keys: {self.cached_input.keys() if self.cached_input else 'None'}")
                 return output
 
             img_len = img_hidden.shape[1]
-            cap_len = txt_hidden.shape[1]
+            cap_len = txt_hidden.shape[1] if txt_hidden is not None else 0
 
             logging.info(f"[LTXAttentionHook] Computing similarity maps at block {self.block_index}")
-            logging.info(f"  img_hidden: {img_hidden.shape}, txt_hidden: {txt_hidden.shape}")
+            logging.info(f"  img_hidden: {img_hidden.shape}, txt_hidden: {txt_hidden.shape if txt_hidden is not None else 'None'}")
 
-            # Compute similarity maps
+            # Compute similarity maps (txt_hidden not used for self-attention)
             sim_maps = self._compute_similarity_from_block(
                 module, attn, img_hidden, txt_hidden, temb, image_rotary_emb,
                 img_len, cap_len
@@ -643,19 +813,22 @@ class LTXAttentionHook:
         module,
         attn,
         img_hidden: torch.Tensor,
-        txt_hidden: torch.Tensor,
+        txt_hidden: Optional[torch.Tensor],
         temb: Optional[torch.Tensor],
         image_rotary_emb: Optional[torch.Tensor],
         img_len: int,
         cap_len: int,
     ) -> Optional[Dict[str, torch.Tensor]]:
-        """Compute similarity maps from block's attention computation."""
+        """Compute similarity maps from block's attention computation.
+        
+        For LTX-Video's BasicTransformerBlock:
+        - attn2 is cross-attention: video queries attend to text keys
+        - to_q: video -> Q (inner_dim=2048)
+        - to_k, to_v: text -> K, V (cross_attention_dim=2048)
+        - Text has already been projected from 4096 to 2048 by caption_projection
+        """
 
         try:
-            # LTX-Video uses CrossAttention (not MMDiT)
-            # - to_q, to_k, to_v: shared projections for both image and text
-            # - q_norm, k_norm: QK normalization
-
             # Get QKV projection layers
             to_q = getattr(attn, 'to_q', None)
             to_k = getattr(attn, 'to_k', None)
@@ -665,119 +838,125 @@ class LTXAttentionHook:
                 logging.warning("[LTXAttentionHook] Missing QKV projection layers")
                 return None
 
-            # Check if MMDiT-style (separate projections) or standard cross-attention
-            add_q_proj = getattr(attn, 'add_q_proj', None)
-            add_k_proj = getattr(attn, 'add_k_proj', None)
-            add_v_proj = getattr(attn, 'add_v_proj', None)
-            is_mmdit = (add_q_proj is not None and add_k_proj is not None and add_v_proj is not None)
+            # Log dimensions for debugging
+            if not hasattr(self, '_logged_dims'):
+                logging.info(f"[LTXAttentionHook] to_q: in={to_q.in_features}, out={to_q.out_features}")
+                logging.info(f"[LTXAttentionHook] to_k: in={to_k.in_features}, out={to_k.out_features}")
+                logging.info(f"[LTXAttentionHook] img_hidden: {img_hidden.shape}")
+                if txt_hidden is not None:
+                    logging.info(f"[LTXAttentionHook] txt_hidden: {txt_hidden.shape}")
+                self._logged_dims = True
 
-            # Apply normalization if available
+            # 🔥 LTX-Video attention mode selection
             img_attn_in = img_hidden
-            txt_attn_in = txt_hidden
-
-            if hasattr(module, 'norm1'):
-                img_attn_in = module.norm1(img_hidden)
-            if hasattr(module, 'norm1_context'):
-                txt_attn_in = module.norm1_context(txt_hidden)
-
-            if is_mmdit:
-                # MMDiT-style: separate projections for image and text
-                q = to_q(img_attn_in)
-                k = to_k(img_attn_in)
-                txt_q = add_q_proj(txt_attn_in)
-                txt_k = add_k_proj(txt_attn_in)
+            
+            if self.use_cross_attention and txt_hidden is not None:
+                # Cross-attention mode: video Q, text K (like Flux/Qwen)
+                # Text needs projection from 2048 to 4096 for to_k
+                logging.info(f"[LTXAttentionHook] Using CROSS-ATTENTION mode (video→text)")
+                
+                # Project text to match to_k input dimension
+                if txt_hidden.shape[-1] != to_k.in_features:
+                    # Create projection on-the-fly
+                    proj_weight = torch.randn(to_k.in_features, txt_hidden.shape[-1], 
+                                             device=txt_hidden.device, dtype=txt_hidden.dtype) * 0.1
+                    txt_projected = F.linear(txt_hidden, proj_weight)
+                    logging.info(f"[LTXAttentionHook] Text projected from {txt_hidden.shape[-1]} to {to_k.in_features}")
+                else:
+                    txt_projected = txt_hidden
+                
+                q = to_q(img_attn_in)  # (B, img_seq, inner_dim) from video
+                k = to_k(txt_projected)  # (B, text_seq, inner_dim) from text
+                
+                logging.info(f"[LTXAttentionHook] Q shape: {q.shape} (video), K shape: {k.shape} (text)")
             else:
-                # LTX-Video CrossAttention: both to_q and to_k expect 4096 dim
-                # Need to project text from 2048 to 4096
-                q = to_q(img_attn_in)  # Video query: (B, img_seq, 4096)
-                
-                # Project text to image dimension for Q
-                if not hasattr(self, 'text_proj_q'):
-                    self.text_proj_q = torch.nn.Linear(2048, 4096, bias=False).to(txt_attn_in.device, dtype=txt_attn_in.dtype)
-                txt_projected_q = self.text_proj_q(txt_attn_in)
-                txt_q = to_q(txt_projected_q)
-                
-                # Check if to_k expects text dim or image dim
-                k = None
-                try:
-                    # Try with text directly (cross-attention mode)
-                    k = to_k(txt_attn_in)
-                    txt_k = to_k(img_attn_in)
-                    logging.info(f"[LTXAttentionHook] Cross-attention mode: to_k accepts text dim")
-                except RuntimeError as e:
-                    if "mat1 and mat2 shapes" in str(e):
-                        # to_k expects same dim as to_q (self-attention with concatenated inputs)
-                        logging.info(f"[LTXAttentionHook] Self-attention mode: to_k expects image dim")
-                        logging.info(f"[LTXAttentionHook] Projecting text from 2048 to 4096")
-                        
-                        # Create a simple projection on the fly
-                        # text_proj: 2048 -> 4096
-                        if not hasattr(self, 'text_proj_k'):
-                            self.text_proj_k = torch.nn.Linear(2048, 4096, bias=False).to(txt_attn_in.device, dtype=txt_attn_in.dtype)
-                        
-                        txt_projected = self.text_proj_k(txt_attn_in)
-                        k = to_k(txt_projected)
-                        txt_k = to_k(img_attn_in)
-                        logging.info(f"[LTXAttentionHook] Text projected and processed successfully")
-                    else:
-                        raise
-                
-                if k is None:
-                    logging.warning(f"[LTXAttentionHook] Could not compute K projection")
-                    return None
+                # Self-attention mode: video Q, video K (default)
+                logging.info(f"[LTXAttentionHook] Using SELF-ATTENTION mode (video→video)")
+                k = to_k(img_attn_in)  # (B, img_seq, inner_dim) from video
+                q = to_q(img_attn_in)  # (B, img_seq, inner_dim) from video
+                logging.info(f"[LTXAttentionHook] Q shape: {q.shape}, K shape: {k.shape} (self-attention)")
 
-            # Get QK norms if available
+            # Get QK norms if available (LTX uses RMSNorm)
             norm_q = getattr(attn, 'norm_q', None)
             norm_k = getattr(attn, 'norm_k', None)
-            norm_added_q = getattr(attn, 'norm_added_q', None)
-            norm_added_k = getattr(attn, 'norm_added_k', None)
 
             # Apply QK norms
             if norm_q is not None:
                 q = norm_q(q)
+                logging.info(f"[LTXAttentionHook] Applied norm_q")
             if norm_k is not None:
                 k = norm_k(k)
-            if norm_added_q is not None:
-                txt_q = norm_added_q(txt_q)
-            if norm_added_k is not None:
-                txt_k = norm_added_k(txt_k)
+                logging.info(f"[LTXAttentionHook] Applied norm_k")
 
-            # Reshape for multi-head attention
-            # LTX-Video: 32 heads, head dim 128
-            num_heads = 32
-            head_dim = 128
+            # Get attention head configuration from the attention module
+            num_heads = getattr(attn, 'heads', 32)
+            head_dim = getattr(attn, 'dim_head', 64)
 
-            # Reshape q, k
-            q = q.view(q.shape[0], q.shape[1], num_heads, head_dim).transpose(1, 2)
-            k = k.view(k.shape[0], k.shape[1], num_heads, head_dim).transpose(1, 2)
-            txt_q = txt_q.view(txt_q.shape[0], txt_q.shape[1], num_heads, head_dim).transpose(1, 2)
-            txt_k = txt_k.view(txt_k.shape[0], txt_k.shape[1], num_heads, head_dim).transpose(1, 2)
+            logging.info(f"[LTXAttentionHook] num_heads={num_heads}, head_dim={head_dim}")
 
-            # Compute similarity: img_q @ txt_k^T (image queries attending to text keys)
+            # Reshape for multi-head attention: (B, seq, num_heads * head_dim) -> (B, num_heads, seq, head_dim)
+            try:
+                q = q.view(q.shape[0], q.shape[1], num_heads, head_dim).transpose(1, 2)
+                k = k.view(k.shape[0], k.shape[1], num_heads, head_dim).transpose(1, 2)
+            except RuntimeError as e:
+                logging.error(f"[LTXAttentionHook] Reshape failed: {e}")
+                logging.error(f"  q.shape={q.shape}, expected seq={q.shape[1]}, heads={num_heads}, head_dim={head_dim}")
+                logging.error(f"  q.shape[1] * num_heads * head_dim = {q.shape[1] * num_heads * head_dim}, q.shape[2] = {q.shape[2] if q.dim() > 2 else 'N/A'}")
+                return None
+
+            # Compute self-attention: Q @ K^T
+            # q: (B, num_heads, img_seq, head_dim)
+            # k: (B, num_heads, img_seq, head_dim)
+            # result: (B, num_heads, img_seq, img_seq) - full self-attention matrix
             scale = 1.0 / (head_dim ** 0.5)
-            similarity = torch.einsum('bhqd,bhkd->bhqk', q, txt_k) * scale
+            similarity = torch.einsum('bhqd,bhkd->bhqk', q, k) * scale
             similarity = similarity * (self.temperature / 1000.0)
 
+            logging.info(f"[LTXAttentionHook] attention shape: {similarity.shape}")
+
             attention_weights = F.softmax(similarity, dim=-1)
+
+            logging.info(f"[LTXAttentionHook] attention_weights shape: {attention_weights.shape}")
+            logging.info(f"[LTXAttentionHook] token_pos_maps keys: {list(self.token_pos_maps.keys())}")
 
             # Now compute similarity maps for each concept
             sim_maps = {}
 
             for concept_name, positions_list in self.token_pos_maps.items():
                 if not positions_list or not positions_list[0]:
+                    logging.warning(f"[LTXAttentionHook] No positions for concept: {concept_name}")
                     continue
 
                 # Get token positions for this concept
                 positions = positions_list[0]  # Use first prompt
 
-                # Create a mask for concept tokens
-                concept_mask = torch.zeros_like(attention_weights[..., -cap_len:])
-                for pos in positions:
-                    if pos < cap_len:
-                        concept_mask[..., pos] = 1.0
+                logging.info(f"[LTXAttentionHook] Concept '{concept_name}': {len(positions)} tokens at positions {positions[:10]}...")
 
-                # Sum attention weights over concept tokens
-                concept_attention = (attention_weights[..., -cap_len:] * concept_mask).sum(dim=-1)
+                if self.use_cross_attention:
+                    # 🔥 CROSS-ATTENTION MODE: attention_weights is (B, heads, img_seq, text_seq)
+                    # Text token positions directly index the text sequence dimension
+                    text_seq = attention_weights.shape[3]
+                    concept_mask = torch.zeros(1, 1, 1, text_seq, device=attention_weights.device)
+                    for pos in positions:
+                        if pos < text_seq:
+                            concept_mask[..., pos] = 1.0
+                    
+                    # Sum attention over concept text tokens
+                    concept_attention = (attention_weights * concept_mask).sum(dim=-1)
+                    logging.info(f"[LTXAttentionHook] Cross-attn concept_attention: shape={concept_attention.shape}")
+                else:
+                    # 🔥 SELF-ATTENTION MODE: attention_weights is (B, heads, img_seq, img_seq)
+                    # Aggregate attention received BY concept token positions
+                    img_seq = attention_weights.shape[2]
+                    concept_mask = torch.zeros(1, 1, img_seq, img_seq, device=attention_weights.device)
+                    for pos in positions:
+                        if pos < img_seq:
+                            concept_mask[..., pos] = 1.0
+                    
+                    concept_attention = (attention_weights * concept_mask).sum(dim=-1)
+                    logging.info(f"[LTXAttentionHook] Self-attn concept_attention: shape={concept_attention.shape}")
+
+                logging.info(f"[LTXAttentionHook] concept_attention before topk: shape={concept_attention.shape}, min={concept_attention.min():.6f}, max={concept_attention.max():.6f}")
 
                 # Apply top-k filtering
                 if self.top_k_ratio < 1.0:
@@ -785,6 +964,8 @@ class LTXAttentionHook:
                     top_k_vals, top_k_indices = torch.topk(concept_attention, k_val, dim=-1)
                     filtered = torch.zeros_like(concept_attention).scatter_(-1, top_k_indices, top_k_vals)
                     concept_attention = filtered
+
+                logging.info(f"[LTXAttentionHook] concept_attention after topk: min={concept_attention.min():.6f}, max={concept_attention.max():.6f}")
 
                 # Average over heads if not using specific head
                 if self.attention_head_index >= 0:
@@ -798,12 +979,27 @@ class LTXAttentionHook:
                     # Average all heads
                     concept_attention = concept_attention.mean(dim=1, keepdim=True)
 
+                logging.info(f"[LTXAttentionHook] concept_attention after head avg: shape={concept_attention.shape}")
+
                 # Reshape to (B, img_seq, 1)
                 concept_attention = concept_attention.squeeze(1).unsqueeze(-1)  # (B, img_seq, 1)
+
+                # 🔥 CRITICAL FIX: Validate similarity map values
+                sim_min = concept_attention.min()
+                sim_max = concept_attention.max()
+                has_nan = torch.isnan(concept_attention).any()
+                has_inf = torch.isinf(concept_attention).any()
+                
+                if has_nan or has_inf:
+                    logging.warning(f"[LTXAttentionHook] {concept_name} has NaN={has_nan}, Inf={has_inf}")
+                    concept_attention = torch.nan_to_num(concept_attention, nan=0.0, posinf=0.0, neginf=0.0)
+                
+                logging.info(f"[LTXAttentionHook] Final sim map for '{concept_name}': shape={concept_attention.shape}, min={concept_attention.min():.6f}, max={concept_attention.max():.6f}")
 
                 # Store similarity map
                 sim_maps[f"sim_{concept_name}"] = concept_attention
 
+            logging.info(f"[LTXAttentionHook] Returning {len(sim_maps)} similarity maps")
             return sim_maps
 
         except Exception as e:

@@ -281,66 +281,84 @@ class MultiAdapterBypassForwardHook:
     def _should_apply_spatial_mask(self) -> bool:
         """
         Determine if spatial mask should be applied to this layer.
-        
+
         This matches the diffusers implementation:
-        
+
         For Flux:
         - single_transformer_blocks: to_q, to_k, to_v, proj_mlp, proj_out -> YES (with text)
         - transformer_blocks: to_q, to_k, to_v, to_out, ff -> YES (img only)
         - transformer_blocks: ff_context, add_q_proj, add_k_proj, add_v_proj, to_add_out -> NO
-        
+
         For SDXL:
         - attn1: all layers -> YES
         - attn2: to_q, to_out -> YES
         - attn2: to_k, to_v -> NO (process text tokens, not image features)
         - ff.net: YES
-        
+
         For Z-Image (Lumina2/NextDiT):
         - layers.N.attention.qkv, out_proj -> YES (z_image_unified, [txt, img] sequence)
         - layers.N.feed_forward -> YES (z_image_unified)
         - layers.N.adaLN_modulation -> NO (global, not per-token)
-        
+
+        For LTX-Video:
+        - transformer_blocks.N.attn (to_q, to_k, to_v, to_out) -> YES (img_only)
+        - transformer_blocks.N.ff -> YES (img_only)
+        - Text is processed via separate projection, not in same sequence
+
         Returns:
             True if spatial mask should be applied, False otherwise
         """
         if self._should_apply_mask_cached is not None:
             return self._should_apply_mask_cached
-        
+
         if self.module_key is None:
             self._should_apply_mask_cached = True  # Default: apply mask
             self._mask_type_cached = 'img_with_text'
             return True
-        
+
         key = self.module_key.lower()
-        
+
         # Detect model type from key structure
-        # IMPORTANT: Check SDXL first because SDXL keys contain "transformer_blocks" 
+        # IMPORTANT: Check SDXL first because SDXL keys contain "transformer_blocks"
         # which would also match Flux patterns. SDXL has down_blocks/mid_block/up_blocks
         # as the outermost structure, while Flux has double_blocks/single_blocks.
         is_sdxl = 'down_blocks' in key or 'mid_block' in key or 'up_blocks' in key
         is_flux = ('single_blocks' in key or 'double_blocks' in key) and not is_sdxl
+        
+        # LTX-Video: has transformer_blocks but NOT inside SDXL/Flux structure
+        # LTX-Video uses AVTransformer3DModel with transformer_blocks array
+        is_ltx_video = (not is_sdxl and not is_flux and 
+                        'transformer_blocks' in key and 
+                        ('attn' in key or 'ff' in key or 'attention' in key))
+        
         # Also check for Flux-style transformer_blocks that are NOT inside SDXL structure
-        if not is_sdxl and 'transformer_blocks' in key and 'attentions' not in key:
+        if not is_sdxl and not is_ltx_video and 'transformer_blocks' in key and 'attentions' not in key:
             is_flux = True
-        
+
         # Z-Image: has 'layers.N' pattern without SDXL or Flux markers
-        is_z_image = (not is_sdxl and not is_flux and 
-                      'layers.' in key and 
+        is_z_image = (not is_sdxl and not is_flux and not is_ltx_video and
+                      'layers.' in key and
                       ('attention' in key or 'feed_forward' in key))
-        
+
         if is_sdxl:
             result, mask_type = self._check_sdxl_layer(key)
         elif is_flux:
             result, mask_type = self._check_flux_layer(key)
+        elif is_ltx_video:
+            result, mask_type = self._check_ltx_video_layer(key)
         elif is_z_image:
             result, mask_type = self._check_z_image_layer(key)
         else:
             # Unknown model, apply mask by default
             result, mask_type = True, 'img_with_text'
-        
+            # Log unknown model type once
+            if not hasattr(self, '_unknown_model_logged'):
+                self._unknown_model_logged = True
+                logging.info(f"[OffsetBypass] Unknown model type for key: {key[:100]}... using img_with_text")
+
         self._should_apply_mask_cached = result
         self._mask_type_cached = mask_type
-        
+
         if not result:
             logging.debug(f"[OffsetBypass] Skipping spatial mask for layer: {self.module_key}")
 
@@ -349,8 +367,61 @@ class MultiAdapterBypassForwardHook:
             if not hasattr(self, "_debug_zimage_mask_logged"):
                 self._debug_zimage_mask_logged = True
                 print(f"[FreeFuse Z-Image Debug] mask_apply={result} mask_type={mask_type} layer={self.module_key}")
-        
+
         return result
+
+    def _check_ltx_video_layer(self, key: str) -> Tuple[bool, Optional[str]]:
+        """
+        Check if an LTX-Video layer should have spatial mask applied.
+
+        LTX-Video uses full spatiotemporal self-attention:
+        - All video tokens attend to all other video tokens (space + time)
+        - Sequence length = (W/32) × (H/32) × (T/8) tokens
+        - Text conditioning via cross-attention (attn2)
+        
+        Mask application:
+        - attn1 (self-attn): Apply spatial mask to video tokens
+        - attn2 (cross-attn to_q, to_out): Apply spatial mask (video side)
+        - attn2 (to_k, to_v): Skip (processes text tokens)
+        - ff: Apply spatial mask
+
+        Returns:
+            Tuple of (should_apply, mask_type) where mask_type is 'ltx_video'
+        """
+        if 'transformer_block' in key:
+            # Skip text projection layers
+            if 'text_proj' in key:
+                return False, None
+            
+            # Skip audio layers (for LTX-2 audio-video models)
+            if 'audio_' in key:
+                return False, None
+
+            # Self-attention (attn1) - all layers process video tokens
+            if '.attn1.' in key or 'attn1_' in key:
+                if any(s in key for s in ['to_q', 'to_k', 'to_v', 'to_out', 'qkv']):
+                    return True, 'ltx_video'
+            
+            # Cross-attention (attn2) - only apply mask to video-side projections
+            if '.attn2.' in key or 'attn2_' in key:
+                # to_q and to_out process video features - apply mask
+                if any(s in key for s in ['to_q', 'to_out']):
+                    return True, 'ltx_video'
+                # to_k and to_v process text features - skip mask
+                if any(s in key for s in ['to_k', 'to_v']):
+                    return False, None
+            
+            # FeedForward layers - process video tokens
+            if 'ff' in key or 'feed_forward' in key or 'fc1' in key or 'fc2' in key:
+                return True, 'ltx_video'
+
+            # Attention module itself
+            if 'attn' in key or 'attention' in key:
+                return True, 'ltx_video'
+
+            return False, None
+
+        return True, 'ltx_video'
     
     def _check_flux_layer(self, key: str) -> Tuple[bool, Optional[str]]:
         """
@@ -524,7 +595,17 @@ class MultiAdapterBypassForwardHook:
         else:
             # img_only or SDXL: seq_len = img_len (no text in sequence)
             img_len = seq_len
-        
+
+        # === LTX-Video Dual Pathway Support ===
+        # LTX-Video has two parallel attention pathways:
+        # - Path A (Latent ST): 16×16 × T frames = 256×T tokens (e.g., 1792 for T=7)
+        # - Path B (High-Res): 32×32 spatial = 1024 tokens
+        # The mask_type 'ltx_video' indicates we need to handle both pathways
+        if mask_type == 'ltx_video':
+            return self._get_mask_for_ltx_video(
+                adapter_name, mask, seq_len, device, dtype
+            )
+
         # mask shape: (H, W) - spatial mask for img tokens
         if mask.dim() == 2:
             h, w = mask.shape
@@ -547,34 +628,87 @@ class MultiAdapterBypassForwardHook:
             
             # Check if we need to resize
             if mask_flat.shape[0] != img_len:
-                # Resize mask to match img_len exactly
-                # Find dimensions that multiply to img_len
-                if self.latent_size is not None:
-                    ratio = self.latent_size[1] / self.latent_size[0]  # W/H
-                else:
-                    ratio = w / h  # Use original mask ratio
+                # For LTX-Video: seq_len may be T * H * W (spatio-temporal)
+                # But H*W could be either:
+                # - Attention resolution: 32x32 = 1024 tokens/frame
+                # - Latent resolution: 16x16 = 256 tokens/frame
+                # We need to detect which one this layer uses
                 
-                # Find new_h such that new_h * new_w = img_len
-                # new_w = new_h * ratio, so new_h^2 * ratio = img_len
-                new_h = int((img_len / ratio) ** 0.5)
-                new_w = img_len // new_h if new_h > 0 else img_len
+                spatial_tokens = h * w  # Our mask spatial size (e.g., 32*32=1024)
                 
-                # Adjust to get exact match
-                while new_h > 1 and new_h * new_w != img_len:
-                    new_h -= 1
-                    new_w = img_len // new_h
+                # Try to find a compatible frame size
+                # Check if img_len is divisible by common frame sizes
+                found_match = False
                 
-                # Final fallback: if still not exact, use 1 x img_len
-                if new_h * new_w != img_len:
-                    new_h = 1
-                    new_w = img_len
+                # First check: is this attention resolution (32x32)?
+                if img_len % spatial_tokens == 0 and img_len > spatial_tokens:
+                    # This is likely T * attention_spatial
+                    num_frames = img_len // spatial_tokens
+                    mask_flat = mask_flat.unsqueeze(0).expand(num_frames, -1).reshape(-1)
+                    found_match = True
+                    logging.debug(f"[OffsetBypass] Repeated attention-res mask for {num_frames} frames: {h}x{w} -> {img_len}")
                 
-                # Resize using interpolation
-                mask_2d = mask.unsqueeze(0).unsqueeze(0).float()  # (1, 1, H, W)
-                mask_resized = F.interpolate(
-                    mask_2d, size=(new_h, new_w), mode='nearest'
-                )
-                mask_flat = mask_resized.view(-1)  # Now exactly img_len elements
+                # Second check: is this latent resolution (16x16)?
+                # Our mask is 32x32, need to downscale to 16x16 then repeat
+                if not found_match and spatial_tokens % 4 == 0:
+                    latent_spatial = spatial_tokens // 4  # 1024/4 = 256 (16x16)
+                    if img_len % latent_spatial == 0 and img_len > latent_spatial:
+                        # Downscale mask from 32x32 to 16x16, then repeat
+                        num_frames = img_len // latent_spatial
+                        # Reshape to 2D, average pool to 16x16, then flatten and repeat
+                        mask_2d = mask.view(1, 1, h, w)
+                        # 2x2 average pooling to go from 32x32 to 16x16
+                        mask_16x16 = F.avg_pool2d(mask_2d, kernel_size=2, stride=2)
+                        mask_flat = mask_16x16.view(-1).unsqueeze(0).expand(num_frames, -1).reshape(-1)
+                        found_match = True
+                        logging.debug(f"[OffsetBypass] Downscaled to latent-res and repeated for {num_frames} frames: {h}x{w} -> 16x16 -> {img_len}")
+                
+                # Fallback: try to find any compatible factorization
+                if not found_match:
+                    # Try common spatial resolutions
+                    for test_spatial in [256, 512, 1024, 2048]:  # 16x16, 22x22, 32x32, 45x45
+                        if img_len % test_spatial == 0 and img_len > test_spatial:
+                            num_frames = img_len // test_spatial
+                            # Resize mask to test_spatial
+                            test_size = int(test_spatial ** 0.5)
+                            if test_size * test_size == test_spatial:
+                                mask_2d = mask.unsqueeze(0).unsqueeze(0).float()
+                                mask_resized = F.interpolate(mask_2d, size=(test_size, test_size), mode='bilinear', align_corners=False)
+                                mask_flat = mask_resized.view(-1).unsqueeze(0).expand(num_frames, -1).reshape(-1)
+                                found_match = True
+                                logging.debug(f"[OffsetBypass] Resized to {test_size}x{test_size} and repeated for {num_frames} frames -> {img_len}")
+                                break
+                
+                # Final fallback: just resize to match img_len
+                if not found_match:
+                    # Resize mask to match img_len exactly
+                    # Find dimensions that multiply to img_len
+                    if self.latent_size is not None:
+                        ratio = self.latent_size[1] / self.latent_size[0]  # W/H
+                    else:
+                        ratio = w / h  # Use original mask ratio
+
+                    # Find new_h such that new_h * new_w = img_len
+                    new_h = int((img_len / ratio) ** 0.5)
+                    new_w = img_len // new_h if new_h > 0 else img_len
+
+                    # Adjust to get exact match
+                    while new_h > 1 and new_h * new_w != img_len:
+                        new_h -= 1
+                        new_w = img_len // new_h
+
+                    # Final fallback: if still not exact, use 1 x img_len
+                    if new_h * new_w != img_len:
+                        new_h = 1
+                        new_w = img_len
+
+                    # Resize using interpolation
+                    mask_2d = mask.unsqueeze(0).unsqueeze(0).float()  # (1, 1, H, W)
+                    mask_resized = F.interpolate(
+                        mask_2d, size=(new_h, new_w), mode='nearest'
+                    )
+                    mask_flat = mask_resized.view(-1)  # Now exactly img_len elements
+                    logging.debug(f"[OffsetBypass] Fallback resize to {new_h}x{new_w} -> {img_len}")
         else:
             # For non-2D masks, resize to img_len
             if mask.numel() != img_len:
@@ -611,7 +745,91 @@ class MultiAdapterBypassForwardHook:
                 )
         
         return full_mask
-    
+
+    def _get_mask_for_ltx_video(
+        self,
+        adapter_name: str,
+        mask: torch.Tensor,
+        seq_len: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """
+        Generate mask for LTX-Video spatiotemporal attention.
+        
+        LTX-Video uses full spatiotemporal self-attention:
+        - Sequence length = (W/32) × (H/32) × (T/8) tokens
+        - For 1536×1536, T=7: (1536/32)² × 7 = 48×48×7 = 16,128 tokens
+        - Text conditioning via cross-attention (separate sequence)
+        
+        This method resizes the spatial mask to match the sequence length.
+        
+        Args:
+            adapter_name: Name of the adapter
+            mask: Base spatial mask (H, W) from similarity maps
+            seq_len: Sequence length of the current layer
+            device: Target device
+            dtype: Target dtype
+            
+        Returns:
+            Mask tensor of shape (seq_len,)
+        """
+        # Ensure mask is 2D
+        if mask.dim() == 3:
+            mask = mask[0]
+        
+        h, w = mask.shape
+        mask_spatial = h * w
+        
+        # Handle text cross-attention (to_k, to_v should be skipped by _check_ltx_video_layer)
+        # But if we get here with very small seq_len, it's likely text
+        if seq_len < 100:
+            return torch.ones(seq_len, device=device, dtype=dtype)
+        
+        # Try to factorize seq_len into spatial × temporal
+        # Common temporal lengths: 1 (image), 7, 8, 15, 16, 31, 32 (video frames)
+        temporal_factors = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 16, 18, 24, 31, 32, 48, 64]
+        
+        for num_frames in temporal_factors:
+            if seq_len % num_frames == 0:
+                spatial_tokens = seq_len // num_frames
+                spatial_size = int(spatial_tokens ** 0.5)
+                
+                if spatial_size * spatial_size == spatial_tokens:
+                    # Found valid factorization: seq_len = spatial_size² × num_frames
+                    # Resize mask to spatial_size × spatial_size
+                    mask_2d = mask.unsqueeze(0).unsqueeze(0).float()
+                    mask_resized = F.interpolate(mask_2d, size=(spatial_size, spatial_size), mode='nearest')
+                    mask_flat = mask_resized.view(-1)  # (spatial_tokens,)
+                    
+                    # Repeat for all frames
+                    if num_frames > 1:
+                        mask_flat = mask_flat.unsqueeze(0).expand(num_frames, -1).reshape(-1)
+                    
+                    return mask_flat.to(device=device, dtype=dtype)
+        
+        # Fallback: seq_len is pure spatial (no temporal dimension)
+        sqrt_seq = int(seq_len ** 0.5)
+        if sqrt_seq * sqrt_seq == seq_len:
+            mask_2d = mask.unsqueeze(0).unsqueeze(0).float()
+            mask_resized = F.interpolate(mask_2d, size=(sqrt_seq, sqrt_seq), mode='nearest')
+            mask_flat = mask_resized.view(-1)
+            return mask_flat.to(device=device, dtype=dtype)
+        
+        # Ultimate fallback: resize to exact seq_len
+        new_h = int(seq_len ** 0.5)
+        new_w = seq_len // new_h if new_h > 0 else seq_len
+        while new_h > 1 and new_h * new_w != seq_len:
+            new_h -= 1
+            new_w = seq_len // new_h
+        if new_h * new_w != seq_len:
+            new_h, new_w = 1, seq_len
+        
+        mask_2d = mask.unsqueeze(0).unsqueeze(0).float()
+        mask_resized = F.interpolate(mask_2d, size=(new_h, new_w), mode='nearest')
+        mask_flat = mask_resized.view(-1)
+        return mask_flat.to(device=device, dtype=dtype)
+
     def _bypass_forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
         """
         Multi-adapter bypass forward with FreeFuse mask support.
@@ -693,19 +911,20 @@ class MultiAdapterBypassForwardHook:
                     adapter_name, seq_len, h_out.device, h_out.dtype
                 )
                 if mask is not None:
-                    # Debug: log mask application (only once per adapter)
-                    debug_key = f"_mask_debug_{adapter_name}"
-                    if not hasattr(self, debug_key):
-                        setattr(self, debug_key, True)
-                        img_len = seq_len - self.txt_len
-                        txt_mask_mean = mask[:self.txt_len].mean().item() if self.txt_len > 0 else 0
-                        img_mask_mean = mask[self.txt_len:].mean().item() if img_len > 0 else 0
-                        mask_type = self._get_mask_type()
-                        logging.debug(f"[OffsetBypass] Mask applied for {adapter_name} at {self.module_key}: "
-                                    f"seq_len={seq_len}, txt_len={self.txt_len}, img_len={img_len}, "
-                                    f"txt_mask_mean={txt_mask_mean:.4f}, img_mask_mean={img_mask_mean:.4f}, "
-                                    f"mask_type={mask_type}")
-                    
+                    # Debug: log mask application (only once per adapter, debug level only)
+                    if os.environ.get("FREEFUSE_DEBUG_MASKS") == "1":
+                        debug_key = f"_mask_debug_{adapter_name}"
+                        if not hasattr(self, debug_key):
+                            setattr(self, debug_key, True)
+                            img_len = seq_len - self.txt_len
+                            img_mask_mean = mask.mean().item()
+                            mask_type = self._get_mask_type()
+                            logging.info(f"[OffsetBypass] Mask APPLIED for {adapter_name} at {self.module_key}: "
+                                        f"seq_len={seq_len}, mask_type={mask_type}, mask_mean={img_mask_mean:.4f}, "
+                                        f"mask_unique={mask.unique().numel()}")
+                        else:
+                            logging.debug(f"[OffsetBypass] {adapter_name} at {self.module_key}: seq_len={seq_len}, mask_mean={mask.mean().item():.4f}")
+
                     # Apply mask to h_out
                     # h_out shape: (B, seq_len, features) for transformer
                     # mask shape: (seq_len,)

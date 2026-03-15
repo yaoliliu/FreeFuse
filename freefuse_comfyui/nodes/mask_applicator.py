@@ -71,15 +71,15 @@ class FreeFuseMaskApplicator:
                 }),
                 # Attention Bias parameters
                 "enable_attention_bias": ("BOOLEAN", {
-                    "default": True,
+                    "default": False,  # Disabled by default - use spatial masks only
                     "tooltip": "Apply attention bias to guide text-image attention based on masks"
                 }),
                 "bias_scale": ("FLOAT", {
-                    "default": 5.0, "min": 0.0, "max": 20.0, "step": 0.5,
-                    "tooltip": "Strength of negative bias (suppress cross-LoRA attention)"
+                    "default": 2.0, "min": 0.0, "max": 20.0, "step": 0.5,
+                    "tooltip": "Strength of negative bias (suppress cross-LoRA attention). Start with 1.0-3.0"
                 }),
                 "positive_bias_scale": ("FLOAT", {
-                    "default": 1.0, "min": 0.0, "max": 10.0, "step": 0.1,
+                    "default": 0.5, "min": 0.0, "max": 10.0, "step": 0.1,
                     "tooltip": "Strength of positive bias (enhance same-LoRA attention)"
                 }),
                 "bidirectional": ("BOOLEAN", {
@@ -146,21 +146,27 @@ When enabled, constructs soft attention bias to guide cross-attention:
             print("[FreeFuse] Warning: No adapters registered, returning model unchanged")
             return (model,)
 
-        # Determine latent size from masks or latent input
-        latent_size = self._get_latent_size(source_dict, latent)
-        if latent_size is None:
-            print("[FreeFuse] Warning: Could not determine latent size")
-            return (model,)
-
         # Clone the model
         model_clone = model.clone()
 
-        # Detect model type (prefer workflow/model-side hint).
+        # Detect model type FIRST (needed for correct latent size calculation)
         model_type = self._detect_model_type(
             model_clone,
             model_type_hint=freefuse_data.get("model_type"),
         )
         print(f"[FreeFuse] Detected model type: {model_type}")
+
+        # Determine latent size from masks or latent input
+        # For LTX-Video, this uses similarity map dimensions for correct attention resolution
+        latent_size = self._get_latent_size(
+            source_dict, 
+            latent,
+            freefuse_data=freefuse_data,
+            model_type=model_type,
+        )
+        if latent_size is None:
+            print("[FreeFuse] Warning: Could not determine latent size")
+            return (model,)
 
         # Get adapter name to mask mapping
         adapter_mask_map = {}
@@ -177,6 +183,60 @@ When enabled, constructs soft attention bias to guide cross-attention:
         if not adapter_mask_map:
             print("[FreeFuse] Warning: No adapter-mask mappings, returning model unchanged")
             return (model,)
+
+        # 🔥 DEBUG: Print mask statistics before applying
+        print(f"[FreeFuse] === Mask Application Debug ===")
+        for adapter_name, mask_entry in adapter_mask_map.items():
+            if mask_entry is not None and isinstance(mask_entry, dict):
+                mask = mask_entry.get("mask")
+                if mask is not None and isinstance(mask, torch.Tensor):
+                    mask_flat = mask.reshape(-1) if mask.dim() > 1 else mask
+                    mask_2d = mask.reshape(-1) if mask.dim() > 1 else mask
+                    
+                    # Find active pixel positions
+                    active_positions = torch.where(mask_flat > 0.5)[0]
+                    if len(active_positions) > 0:
+                        min_pos = active_positions.min().item()
+                        max_pos = active_positions.max().item()
+                        print(f"  {adapter_name}: shape={mask.shape}, min={mask_flat.min():.4f}, max={mask_flat.max():.4f}, mean={mask_flat.mean():.4f}, active_pixels={(mask_flat > 0).sum().item()}")
+                        print(f"    Active range: [{min_pos}-{max_pos}] of {mask_flat.numel()} total")
+                        
+                        # 🔥 NEW: Show 2D mask layout (left/right, top/bottom distribution)
+                        if mask.dim() == 3:
+                            mask_2d = mask[0] if mask.shape[0] == 1 else mask
+                        elif mask.dim() == 2:
+                            mask_2d = mask
+                        else:
+                            mask_2d = None
+                        
+                        if mask_2d is not None and mask_2d.dim() == 2:
+                            h, w = mask_2d.shape
+                            left_half = mask_2d[:, :w//2]
+                            right_half = mask_2d[:, w//2:]
+                            top_half = mask_2d[:h//2, :]
+                            bottom_half = mask_2d[h//2:, :]
+                            
+                            left_pct = (left_half > 0.5).sum().item() / left_half.numel() * 100
+                            right_pct = (right_half > 0.5).sum().item() / right_half.numel() * 100
+                            top_pct = (top_half > 0.5).sum().item() / top_half.numel() * 100
+                            bottom_pct = (bottom_half > 0.5).sum().item() / bottom_half.numel() * 100
+                            
+                            layout = []
+                            if left_pct > 70: layout.append("LEFT")
+                            elif right_pct > 70: layout.append("RIGHT")
+                            if top_pct > 70: layout.append("TOP")
+                            elif bottom_pct > 70: layout.append("BOTTOM")
+                            if left_pct > 40 and right_pct > 40: layout.append("SPLIT-H")
+                            if top_pct > 40 and bottom_pct > 40: layout.append("SPLIT-V")
+                            
+                            print(f"    2D Layout: {', '.join(layout) if layout else 'MIXED'}")
+                            print(f"      Left/Right: {left_pct:.0f}% / {right_pct:.0f}%, Top/Bottom: {top_pct:.0f}% / {bottom_pct:.0f}%")
+                    else:
+                        print(f"  {adapter_name}: NO ACTIVE PIXELS!")
+                else:
+                    print(f"  {adapter_name}: mask type={type(mask).__name__ if mask else 'None'}")
+            else:
+                print(f"  {adapter_name}: NO MASK (will use full attention)")
 
         # Apply masks using the hook system
         self._apply_masks_to_model(
@@ -202,6 +262,7 @@ When enabled, constructs soft attention bias to guide cross-attention:
                 bidirectional=bidirectional,
                 use_positive_bias=use_positive_bias,
                 bias_blocks=bias_blocks,
+                latent=latent,  # 🔥 FIX: Pass latent for LTX-Video temporal detection
             )
 
         return (model_clone,)
@@ -223,6 +284,7 @@ When enabled, constructs soft attention bias to guide cross-attention:
         bidirectional: bool,
         use_positive_bias: bool,
         bias_blocks: str,
+        latent=None,  # 🔥 FIX: Added for LTX-Video temporal detection
     ):
         """Apply attention bias patches to the model."""
         # Create config
@@ -234,7 +296,7 @@ When enabled, constructs soft attention bias to guide cross-attention:
             use_positive_bias=use_positive_bias,
             apply_to_blocks=bias_blocks if bias_blocks != "all" else None,
         )
-        
+
         # Get sequence lengths
         latent_h, latent_w = latent_size
         
@@ -348,12 +410,20 @@ When enabled, constructs soft attention bias to guide cross-attention:
                   f"bidirectional={bidirectional}, img_seq={img_seq_len}, cap_seq={cap_seq_len})")
 
         elif model_type == "ltx_video":
-            # LTX-Video uses CrossAttention with self-attention style
-            # For video: img_seq_len = T * H * W (but attention may operate at different resolution)
-            # Use mask dimensions to determine actual attention resolution
-            img_seq_len = latent_h * latent_w
+            # LTX-Video uses full spatiotemporal self-attention
+            # Sequence length = (W/32) × (H/32) × (T/8) tokens
+            # Text conditioning via cross-attention (attn2)
             
-            # Get actual sequence length from first mask
+            # Get temporal dimension from latent
+            latent_t = None
+            if latent is not None and "samples" in latent:
+                samples = latent["samples"]
+                if len(samples.shape) == 5:  # [B, C, T, H, W]
+                    latent_t = samples.shape[2]
+                    latent_h = samples.shape[3]
+                    latent_w = samples.shape[4]
+            
+            # Use mask dimensions to determine attention resolution
             first_mask = None
             for name, mask in mask_dict.items():
                 if not name.startswith("_"):
@@ -362,31 +432,28 @@ When enabled, constructs soft attention bias to guide cross-attention:
             
             if first_mask is not None:
                 if first_mask.dim() == 3:
-                    actual_seq_len = first_mask.shape[1] * first_mask.shape[2]
+                    img_seq_len = first_mask.shape[1] * first_mask.shape[2]
                 else:
-                    actual_seq_len = first_mask.numel()
-                # Use actual attention resolution if available
-                if actual_seq_len != img_seq_len:
-                    print(f"[FreeFuse] LTX-Video: Using attention resolution {actual_seq_len} (vs latent {img_seq_len})")
-                    img_seq_len = actual_seq_len
-
+                    img_seq_len = first_mask.numel()
+            else:
+                img_seq_len = latent_h * latent_w if latent_h and latent_w else 1024
+            
             # Estimate cap_seq_len from token_pos_maps
-            cap_seq_len = 256  # Default for Gemma tokenizer
+            cap_seq_len = 256
             for positions_list in token_pos_maps.values():
                 if positions_list and positions_list[0]:
                     max_pos = max(positions_list[0])
                     cap_seq_len = max(cap_seq_len, max_pos + 10)
-
-            # Flatten masks to (B, img_seq_len)
+            
+            # Prepare masks for attention bias
             lora_masks_flat = {}
             for name, mask in mask_dict.items():
                 if name.startswith("_"):
                     continue
                 if mask.dim() == 3:
                     mask = mask[0]
-                mask_flat = mask.reshape(-1)
-                lora_masks_flat[name] = mask_flat.unsqueeze(0)  # Add batch dim
-
+                lora_masks_flat[name] = mask.unsqueeze(0)
+            
             apply_attention_bias_patches(
                 model_patcher=model_patcher,
                 attention_bias=None,
@@ -396,9 +463,6 @@ When enabled, constructs soft attention bias to guide cross-attention:
                 lora_masks=lora_masks_flat,
                 token_pos_maps=token_pos_maps,
             )
-            print(f"[FreeFuse] Applied attention bias for LTX-Video "
-                  f"(bias_scale={bias_scale}, positive_scale={positive_bias_scale}, "
-                  f"img_seq={img_seq_len}, cap_seq={cap_seq_len})")
 
         else:  # SDXL
             # For SDXL, use the direct SDXL bias patches
@@ -419,17 +483,76 @@ When enabled, constructs soft attention bias to guide cross-attention:
         self,
         mask_dict: Dict[str, torch.Tensor],
         latent: Optional[Dict],
+        freefuse_data: Optional[Dict] = None,
+        model_type: str = "unknown",
     ) -> Optional[Tuple[int, int]]:
         """Determine latent size from masks or latent input.
-        
+
         IMPORTANT: For Flux models, the masks are in packed space (H/16 x W/16),
         not the original latent space (H/8 x W/8). We should prioritize the mask
         dimensions as they represent the actual spatial resolution of the masks.
-        
+
+        For LTX-Video, the attention resolution differs from the latent spatial
+        dimensions. LTX-Video uses 32x32 pixel blocks for attention.
+        For 1024x1024 input with 16x16 latent: attention = 32x32 tokens.
+
         Returns:
             Tuple of (height, width) representing the spatial dimensions of the masks
         """
-        # Priority 1: Use mask dimensions (most accurate for Flux packed space)
+        # Priority 1: For LTX-Video, calculate attention resolution from latent
+        # LTX-Video uses 32x32 pixel blocks for attention
+        # Latent uses 8x8 compression, attention uses 32x32 blocks
+        # So attention resolution = latent_size * 2
+        if model_type == "ltx_video" and latent is not None and "samples" in latent:
+            samples = latent["samples"]
+            if len(samples.shape) == 5:  # LTX-Video: [B, C, T, H, W]
+                latent_h = samples.shape[3]
+                latent_w = samples.shape[4]
+                # Attention uses 32x32 pixel blocks, latent uses 8x8 compression
+                # attention_res = latent_res * (64/32) = latent_res * 2
+                attn_h = latent_h * 2
+                attn_w = latent_w * 2
+                print(f"[FreeFuse] LTX-Video: latent={latent_w}x{latent_h}, attention={attn_w}x{attn_h} (32px blocks)")
+                return (attn_h, attn_w)
+
+        # Priority 2: For LTX-Video with similarity maps, use sequence length
+        if model_type == "ltx_video" and freefuse_data is not None:
+            similarity_maps = freefuse_data.get("similarity_maps", {})
+            if similarity_maps:
+                first_sim = list(similarity_maps.values())[0]
+                if isinstance(first_sim, torch.Tensor):
+                    seq_len = first_sim.shape[1] if first_sim.dim() >= 2 else 0
+                    if seq_len > 0:
+                        # Get temporal dimension if available
+                        latent_t = None
+                        if latent is not None and isinstance(latent, dict):
+                            samples = latent.get("samples")
+                            if samples is not None and len(samples.shape) == 5:
+                                latent_t = samples.shape[2]  # T dimension
+                        
+                        # Calculate attention spatial resolution from sequence length
+                        attn_spatial = int(seq_len ** 0.5)
+                        if attn_spatial * attn_spatial == seq_len:
+                            # Perfect square: attention uses square grid
+                            print(f"[FreeFuse] LTX-Video: Using attention resolution {attn_spatial}x{attn_spatial} (seq_len={seq_len})")
+                            return (attn_spatial, attn_spatial)
+                        elif latent_t is not None and latent_t > 1 and seq_len % latent_t == 0:
+                            # Video: seq_len = T * attn_H * attn_W
+                            spatial_tokens = seq_len // latent_t
+                            attn_spatial = int(spatial_tokens ** 0.5)
+                            if attn_spatial * attn_spatial == spatial_tokens:
+                                print(f"[FreeFuse] LTX-Video: Using video attention resolution {attn_spatial}x{attn_spatial} (T={latent_t}, spatial_tokens={spatial_tokens})")
+                                return (attn_spatial, attn_spatial)
+                            else:
+                                # Non-square spatial: find factors
+                                for i in range(int(spatial_tokens ** 0.5), 0, -1):
+                                    if spatial_tokens % i == 0:
+                                        test_h = i
+                                        test_w = spatial_tokens // i
+                                        print(f"[FreeFuse] LTX-Video: Using non-square attention {test_h}x{test_w} (T={latent_t})")
+                                        return (test_h, test_w)
+
+        # Priority 3: Use mask dimensions (for Flux packed space)
         # This is crucial because masks from generate_masks are already in the correct
         # packed resolution that matches the Flux attention sequence length
         for mask in mask_dict.values():
@@ -437,14 +560,14 @@ When enabled, constructs soft attention bias to guide cross-attention:
                 return (mask.shape[0], mask.shape[1])
             elif mask.dim() == 3:
                 return (mask.shape[1], mask.shape[2])
-        
-        # Fallback: Try from latent input (may need adjustment for Flux)
+
+        # Priority 4: Try from latent input (may need adjustment for Flux)
         if latent is not None and "samples" in latent:
             samples = latent["samples"]
             # Note: For Flux, this is the unpacked latent size (H/8, W/8)
             # The caller should be aware that this may differ from packed mask size
             return (samples.shape[2], samples.shape[3])
-        
+
         return None
     
     def _apply_masks_to_model(

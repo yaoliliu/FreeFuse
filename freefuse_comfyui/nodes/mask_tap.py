@@ -135,6 +135,10 @@ class FreeFuseMaskReassemble:
             },
             "optional": {
                 "latent": ("LATENT",),
+                "normalize_masks": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Make masks mutually exclusive using argmax (prevents bleeding)"
+                }),
             }
         }
 
@@ -143,7 +147,7 @@ class FreeFuseMaskReassemble:
     FUNCTION = "reassemble_masks"
     CATEGORY = "FreeFuse/Utils"
 
-    def reassemble_masks(self, mask_00, mask_01, mask_02, mask_03, mask_04, mask_05, mask_06, mask_07, freefuse_data, latent=None):
+    def reassemble_masks(self, mask_00, mask_01, mask_02, mask_03, mask_04, mask_05, mask_06, mask_07, freefuse_data, latent=None, normalize_masks=True):
         # Collect all input masks
         input_masks = [mask_00, mask_01, mask_02, mask_03, mask_04, mask_05, mask_06, mask_07]
 
@@ -154,16 +158,52 @@ class FreeFuseMaskReassemble:
         token_pos_maps = {}
         
         # Calculate target size from latent input (most reliable method)
-        # Mask size = latent_size / 2 (or image_size / 16)
+        # For LTX-Video: attention uses 32x32 pixel blocks, not latent resolution
+        # 1024x1024 input -> 32x32 attention tokens (1024/32 = 32)
         target_size = 64  # fallback
+        latent_spatial_dims = None  # Store actual latent spatial dims for reference
+        attention_spatial_dims = None  # Store attention resolution
+
         if latent is not None and isinstance(latent, dict):
             samples = latent.get("samples")
             if samples is not None and len(samples.shape) >= 3:
-                # Latent samples are [B, C, H, W]
-                latent_h = samples.shape[2]
-                # Mask resolution = latent / 2
-                target_size = latent_h // 2
-                print(f"[FreeFuseMaskReassemble] Target size from latent: {target_size}x{target_size} (latent_h={latent_h})")
+                # Check if 5D (LTX-Video: [B, C, T, H, W]) or 4D (image: [B, C, H, W])
+                if len(samples.shape) == 5:
+                    # LTX-Video: [B, C, T, H, W]
+                    latent_t = samples.shape[2]
+                    latent_h = samples.shape[3]
+                    latent_w = samples.shape[4]
+                    latent_spatial_dims = (latent_h, latent_w)
+                    
+                    # 🔥 CRITICAL FIX: LTX-Video attention uses 32x32 pixel blocks
+                    # For 1024x1024 input: attention = 32x32 tokens
+                    # We need to infer the original input resolution from latent
+                    # LTX-Video VAE compresses: spatial / 8, temporal / 8
+                    # So 16x16 latent = 128x128 input... but that's wrong
+                    # Actually LTX-Video uses 32x32 pixel blocks for attention
+                    # Attention resolution = input_resolution / 32
+                    
+                    # For 1024x1024 input with 16x16 latent:
+                    # - VAE compression: 1024/16 = 64 (latent represents 64px blocks)
+                    # - Attention uses: 1024/32 = 32 tokens
+                    # So attention resolution = latent_size * (64/32) = latent_size * 2
+                    
+                    attn_h = latent_h * 2  # 16 * 2 = 32
+                    attn_w = latent_w * 2  # 16 * 2 = 32
+                    attention_spatial_dims = (attn_h, attn_w)
+                    target_size = max(attn_h, attn_w)
+                    
+                    print(f"[FreeFuseMaskReassemble] LTX-Video latent: T={latent_t}, spatial={latent_w}x{latent_h}")
+                    print(f"[FreeFuseMaskReassemble] LTX-Video attention: {attn_w}x{attn_h} (32px blocks)")
+                    print(f"[FreeFuseMaskReassemble] Target size from attention: {target_size}x{target_size}")
+                elif len(samples.shape) >= 4:
+                    # Image models: [B, C, H, W]
+                    latent_h = samples.shape[2]
+                    latent_w = samples.shape[3] if len(samples.shape) >= 4 else latent_h
+                    latent_spatial_dims = (latent_h, latent_w)
+                    # Mask resolution = latent / 2
+                    target_size = latent_h // 2
+                    print(f"[FreeFuseMaskReassemble] Target size from latent: {target_size}x{target_size} (latent_h={latent_h})")
 
         # Always extract adapter names from freefuse_data (regardless of target_size source)
         if freefuse_data is not None and isinstance(freefuse_data, dict):
@@ -179,6 +219,50 @@ class FreeFuseMaskReassemble:
                     adapter_names.append(name)
                     seen.add(name)
             token_pos_maps = freefuse_data.get("token_pos_maps", {})
+            
+            # 🔥 FIX: Check for similarity maps to get actual attention resolution
+            # This is more accurate than latent dimensions for LTX-Video
+            if target_size == 64 or attention_spatial_dims is not None:
+                similarity_maps = freefuse_data.get("similarity_maps", {})
+                if similarity_maps:
+                    first_sim = list(similarity_maps.values())[0]
+                    if isinstance(first_sim, torch.Tensor):
+                        # Get sequence length from similarity map
+                        # Shape is (B, N, 1) where N = T * attn_H * attn_W for video
+                        seq_len = first_sim.shape[1] if first_sim.dim() >= 2 else 0
+                        
+                        if seq_len > 0:
+                            # For LTX-Video, need to handle spatio-temporal attention
+                            latent_t = samples.shape[2] if len(samples.shape) == 5 else None
+                            
+                            # Try to factorize seq_len
+                            attn_spatial = int(seq_len ** 0.5)
+                            if attn_spatial * attn_spatial == seq_len:
+                                # Perfect square: attention uses square grid (or T=1)
+                                target_size = attn_spatial
+                                attention_spatial_dims = (attn_spatial, attn_spatial)
+                                print(f"[FreeFuseMaskReassemble] Using attention resolution: {target_size}x{target_size} (seq_len={seq_len})")
+                            elif latent_t is not None and latent_t > 1 and seq_len % latent_t == 0:
+                                # Video: seq_len = T * attn_H * attn_W
+                                spatial_tokens = seq_len // latent_t
+                                attn_spatial = int(spatial_tokens ** 0.5)
+                                if attn_spatial * attn_spatial == spatial_tokens:
+                                    target_size = attn_spatial
+                                    attention_spatial_dims = (attn_spatial, attn_spatial)
+                                    print(f"[FreeFuseMaskReassemble] Using video attention resolution: {target_size}x{target_size} (T={latent_t}, spatial_tokens={spatial_tokens})")
+                                else:
+                                    # Non-square spatial
+                                    for i in range(int(spatial_tokens ** 0.5), 0, -1):
+                                        if spatial_tokens % i == 0:
+                                            target_size = max(i, spatial_tokens // i)
+                                            attention_spatial_dims = (i, spatial_tokens // i)
+                                            break
+                                    print(f"[FreeFuseMaskReassemble] Using non-square video attention: {target_size}x{target_size}")
+                            elif latent_spatial_dims is not None:
+                                # Use latent spatial dimensions as fallback
+                                target_size = max(latent_spatial_dims)
+                                print(f"[FreeFuseMaskReassemble] Using latent spatial: {target_size}x{target_size}")
+            
             # Only use settings for target_size if latent didn't provide it
             if target_size == 64:
                 settings = freefuse_data.get("settings", {})
@@ -220,6 +304,26 @@ class FreeFuseMaskReassemble:
                 
                 new_masks[adapter_name] = mask
 
+        # 🔥 Normalize masks to prevent bleeding (make mutually exclusive)
+        if normalize_masks and len(new_masks) > 1:
+            print(f"[FreeFuseMaskReassemble] Normalizing masks to prevent bleeding...")
+            # Stack all masks: (num_masks, H, W)
+            mask_names = list(new_masks.keys())
+            stacked = torch.stack([new_masks[name].squeeze(0) for name in mask_names], dim=0)
+            
+            # Argmax to make mutually exclusive
+            assignment = torch.argmax(stacked, dim=0)  # (H, W)
+            
+            # Create one-hot masks
+            normalized = {}
+            for i, name in enumerate(mask_names):
+                one_hot = (assignment == i).float()
+                normalized[name] = one_hot.unsqueeze(0)  # (1, H, W)
+                print(f"  {name}: {(one_hot > 0).sum().item()} pixels")
+            
+            new_masks = normalized
+            print(f"[FreeFuseMaskReassemble] Masks normalized (mutually exclusive)")
+
         new_mask_bank = {
             "masks": new_masks,
             "similarity_maps": {},
@@ -228,6 +332,13 @@ class FreeFuseMaskReassemble:
         }
 
         print(f"[FreeFuseMaskReassemble] Reassembled {len(new_masks)} masks with names: {list(new_masks.keys())}")
+        
+        # 🔥 DEBUG: Print mask statistics
+        print(f"[FreeFuseMaskReassemble] === Mask Statistics ===")
+        for name, mask in new_masks.items():
+            mask_flat = mask.reshape(-1) if mask.dim() > 1 else mask
+            print(f"  {name}: shape={mask.shape}, min={mask_flat.min():.4f}, max={mask_flat.max():.4f}, mean={mask_flat.mean():.4f}, active={(mask_flat > 0.5).sum().item()}/{mask_flat.numel()}")
+        
         return (new_mask_bank,)
 
 

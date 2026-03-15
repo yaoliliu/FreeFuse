@@ -351,6 +351,12 @@ class FreeFuseTokenPositions:
         model_type = detect_model_type(clip=clip, model_type_hint=model_type_hint)
         print(f"[FreeFuseTokenPositions] Detected model type: {model_type}")
 
+        # 🔥 NEW: Detect transformer block count for LTX-Video
+        # Note: CLIP object doesn't have diffusion_model, so we can't detect blocks here
+        # Block count will be detected by the similarity extractor which has the MODEL
+        if model_type == "ltx_video":
+            print(f"[FreeFuseTokenPositions] LTX-Video detected - block count will be detected by similarity extractor")
+
         # For Z-Image (Lumina2) and Qwen-Image, pass system prompt
         system_prompt = LUMINA2_SYSTEM_PROMPT if model_type in ('z_image', 'qwen_image') else None
         

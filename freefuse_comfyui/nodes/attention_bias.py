@@ -136,20 +136,23 @@ Parameters:
         if not token_pos_maps:
             print("[FreeFuse] Warning: No token positions provided for attention bias")
             return (model, None)
-        
-        # Get latent size
-        latent_size = self._get_latent_size(mask_dict, latent)
+
+        # Clone model and detect model type FIRST (needed for correct latent size)
+        model_clone = model.clone()
+        model_type = self._detect_model_type(model_clone)
+        print(f"[FreeFuse] Attention bias for {model_type} model")
+
+        # Get latent size (for LTX-Video, uses similarity map dimensions)
+        latent_size = self._get_latent_size(
+            mask_dict, 
+            latent,
+            freefuse_data=freefuse_data,
+            model_type=model_type,
+        )
         if latent_size is None:
             print("[FreeFuse] Warning: Could not determine latent size")
             return (model, None)
-        
-        # Clone model
-        model_clone = model.clone()
-        
-        # Detect model type
-        model_type = self._detect_model_type(model_clone)
-        print(f"[FreeFuse] Attention bias for {model_type} model")
-        
+
         # Create config
         config = AttentionBiasConfig(
             enabled=True,
@@ -224,26 +227,58 @@ Parameters:
         # Return attention bias for visualization/debugging
         return (model_clone, {"bias": attention_bias, "config": config.to_dict()})
     
-    def _get_latent_size(self, mask_dict, latent) -> Optional[Tuple[int, int]]:
+    def _get_latent_size(self, mask_dict, latent, freefuse_data=None, model_type="unknown") -> Optional[Tuple[int, int]]:
         """Get latent size from masks or latent.
-        
+
         IMPORTANT: For Flux, masks are in packed space (H/16, W/16), while latent
         input is in original space (H/8, W/8). We should prioritize mask dimensions
         as they represent the actual spatial resolution used for attention bias.
+
+        For LTX-Video, the attention resolution may differ from latent spatial dimensions.
+        We prioritize similarity map dimensions as they represent the actual attention resolution.
         """
-        # First try to get from masks - they are the authoritative source
-        # for the spatial resolution (especially for Flux with packed dimensions)
+        # Priority 1: For LTX-Video, use similarity map dimensions
+        if model_type == "ltx_video" and freefuse_data is not None:
+            similarity_maps = freefuse_data.get("similarity_maps", {})
+            if similarity_maps:
+                first_sim = list(similarity_maps.values())[0]
+                if isinstance(first_sim, torch.Tensor):
+                    seq_len = first_sim.shape[1] if first_sim.dim() >= 2 else 0
+                    if seq_len > 0:
+                        # Get temporal dimension if available
+                        latent_t = None
+                        if latent is not None and isinstance(latent, dict):
+                            samples = latent.get("samples")
+                            if samples is not None and len(samples.shape) == 5:
+                                latent_t = samples.shape[2]
+                        
+                        # Calculate attention spatial resolution
+                        attn_spatial = int(seq_len ** 0.5)
+                        if attn_spatial * attn_spatial == seq_len:
+                            return (attn_spatial, attn_spatial)
+                        elif latent_t is not None and latent_t > 1 and seq_len % latent_t == 0:
+                            spatial_tokens = seq_len // latent_t
+                            attn_spatial = int(spatial_tokens ** 0.5)
+                            if attn_spatial * attn_spatial == spatial_tokens:
+                                return (attn_spatial, attn_spatial)
+                            else:
+                                # Non-square: find factors
+                                for i in range(int(spatial_tokens ** 0.5), 0, -1):
+                                    if spatial_tokens % i == 0:
+                                        return (i, spatial_tokens // i)
+
+        # Priority 2: Use mask dimensions (for Flux packed space)
         for mask in mask_dict.values():
             if mask.dim() == 2:
                 return (mask.shape[0], mask.shape[1])
             elif mask.dim() == 3:
                 return (mask.shape[1], mask.shape[2])
-        
-        # Fallback to latent if no masks available
+
+        # Priority 3: Fallback to latent
         if latent is not None and "samples" in latent:
             samples = latent["samples"]
             return (samples.shape[2], samples.shape[3])
-        
+
         return None
     
     def _detect_model_type(self, model_patcher) -> str:

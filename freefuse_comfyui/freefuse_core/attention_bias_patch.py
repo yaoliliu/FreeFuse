@@ -1229,8 +1229,8 @@ def _apply_ltx_video_bias_patches(
     config: AttentionBiasConfig,
 ):
     """Apply attention bias patches for LTX-Video model.
-    
-    LTX-Video uses CrossAttention with self-attention style.
+
+    LTX-Video uses full spatiotemporal self-attention.
     This function applies bias to guide text-image attention based on spatial masks.
     """
     if lora_masks is None or not lora_masks:
@@ -1272,7 +1272,6 @@ def _apply_ltx_video_bias_patches(
         elif preset == "last_half":
             apply_to_blocks = [f"{blocks_attr}.{i}" for i in range(num_blocks // 2, num_blocks)]
         elif preset == "double_stream_only":
-            # For LTX-Video, apply to all blocks (no double/single stream distinction)
             apply_to_blocks = None
         else:
             apply_to_blocks = [preset]
@@ -1285,15 +1284,21 @@ def _apply_ltx_video_bias_patches(
             apply_to_blocks=apply_to_blocks,
         )
 
+    # Prepare masks
+    lora_masks_prepared = {}
+    for name, mask in lora_masks.items():
+        if mask.dim() == 3:
+            mask = mask[0]
+        lora_masks_prepared[name] = mask
+
     patches_applied = 0
 
     for i in range(num_blocks):
         block_name = f"{blocks_attr}.{i}"
         if config.should_apply_to_block(block_name):
             block = blocks[i]
-            # Use Flux bias replacer - LTX-Video uses similar attention mechanism
             replacer = FreeFuseFluxBiasBlockReplace(
-                lora_masks=lora_masks,
+                lora_masks=lora_masks_prepared,
                 token_pos_maps=token_pos_maps,
                 config=config,
                 block_index=i,

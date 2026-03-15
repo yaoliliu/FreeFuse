@@ -166,9 +166,24 @@ Shows WHERE each concept's attention is located in the composition."""
         # Bepaal output dimensies met behoud van aspect ratio
         if latent is not None and "samples" in latent:
             # Gebruik latent voor aspect ratio
-            latent_h = latent["samples"].shape[2]
-            latent_w = latent["samples"].shape[3]
+            latent_tensor = latent["samples"]
             
+            # 🔥 FIX: Handle 5D latents (LTX-Video: B, C, T, H, W)
+            if latent_tensor.dim() == 5:
+                # LTX-Video: (B, C, T, H, W)
+                latent_h = latent_tensor.shape[3]  # H dimension
+                latent_w = latent_tensor.shape[4]  # W dimension
+                print(f"[FreeFuse Raw Similarity Overlay] LTX-Video 5D latent detected: {latent_tensor.shape}")
+                print(f"  Using spatial dimensions: H={latent_h}, W={latent_w}")
+            elif latent_tensor.dim() == 4:
+                # Standard: (B, C, H, W)
+                latent_h = latent_tensor.shape[2]
+                latent_w = latent_tensor.shape[3]
+                print(f"[FreeFuse Raw Similarity Overlay] Standard 4D latent detected: {latent_tensor.shape}")
+            else:
+                print(f"[FreeFuse Raw Similarity Overlay] Unexpected latent shape: {latent_tensor.shape}, assuming square")
+                latent_h = latent_w = preview_size
+
             # Schaal naar output size (behoud aspect ratio)
             if latent_h >= latent_w:
                 out_h = preview_size
@@ -176,11 +191,12 @@ Shows WHERE each concept's attention is located in the composition."""
             else:
                 out_w = preview_size
                 out_h = int(preview_size * latent_h / latent_w)
+            
+            print(f"[FreeFuse Raw Similarity Overlay] Output size: {out_w}x{out_h} (aspect ratio preserved from {latent_w}x{latent_h})")
         else:
             # Geen latent: gebruik preview_size voor beide (vierkant)
             out_h = out_w = preview_size
-        
-        print(f"[FreeFuse] Output size: {out_w}x{out_h} (aspect ratio behouden)")
+            print(f"[FreeFuse Raw Similarity Overlay] No latent provided, using square: {out_w}x{out_h}")
         
         # Filter background if needed
         concept_maps = []
@@ -195,7 +211,15 @@ Shows WHERE each concept's attention is located in the composition."""
         if not concept_maps:
             empty = torch.zeros(1, out_h, out_w, 3)
             return (empty, empty, empty, empty, empty, empty, "No concepts to display")
+
+        # Filter out non-tensor entries (metadata, etc.)
+        concept_maps = [m for m in concept_maps if isinstance(m, torch.Tensor)]
         
+        if not concept_maps:
+            print(f"[FreeFuse Raw Similarity Grid] No valid similarity maps found")
+            empty = torch.zeros(1, out_h, out_w, 3)
+            return (empty, empty, empty, empty, empty, empty, "No concepts to display")
+
         # Find spatial dimensions
         first_map = concept_maps[0]
         if first_map.dim() == 3:
