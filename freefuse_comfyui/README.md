@@ -40,8 +40,6 @@ FreeFuse successfully composites multiple LoRA concepts in LTX-Video 2.3 using a
 
 ## What FreeFuse Does
 
-![FreeFuse Comparison](https://codeberg.org/skynet/FreeFuse/raw/branch/main/assets/compare_all.png?raw=true)
-
 *FreeFuse enables precise multi-concept LoRA composition by generating attention-based masks that separate different characters/objects.*
 
 ## Features
