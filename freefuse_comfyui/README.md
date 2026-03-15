@@ -44,15 +44,6 @@ FreeFuse successfully composites multiple LoRA concepts in LTX-Video 2.3 using a
 
 *FreeFuse enables precise multi-concept LoRA composition by generating attention-based masks that separate different characters/objects.*
 
-## Example Workflows
-
-| Workflow | Description |
-|----------|-------------|
-| [**Qwen-Image Manual Masks**](https://codeberg.org/skynet/FreeFuse/raw/branch/main/dev_workflows/FreeFuse-qwen-image-manual-mask.json) | Qwen-Image with manual masks |
-| [**Z-Image Manual Masks**](https://codeberg.org/skynet/FreeFuse/raw/branch/main/dev_workflows/FreeFuse-zimage-manual-mask.json) | Z-Image with manual masks |
-| [**Z-Image Standard**](https://codeberg.org/skynet/FreeFuse/raw/branch/main/dev_workflows/FreeFuse-zimage-standard.json) | Z-Image with attention-based masks |
-| [**LTX-Video Manual Masks**](https://codeberg.org/skynet/FreeFuse/raw/branch/main/dev_workflows/FreeFuse-ltx-manual-masks.json) | LTX-Video 2.3 with manual masks |
-
 ## Features
 
 - **Multi-LoRA Composition** - Stack up to 6 LoRAs per character
@@ -91,15 +82,6 @@ Or use **ComfyUI Manager** → Search "FreeFuse" → Install
 | `FreeFuseMaskApplicator` | Apply masks to LoRAs |
 | `FreeFuse Sampler` | Collect attention masks (Z-Image) |
 
-## Documentation
-
-| File | Description |
-|------|-------------|
-| [QWEN_IMAGE.md](https://codeberg.org/skynet/FreeFuse/raw/branch/main/QWEN_IMAGE.md) | Complete Qwen-Image guide |
-| [Z_IMAGE.md](https://codeberg.org/skynet/FreeFuse/raw/branch/main/Z_IMAGE.md) | Complete Z-Image guide |
-| [LTX_VIDEO.md](https://codeberg.org/skynet/FreeFuse/raw/branch/main/LTX_VIDEO.md) | Complete LTX-Video guide |
-| [MULTI_LORA_VRAM_OPTIMIZATION.md](https://codeberg.org/skynet/FreeFuse/raw/branch/main/MULTI_LORA_VRAM_OPTIMIZATION.md) | VRAM optimization tips |
-
 ## Quick Tips
 
 ### Qwen-Image
@@ -122,11 +104,6 @@ Or use **ComfyUI Manager** → Search "FreeFuse" → Install
 ## TODO / Future Work
 
 - [ ] **LTX-Video Similarity Maps Investigation** - Need to investigate LTX-Video similarity maps further to enable fully automated FreeFuse process. Current workflow requires manual block selection and parameter tuning.
-
-## Support
-
-- **Issues**: https://codeberg.org/skynet/FreeFuse/issues
-- **Discussions**: https://codeberg.org/skynet/FreeFuse/discussions
 
 ## Credits
 
