@@ -48,9 +48,7 @@ FreeFuse successfully composites multiple LoRA concepts in LTX-Video 2.3 using a
 
 | Workflow | Description |
 |----------|-------------|
-| [**Qwen-Image SAM Masks**](https://codeberg.org/skynet/FreeFuse/raw/branch/main/dev_workflows/FreeFuse-qwen-image-sam-mask.json) | Qwen-Image with SAM masks |
 | [**Qwen-Image Manual Masks**](https://codeberg.org/skynet/FreeFuse/raw/branch/main/dev_workflows/FreeFuse-qwen-image-manual-mask.json) | Qwen-Image with manual masks |
-| [**Z-Image SAM Masks**](https://codeberg.org/skynet/FreeFuse/raw/branch/main/dev_workflows/FreeFuse-zimage-sam-mask.json) | Z-Image with SAM masks |
 | [**Z-Image Manual Masks**](https://codeberg.org/skynet/FreeFuse/raw/branch/main/dev_workflows/FreeFuse-zimage-manual-mask.json) | Z-Image with manual masks |
 | [**Z-Image Standard**](https://codeberg.org/skynet/FreeFuse/raw/branch/main/dev_workflows/FreeFuse-zimage-standard.json) | Z-Image with attention-based masks |
 | [**LTX-Video Manual Masks**](https://codeberg.org/skynet/FreeFuse/raw/branch/main/dev_workflows/FreeFuse-ltx-manual-masks.json) | LTX-Video 2.3 with manual masks |
