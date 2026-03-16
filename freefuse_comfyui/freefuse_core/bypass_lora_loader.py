@@ -785,28 +785,92 @@ class MultiAdapterBypassForwardHook:
         # But if we get here with very small seq_len, it's likely text
         if seq_len < 100:
             return torch.ones(seq_len, device=device, dtype=dtype)
-        
-        # Try to factorize seq_len into spatial × temporal
-        # Common temporal lengths: 1 (image), 7, 8, 15, 16, 31, 32 (video frames)
-        temporal_factors = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 16, 18, 24, 31, 32, 48, 64]
-        
-        for num_frames in temporal_factors:
+
+        # 🔥 BUGFIX: Dynamic Temporal Detection for LTX-Video (March 2026)
+        # 
+        # PROBLEM: Original hardcoded list missed many T values:
+        #   temporal_factors = [1,2,3,4,5,6,7,8,9,10,12,15,16,18,24,31,32,48,64]
+        #   Missing: 11,13,14,17,19,20,21-30,33-47,49-63
+        #
+        # SYMPTOM: Videos >3 sec at 25fps produced wrong faces from frame 1
+        # - 3 sec @ 25fps: T=9-10 ✅ Works (in list)
+        # - 4 sec @ 25fps: T=12-13 ❌ Fails (13 missing) → faces merged
+        # - 5 sec @ 25fps: T=15-16 ❌ Fails (boundary issues) → faces merged
+        # - 6 sec @ 25fps: T=18-19 ❌ Fails (19 missing) → faces merged
+        #
+        # ROOT CAUSE: When T not in list, factorization fails → mask resized to wrong
+        # spatial dimensions → wrong LoRA activated → faces merge immediately
+        #
+        # DISCOVERY: User tested 1024x1024 @ 25fps:
+        # - 3 sec: ✅ Works
+        # - 4 sec: ❌ Faces merged (T=13 not in list)
+        # - 5 sec: ❌ Faces merged
+        # - 6 sec: ❌ Faces merged (T=19 not in list)
+        # 50 fps test confirmed it's frame COUNT, not duration:
+        # - 50 fps @ 1 sec: T=6 ✅ Works
+        # - 50 fps @ 2 sec: T=12-13 ❌ Fails (same as 25fps @ 4 sec)
+        #
+        # FIX: Dynamic detection supports T=1-256 (up to ~80 sec @ 25fps, ~33 sec @ 60fps)
+        # Covers all common FPS (24/25/30/36/48/50/60) up to 20+ seconds.
+        #
+        # OTHER MODELS: This function ONLY called for LTX-Video (mask_type='ltx_video')
+        # Z-Image, Qwen-Image, Flux, SDXL use different code paths → untouched
+
+        # 🔥 DYNAMIC TEMPORAL DETECTION FOR LTX-VIDEO
+        # Replaces hardcoded temporal_factors list to support any video length
+        # Strategy: Try all T values from 1-256, prefer those that give clean square spatial
+        found_factorization = False
+
+        # Priority 1: Check if mask spatial matches seq_len factorization
+        # This handles cases where mask is already at correct resolution
+        for num_frames in range(1, 257):  # Support up to T=256 (~80 sec at 25fps, ~20 sec at 50-60fps)
             if seq_len % num_frames == 0:
                 spatial_tokens = seq_len // num_frames
                 spatial_size = int(spatial_tokens ** 0.5)
-                
+
                 if spatial_size * spatial_size == spatial_tokens:
                     # Found valid factorization: seq_len = spatial_size² × num_frames
                     # Resize mask to spatial_size × spatial_size
                     mask_2d = mask.unsqueeze(0).unsqueeze(0).float()
                     mask_resized = F.interpolate(mask_2d, size=(spatial_size, spatial_size), mode='nearest')
                     mask_flat = mask_resized.view(-1)  # (spatial_tokens,)
-                    
+
                     # Repeat for all frames
                     if num_frames > 1:
                         mask_flat = mask_flat.unsqueeze(0).expand(num_frames, -1).reshape(-1)
-                    
+
+                    logging.debug(f"[OffsetBypass LTX] Dynamic T detection: T={num_frames}, spatial={spatial_size}x{spatial_size}, seq_len={seq_len}")
                     return mask_flat.to(device=device, dtype=dtype)
+        
+        # ⚠️ NOTE: Range T=1-256 covers:
+        # - 25 fps: up to ~80 seconds (T=250)
+        # - 50 fps: up to ~40 seconds (T=250)
+        # - 60 fps: up to ~33 seconds (T=250)
+        # - 36 fps: up to ~55 seconds (T=250)
+        # For extreme lengths (>80 sec @ 25fps), consider extending range to 512.
+        # Trade-off: Larger range = more iterations, but typically finds match in first 10-20 tries.
+        
+        # Priority 2: Try non-square spatial (for non-square resolutions)
+        for num_frames in range(1, 257):  # Match Priority 1 range (T=256)
+            if seq_len % num_frames == 0:
+                spatial_tokens = seq_len // num_frames
+                # Try to find H×W factors
+                for test_h in range(int(spatial_tokens ** 0.5), 0, -1):
+                    if spatial_tokens % test_h == 0:
+                        test_w = spatial_tokens // test_h
+                        # Use latent_size aspect ratio to guide selection
+                        if self.latent_size is not None:
+                            aspect_ratio = self.latent_size[1] / self.latent_size[0]
+                            expected_ratio = test_w / test_h
+                            if abs(aspect_ratio - expected_ratio) < 0.1:  # Within 10%
+                                mask_2d = mask.unsqueeze(0).unsqueeze(0).float()
+                                mask_resized = F.interpolate(mask_2d, size=(test_h, test_w), mode='nearest')
+                                mask_flat = mask_resized.view(-1)
+                                if num_frames > 1:
+                                    mask_flat = mask_flat.unsqueeze(0).expand(num_frames, -1).reshape(-1)
+                                logging.debug(f"[OffsetBypass LTX] Non-square: T={num_frames}, spatial={test_h}x{test_w}, seq_len={seq_len}")
+                                return mask_flat.to(device=device, dtype=dtype)
+                        break
         
         # Fallback: seq_len is pure spatial (no temporal dimension)
         sqrt_seq = int(seq_len ** 0.5)
