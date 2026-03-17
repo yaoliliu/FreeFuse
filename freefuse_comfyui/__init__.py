@@ -50,6 +50,13 @@ from .nodes import (
     FreeFuseMaskTap,
     FreeFuseMaskReassemble,
 
+    # Connector strips
+    FreeFuseConnectorInputStrip,
+    FreeFuseConnectorOutputStrip,
+
+    # Named reroute
+    FreeFuseNamedReroute,
+
     # Mappings
     NODE_CLASS_MAPPINGS,
     NODE_DISPLAY_NAME_MAPPINGS,
@@ -59,4 +66,7 @@ from .nodes import (
 __all__ = [
     "NODE_CLASS_MAPPINGS",
     "NODE_DISPLAY_NAME_MAPPINGS",
+    "FreeFuseConnectorInputStrip",
+    "FreeFuseConnectorOutputStrip",
+    "FreeFuseNamedReroute",
 ]

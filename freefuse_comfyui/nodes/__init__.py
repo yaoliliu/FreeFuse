@@ -120,6 +120,21 @@ from .ltx_block_grid_extractor import (
     NODE_DISPLAY_NAME_MAPPINGS as LTX_GRID_DISPLAY_MAPPINGS,
 )
 
+# Import connector strips
+from .connector_strip import (
+    FreeFuseConnectorInputStrip,
+    FreeFuseConnectorOutputStrip,
+    NODE_CLASS_MAPPINGS as CONNECTOR_NODE_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as CONNECTOR_DISPLAY_MAPPINGS,
+)
+
+# Import named reroute
+from .reroute_named import (
+    FreeFuseNamedReroute,
+    NODE_CLASS_MAPPINGS as REROUTE_NODE_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as REROUTE_DISPLAY_MAPPINGS,
+)
+
 # Combine all node mappings
 NODE_CLASS_MAPPINGS = {
     # Original LoRA loaders (keep these)
@@ -178,6 +193,13 @@ NODE_CLASS_MAPPINGS = {
     # Utility nodes
     "FreeFuseMaskTap": FreeFuseMaskTap,
     "FreeFuseMaskReassemble": FreeFuseMaskReassemble,
+
+    # Connector strips
+    "FreeFuseConnectorInputStrip": FreeFuseConnectorInputStrip,
+    "FreeFuseConnectorOutputStrip": FreeFuseConnectorOutputStrip,
+
+    # Named reroute
+    "FreeFuseNamedReroute": FreeFuseNamedReroute,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -235,6 +257,13 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     # Utility nodes
     "FreeFuseMaskTap": "FreeFuse Mask Tap",
     "FreeFuseMaskReassemble": "FreeFuse Mask Reassemble",
+
+    # Connector strips
+    "FreeFuseConnectorInputStrip": "FreeFuse Connector Input Strip",
+    "FreeFuseConnectorOutputStrip": "FreeFuse Connector Output Strip",
+
+    # Named reroute
+    "FreeFuseNamedReroute": "FreeFuse Named Reroute",
 }
 
 # Make sure WEB_DIRECTORY is included in __all__
@@ -289,6 +318,13 @@ __all__ = [
     # Utility nodes
     "FreeFuseMaskTap",
     "FreeFuseMaskReassemble",
+
+    # Connector strips
+    "FreeFuseConnectorInputStrip",
+    "FreeFuseConnectorOutputStrip",
+
+    # Named reroute
+    "FreeFuseNamedReroute",
 
     # Mappings
     "NODE_CLASS_MAPPINGS",
