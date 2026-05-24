@@ -32,6 +32,7 @@ from .nodes import (
     # Mask application
     FreeFuseMaskApplicator,
     FreeFuseMaskDebug,
+    FreeFuseMaskBankFromImages,
     FreeFuseMaskTap,
     FreeFuseMaskReassemble,
     # Preview
