@@ -321,25 +321,44 @@ def generate_masks(
         N = first_map.shape[1]
         
         # Use provided latent dimensions if available (CRITICAL for non-square!)
+        # N may include extra non-spatial tokens (register/class tokens) beyond h*w
+        extra_tokens = 0
         if latent_h is not None and latent_w is not None:
             h, w = latent_h, latent_w
             if h * w != N:
-                # Similarity maps might be from a different resolution (e.g., packed Flux)
-                # Try to find compatible factors
+                # Try exact match at different downsampling scales
+                found = False
                 for scale in [1, 2, 4, 8]:
                     test_h, test_w = latent_h // scale, latent_w // scale
                     if test_h * test_w == N:
                         h, w = test_h, test_w
+                        found = True
                         break
-                else:
-                    print(f"[generate_masks] Warning: latent {latent_h}x{latent_w} ({latent_h*latent_w}) != N ({N})")
-                    # Fallback to square assumption
-                    h = w = int(N ** 0.5)
+
+                if not found:
+                    # Try approximate match: find scale where spatial < N
+                    # Extra tokens (register/class tokens) will be stripped
+                    best_h, best_w, best_extra = None, None, N + 1
+                    for scale in [1, 2, 4, 8]:
+                        test_h, test_w = latent_h // scale, latent_w // scale
+                        spatial = test_h * test_w
+                        extra = N - spatial
+                        if 0 < extra < best_extra and extra < spatial * 0.05:
+                            best_h, best_w, best_extra = test_h, test_w, extra
+
+                    if best_h is not None:
+                        h, w = best_h, best_w
+                        extra_tokens = best_extra
+                        print(f"[generate_masks] Detected {extra_tokens} non-spatial tokens "
+                              f"(N={N}, spatial={h}x{w}={h*w}), stripping before reshape")
+                    else:
+                        print(f"[generate_masks] Warning: latent {latent_h}x{latent_w} "
+                              f"({latent_h*latent_w}) != N ({N}), falling back to square")
+                        h = w = int(N ** 0.5)
         else:
             # No latent dims provided - try square first, then find factors
             h = w = int(N ** 0.5)
             if h * w != N:
-                # Try to find factors (prefer wider aspect for landscape, taller for portrait)
                 # WARNING: This is a fallback and may produce incorrect results!
                 print(f"[generate_masks] WARNING: No latent dimensions provided for non-square N={N}!")
                 for i in range(int(N ** 0.5), 0, -1):
@@ -347,15 +366,20 @@ def generate_masks(
                         h = i
                         w = N // i
                         break
-        
+
+        spatial_n = h * w
         if debug:
-            print(f"[generate_masks] Converting (B={B}, N={N}, 1) to spatial ({h}, {w})")
-        
+            msg = f"[generate_masks] Converting (B={B}, N={N}, 1) to spatial ({h}, {w})"
+            if extra_tokens > 0:
+                msg += f" [stripping {extra_tokens} extra tokens]"
+            print(msg)
+
         maps_spatial = []
         for m in maps:
             if m.dim() == 3:
                 m = m.squeeze(-1)  # (B, N)
-            spatial = m[0].view(h, w)  # Take first batch, reshape to spatial
+            # Strip extra non-spatial tokens (register/class tokens) before reshape
+            spatial = m[0][:spatial_n].view(h, w)
             maps_spatial.append(spatial)
         maps = maps_spatial
         target_shape = (h, w)

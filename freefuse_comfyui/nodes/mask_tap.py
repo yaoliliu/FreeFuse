@@ -226,8 +226,15 @@ def _resolve_image_ref_path(path_like: Optional[str], ref_type: Optional[str]) -
 
 def _load_mask_from_image_ref(
     image_ref,
-    target_h: int,
-    target_w: int,
+    target_h: Optional[int] = None,
+    target_w: Optional[int] = None,
+    *,
+    use_alpha: bool = True,
+    invert_alpha: bool = True,
+    prefer_alpha: bool = False,
+    threshold: float = _MASK_BINARY_THRESHOLD,
+    binarize: bool = True,
+    warning_prefix: str = "[FreeFuseMaskTap]",
 ) -> Optional[torch.Tensor]:
     if Image is None:
         return None
@@ -241,19 +248,67 @@ def _load_mask_from_image_ref(
         with Image.open(resolved_path) as img:
             gray = np.array(img.convert("L")).astype(np.float32) / 255.0
             mask_2d = torch.from_numpy(gray)
-            if "A" in img.getbands():
+            if bool(use_alpha) and "A" in img.getbands():
                 alpha = np.array(img.getchannel("A")).astype(np.float32) / 255.0
-                alpha_mask = 1.0 - torch.from_numpy(alpha)
-                # Prefer visible grayscale content. Fallback to alpha when RGB is flat.
-                if float(np.var(gray)) <= _MASK_SIGNAL_EPS and float(np.var(alpha)) > _MASK_SIGNAL_EPS:
+                alpha_values = 1.0 - alpha if bool(invert_alpha) else alpha
+                alpha_mask = torch.from_numpy(alpha_values)
+                gray_has_signal = float(np.var(gray)) > _MASK_SIGNAL_EPS
+                alpha_has_signal = float(np.var(alpha)) > _MASK_SIGNAL_EPS
+                if bool(prefer_alpha) or (alpha_has_signal and not gray_has_signal):
                     mask_2d = alpha_mask
         mask_2d = mask_2d.float()
         if mask_2d.dim() != 2:
             return None
-        mask_2d = _resize_2d(mask_2d, target_h, target_w, mode="nearest")
-        return _binarize_2d(mask_2d)
+        if target_h is not None and target_w is not None:
+            mask_2d = _resize_2d(mask_2d, int(target_h), int(target_w), mode="nearest")
+        if bool(binarize):
+            mask_2d = _binarize_2d(mask_2d, threshold)
+        return mask_2d
     except Exception as e:
-        print(f"[FreeFuseMaskTap] Warning: failed to load edited mask '{resolved_path}': {e}")
+        print(f"{warning_prefix} Warning: failed to load mask '{resolved_path}': {e}")
+        return None
+
+
+def _load_mask_from_image_tensor(
+    image_tensor,
+    target_h: Optional[int] = None,
+    target_w: Optional[int] = None,
+    *,
+    use_alpha: bool = True,
+    invert_alpha: bool = False,
+    threshold: float = _MASK_BINARY_THRESHOLD,
+    binarize: bool = True,
+    warning_prefix: str = "[FreeFuseMaskBankFromImages]",
+) -> Optional[torch.Tensor]:
+    if not isinstance(image_tensor, torch.Tensor):
+        return None
+
+    try:
+        img = image_tensor.detach().float()
+        if img.dim() == 4:
+            if img.shape[0] < 1:
+                return None
+            img = img[0]
+        if img.dim() != 3 or img.shape[-1] < 1:
+            return None
+
+        channels = int(img.shape[-1])
+        if bool(use_alpha) and channels >= 4:
+            alpha = img[..., 3].clamp(0.0, 1.0)
+            mask_2d = 1.0 - alpha if bool(invert_alpha) else alpha
+        elif channels >= 3:
+            mask_2d = img[..., 0].clamp(0.0, 1.0)
+        else:
+            mask_2d = img[..., 0].clamp(0.0, 1.0)
+
+        mask_2d = mask_2d.float()
+        if target_h is not None and target_w is not None:
+            mask_2d = _resize_2d(mask_2d, int(target_h), int(target_w), mode="nearest")
+        if bool(binarize):
+            mask_2d = _binarize_2d(mask_2d, threshold)
+        return mask_2d
+    except Exception as e:
+        print(f"{warning_prefix} Warning: failed to read image tensor: {e}")
         return None
 
 
@@ -302,6 +357,157 @@ def _build_mask_editor_ui_images(slot_masks_2d: List[torch.Tensor]) -> List[Dict
         refs.append({"filename": filename, "subfolder": "", "type": "temp"})
 
     return refs
+
+
+class FreeFuseMaskBankFromImages:
+    """
+    Build a FREEFUSE_MASKS bank directly from user-supplied mask images.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "freefuse_data": ("FREEFUSE_DATA",),
+            },
+            "optional": {
+                "mask_image_00": ("IMAGE",),
+                "mask_image_01": ("IMAGE",),
+                "mask_image_02": ("IMAGE",),
+                "mask_image_03": ("IMAGE",),
+                "mask_image_04": ("IMAGE",),
+                "mask_image_05": ("IMAGE",),
+                "mask_image_06": ("IMAGE",),
+                "mask_image_07": ("IMAGE",),
+                "mask_image_08": ("IMAGE",),
+                "mask_image_09": ("IMAGE",),
+                "width": ("INT", {"default": 64, "min": 0, "max": 16384, "step": 8}),
+                "height": ("INT", {"default": 64, "min": 0, "max": 16384, "step": 8}),
+                "use_alpha": ("BOOLEAN", {"default": True}),
+                "invert_alpha": ("BOOLEAN", {"default": False}),
+                "threshold": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
+            },
+        }
+
+    RETURN_TYPES = ("FREEFUSE_MASKS", "STRING", "IMAGE")
+    RETURN_NAMES = ("mask_bank", "slot_names", "slot_mask_images")
+    FUNCTION = "build_mask_bank"
+    CATEGORY = "FreeFuse/Utils"
+
+    @staticmethod
+    def _adapter_names(freefuse_data) -> List[str]:
+        names: List[str] = []
+        seen = set()
+        adapters = freefuse_data.get("adapters", []) if isinstance(freefuse_data, dict) else []
+        if not isinstance(adapters, list):
+            return names
+        for adapter in adapters:
+            if isinstance(adapter, dict):
+                name = adapter.get("name")
+            else:
+                name = adapter
+            if isinstance(name, str) and name and name not in seen:
+                names.append(name)
+                seen.add(name)
+        return names
+
+    @staticmethod
+    def _target_size(width, height) -> Tuple[Optional[int], Optional[int]]:
+        try:
+            w = int(width)
+            h = int(height)
+        except Exception:
+            w, h = 0, 0
+        if w > 0 and h > 0:
+            return h, w
+        if w > 0 or h > 0:
+            print("[FreeFuseMaskBankFromImages] Warning: width and height must both be nonzero; keeping native mask size")
+        return None, None
+
+    def build_mask_bank(
+        self,
+        freefuse_data,
+        width=64,
+        height=64,
+        use_alpha=True,
+        invert_alpha=False,
+        threshold=0.5,
+        **kwargs,
+    ):
+        adapter_names = self._adapter_names(freefuse_data)
+        target_h, target_w = self._target_size(width, height)
+        masks: Dict[str, torch.Tensor] = {}
+        slot_lines: List[str] = []
+        slot_masks: List[Optional[torch.Tensor]] = []
+
+        for i in range(10):
+            adapter_name = adapter_names[i] if i < len(adapter_names) else ""
+            slot_lines.append(f"{i:02d}:{adapter_name}")
+            if not adapter_name:
+                slot_masks.append(None)
+                continue
+
+            key = f"mask_image_{i:02d}"
+            image_tensor = kwargs.get(key)
+            if image_tensor is None:
+                slot_masks.append(None)
+                continue
+
+            mask = _load_mask_from_image_tensor(
+                image_tensor=image_tensor,
+                target_h=target_h,
+                target_w=target_w,
+                use_alpha=bool(use_alpha),
+                invert_alpha=bool(invert_alpha),
+                threshold=float(threshold),
+                binarize=True,
+                warning_prefix="[FreeFuseMaskBankFromImages]",
+            )
+            if mask is None:
+                print(f"[FreeFuseMaskBankFromImages] Warning: failed to read {key} for adapter '{adapter_name}'")
+                slot_masks.append(None)
+                continue
+            masks[adapter_name] = mask.float()
+            slot_masks.append(mask.float())
+
+        mask_bank = {
+            "masks": masks,
+            "similarity_maps": {},
+            "metadata": {
+                "adapter_names": adapter_names,
+                "source": "mask_images",
+            },
+        }
+        slot_names = "\n".join(slot_lines)
+
+        preview_h, preview_w = 64, 64
+        if target_h is not None and target_w is not None:
+            preview_h, preview_w = int(target_h), int(target_w)
+        else:
+            for mask in slot_masks:
+                hw = _mask_hw(mask)
+                if hw is not None:
+                    preview_h, preview_w = hw
+                    break
+
+        slot_images: List[torch.Tensor] = []
+        for mask in slot_masks:
+            m2d = _to_2d_mask(mask)
+            if m2d is None:
+                m2d = torch.zeros((preview_h, preview_w), dtype=torch.float32)
+            else:
+                m2d = _resize_2d(m2d.float(), preview_h, preview_w, mode="nearest")
+            img = (
+                _binarize_2d(m2d)
+                .clamp(0.0, 1.0)
+                .detach()
+                .cpu()
+                .unsqueeze(-1)
+                .repeat(1, 1, 3)
+            )
+            slot_images.append(img)
+        slot_mask_images = torch.stack(slot_images, dim=0)
+        return (mask_bank, slot_names, slot_mask_images)
 
 
 class FreeFuseMaskTap:
@@ -630,11 +836,13 @@ class FreeFuseMaskReassemble:
 
 
 NODE_CLASS_MAPPINGS = {
+    "FreeFuseMaskBankFromImages": FreeFuseMaskBankFromImages,
     "FreeFuseMaskTap": FreeFuseMaskTap,
     "FreeFuseMaskReassemble": FreeFuseMaskReassemble,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "FreeFuseMaskBankFromImages": "FreeFuse Mask Bank From Images",
     "FreeFuseMaskTap": "FreeFuse Mask Tap",
     "FreeFuseMaskReassemble": "FreeFuse Mask Reassemble",
 }
