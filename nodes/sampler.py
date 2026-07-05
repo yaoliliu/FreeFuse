@@ -23,6 +23,7 @@ from ..freefuse_core.attention_replace import (
     compute_flux_similarity_maps_from_outputs,
     compute_z_image_similarity_maps,
 )
+from ..freefuse_core.krea2_support import apply_krea2_replace_patches
 from ..freefuse_core.mask_utils import generate_masks
 from ..freefuse_core.tensor_debug import format_tensor_stats, tensor_scalar_to_float
 from ..freefuse_core.token_utils import detect_model_type
@@ -81,11 +82,11 @@ class FreeFusePhase1Sampler:
                 # Block selection — Flux
                 "collect_block": ("INT", {
                     "default": 18, "min": 0, "max": 56,
-                    "tooltip": "[Flux/Flux2/Z-Image only] Flux uses transformer_blocks.<idx>; Flux2 uses single_transformer_blocks.<idx>; Z-Image uses layers.<idx>. Ignored for SDXL."
+                    "tooltip": "[Flux/Flux2/Z-Image/Krea2 only] Flux uses transformer_blocks.<idx>; Flux2 uses single_transformer_blocks.<idx>; Z-Image uses layers.<idx>; Krea2 uses blocks.<idx> (0-27). Ignored for SDXL."
                 }),
                 "collect_block_end": ("INT", {
                     "default": 18, "min": 0, "max": 56,
-                    "tooltip": "[Flux/Flux2/Z-Image only] Optional end block (inclusive). If > collect_block, collect a range and aggregate by majority voting."
+                    "tooltip": "[Flux/Flux2/Z-Image/Krea2 only] Optional end block (inclusive). If > collect_block, collect a range and aggregate by majority voting."
                 }),
                 # Block selection — SDXL
                 "collect_region": (list(SDXL_COLLECT_REGION_MAP.keys()), {
@@ -275,6 +276,8 @@ for Phase 2 generation with the same seed and steps."""
                 auto_temperature = 4000.0   # matches reference FreeFuseZImageAttnProcessor
             elif patch_model_type in ("flux", "flux2"):
                 auto_temperature = 4000.0
+            elif patch_model_type == "krea2":
+                auto_temperature = 4000.0   # single-stream, RoPE+QK-norm attn like Z-Image; tune later
             else:
                 auto_temperature = 300.0
         else:
@@ -304,7 +307,7 @@ for Phase 2 generation with the same seed and steps."""
             sdxl_collect_blocks = [(block_name, block_num, tf_idx)]
             print(f"[FreeFuse] SDXL collect block: ({block_name}, {block_num}, {tf_idx}) "
                   f"from region='{collect_region}'")
-        elif patch_model_type in ("flux", "flux2", "z_image"):
+        elif patch_model_type in ("flux", "flux2", "z_image", "krea2"):
             range_start = int(collect_block)
             range_end = int(collect_block_end)
             if range_end < range_start:
@@ -321,8 +324,9 @@ for Phase 2 generation with the same seed and steps."""
                     flux_collect_blocks = range_collect_blocks
                 elif patch_model_type == "flux2":
                     flux2_collect_blocks = range_collect_blocks
-                else:
+                elif patch_model_type == "z_image":
                     z_image_collect_blocks = range_collect_blocks
+                # krea2 uses range_collect_blocks directly (see apply_krea2_replace_patches call below)
                 print(
                     f"[FreeFuse] {patch_model_type} range mode: collecting blocks {range_start}-{range_end} "
                     f"({len(range_collect_blocks)} blocks)"
@@ -334,14 +338,21 @@ for Phase 2 generation with the same seed and steps."""
                 f"using collect_block={collect_block}."
             )
             
-        apply_freefuse_replace_patches(
-            model_clone, freefuse_state, 
-            model_type=patch_model_type,
-            sdxl_collect_blocks=sdxl_collect_blocks,
-            flux_collect_blocks=flux_collect_blocks,
-            flux2_collect_blocks=flux2_collect_blocks,
-            z_image_collect_blocks=z_image_collect_blocks,
-        )
+        krea2_replacer = None
+        if patch_model_type == "krea2":
+            krea2_replacer = apply_krea2_replace_patches(
+                model_clone, freefuse_state,
+                krea2_collect_blocks=range_collect_blocks,  # None -> falls back to [state.collect_block]
+            )
+        else:
+            apply_freefuse_replace_patches(
+                model_clone, freefuse_state,
+                model_type=patch_model_type,
+                sdxl_collect_blocks=sdxl_collect_blocks,
+                flux_collect_blocks=flux_collect_blocks,
+                flux2_collect_blocks=flux2_collect_blocks,
+                z_image_collect_blocks=z_image_collect_blocks,
+            )
         
         # Get latent info
         latent_image = latent["samples"]
@@ -391,7 +402,15 @@ for Phase 2 generation with the same seed and steps."""
                         else f"layer {collect_block}"
                     )
                     if patch_model_type == "z_image"
-                    else f"{collect_region} tf={collect_tf_index}"
+                    else (
+                        (
+                            f"blocks.{collect_block}-{collect_block_end}"
+                            if (patch_model_type == "krea2" and range_collect_blocks is not None)
+                            else f"blocks.{collect_block}"
+                        )
+                        if patch_model_type == "krea2"
+                        else f"{collect_region} tf={collect_tf_index}"
+                    )
                 )
             )
         )
@@ -479,6 +498,13 @@ for Phase 2 generation with the same seed and steps."""
             empty_masks = {name: torch.ones(latent_h, latent_w) for name in concepts}
             preview = self._create_preview(empty_masks, img_w, img_h)
             return (model_clone, {"masks": empty_masks}, preview)
+        finally:
+            # Krea2 uses raw torch hooks (no ComfyUI patch-dict lifecycle), so they
+            # must be removed explicitly or they accumulate on the shared module
+            # across repeated Phase-1 runs.
+            if krea2_replacer is not None:
+                krea2_replacer.remove()
+                print("[FreeFuse Krea2] Removed Phase-1 collection hooks")
         
         # Get similarity maps directly from freefuse_state
         similarity_maps = freefuse_state.similarity_maps

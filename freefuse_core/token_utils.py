@@ -21,6 +21,20 @@ LUMINA2_SYSTEM_PROMPT = (
 # Flux2.Klein should match diffusers apply_chat_template(..., enable_thinking=False).
 KLEIN_NO_THINK_TEMPLATE = "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
 
+# Krea 2 (Qwen3-VL-4B, 12-layer tap). Must match comfy/text_encoders/krea2.py exactly,
+# including the hardcoded system message - Krea2's template is not user-configurable.
+KREA2_TEMPLATE = (
+    "<|im_start|>system\nDescribe the image by detailing the color, shape, size, "
+    "texture, quantity, text, spatial relationships of the objects and background:"
+    "<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
+)
+
+# Special token ids used by Krea2TEModel.encode_token_weights to strip the
+# system + user-opening prefix before conditioning. Must match comfy/text_encoders/krea2.py.
+KREA2_IM_START_ID = 151644
+KREA2_USER_TOKEN_ID = 872
+KREA2_NEWLINE_TOKEN_ID = 198
+
 
 # Stopwords and punctuation to filter (shared between both methods)
 STOPWORDS = {
@@ -89,6 +103,11 @@ def _normalize_model_type(model_type: Optional[str]) -> Optional[str]:
         "sd1.5": "sd1",
         "sd2": "sd1",
         "sd2.x": "sd1",
+        "krea 2": "krea2",
+        "krea-2": "krea2",
+        "krea_2": "krea2",
+        "k2": "krea2",
+        "singlestreamdit": "krea2",
     }
     return aliases.get(value, value)
 
@@ -115,6 +134,8 @@ def detect_model_type_from_model(model) -> str:
         return "unknown"
 
     model_cls = core_model.__class__.__name__.lower()
+    if "krea2" in model_cls or "krea" in model_cls:
+        return "krea2"
     if "nextdit" in model_cls or "lumina" in model_cls:
         return "z_image"
     if "flux2" in model_cls:
@@ -126,6 +147,14 @@ def detect_model_type_from_model(model) -> str:
     dm = getattr(core_model, "diffusion_model", None)
     if dm is not None:
         dm_cls = dm.__class__.__name__.lower()
+        if "krea2" in dm_cls or "krea" in dm_cls:
+            return "krea2"
+        # `txtfusion` is unique to Krea2's SingleStreamDiT - check before the
+        # generic `layers` heuristic below since Krea2 doesn't use `layers`
+        # (it uses `blocks`), but this attribute check is the most reliable
+        # signal regardless of naming/refactors.
+        if hasattr(dm, "txtfusion"):
+            return "krea2"
         if "nextdit" in dm_cls or "lumina" in dm_cls:
             return "z_image"
         if "flux2" in dm_cls:
@@ -143,6 +172,8 @@ def detect_model_type_from_model(model) -> str:
     unet_cfg = getattr(model_cfg, "unet_config", None)
     if isinstance(unet_cfg, dict):
         image_model = str(unet_cfg.get("image_model", "")).lower()
+        if image_model == "krea2":
+            return "krea2"
         if image_model == "flux2":
             return "flux2"
         if image_model == "flux":
@@ -181,6 +212,8 @@ def detect_model_type(clip=None, model=None, model_type_hint: Optional[str] = No
 
     cond_stage_model = getattr(clip, "cond_stage_model", None)
     cond_stage_name = cond_stage_model.__class__.__name__.lower() if cond_stage_model is not None else ""
+    if "krea2" in cond_stage_name or "krea" in cond_stage_name:
+        return "krea2"
     if "nextdit" in cond_stage_name or "zimage" in cond_stage_name or "lumina" in cond_stage_name:
         return "z_image"
     if "flux2" in cond_stage_name:
@@ -196,9 +229,18 @@ def detect_model_type(clip=None, model=None, model_type_hint: Optional[str] = No
     clip_key = getattr(tokenizer, "clip", None)
     clip_key_lower = clip_key.lower() if isinstance(clip_key, str) else ""
 
+    # Qwen3-VL (attribute name "qwen3vl_4b") is Krea2-specific in this ecosystem
+    # so far - check before the generic qwen3 fallback below.
+    tokenizer_attr_names = set(vars(tokenizer).keys())
+    if (
+        any("qwen3vl" in name.lower() for name in tokenizer_attr_names)
+        or "qwen3vl" in clip_name
+        or "qwen3vl" in clip_key_lower
+    ):
+        return "krea2"
+
     # Qwen3 tokenizer family can be used by both Z-Image and Flux2-Klein.
     # Without model context, treat it as generic qwen3.
-    tokenizer_attr_names = set(vars(tokenizer).keys())
     if (
         any("qwen3" in name.lower() for name in tokenizer_attr_names)
         or "qwen3" in clip_name
@@ -249,9 +291,12 @@ def _resolve_sd1_subtokenizer(tokenizer):
 
 def _resolve_qwen3_tokenizer(tokenizer):
     """
-    Resolve qwen3 tokenizer from multiple ComfyUI wrappers.
+    Resolve qwen3/qwen3-VL tokenizer from multiple ComfyUI wrappers.
+
+    "qwen3vl_4b" is Krea2's key (see comfy/text_encoders/krea2.py: Krea2TEModel
+    passes name="qwen3vl_4b" to SD1ClipModel), distinct from Z-Image's "qwen3_4b".
     """
-    for key in ("qwen3_4b", "qwen3_8b"):
+    for key in ("qwen3_4b", "qwen3_8b", "qwen3vl_4b"):
         if hasattr(tokenizer, key):
             resolved = _extract_nested_tokenizer(getattr(tokenizer, key))
             if resolved is not None:
@@ -259,7 +304,7 @@ def _resolve_qwen3_tokenizer(tokenizer):
 
     clip_name = str(getattr(tokenizer, "clip_name", "")).lower()
     clip_key = getattr(tokenizer, "clip", None)
-    if "qwen3" in clip_name and hasattr(tokenizer, clip_name):
+    if ("qwen3" in clip_name or "qwen3vl" in clip_name) and hasattr(tokenizer, clip_name):
         resolved = _extract_nested_tokenizer(getattr(tokenizer, clip_name))
         if resolved is not None:
             return resolved
@@ -291,7 +336,7 @@ def get_tokenizer_for_model(clip, model_type: str = None):
     if tokenizer is None:
         raise ValueError("Could not find clip.tokenizer on CLIP object.")
 
-    if model_type in ("z_image", "flux2", "qwen3"):
+    if model_type in ("z_image", "flux2", "qwen3", "krea2"):
         resolved = _resolve_qwen3_tokenizer(tokenizer)
         if resolved is not None:
             return resolved
@@ -783,6 +828,135 @@ def find_concept_positions_qwen3(
     return concept_pos_map
 
 
+def _find_krea2_template_end(token_ids: List[int]) -> int:
+    """
+    Replicate Krea2TEModel.encode_token_weights's prefix-stripping logic (see
+    comfy/text_encoders/krea2.py) so token positions line up with the
+    *stripped* embedding sequence actually fed into the DiT.
+
+    Krea2 finds the second "<|im_start|>" token (the one opening the "user"
+    turn), then additionally skips the following "user" + "\\n" tokens if
+    present, and drops everything before that point.
+    """
+    template_end = -1
+    count_im_start = 0
+    for i, tid in enumerate(token_ids):
+        if tid == KREA2_IM_START_ID and count_im_start < 2:
+            template_end = i
+            count_im_start += 1
+
+    if template_end == -1:
+        return 0
+
+    if len(token_ids) > template_end + 3:
+        if token_ids[template_end + 1] == KREA2_USER_TOKEN_ID:
+            if token_ids[template_end + 2] == KREA2_NEWLINE_TOKEN_ID:
+                template_end += 3
+
+    return template_end
+
+
+def find_concept_positions_krea2(
+    clip,
+    tokenizer,
+    prompts: Union[str, List[str]],
+    concepts: Dict[str, str],
+    filter_meaningless: bool = True,
+    filter_single_char: bool = True,
+) -> Dict[str, List[List[int]]]:
+    """
+    Find token positions for Krea 2 (Qwen3-VL-4B, 12-layer tap).
+
+    Krea2's own text encoder (comfy/text_encoders/krea2.py :: Krea2TEModel)
+    wraps the prompt in KREA2_TEMPLATE (a fixed, non-configurable system
+    message) and then STRIPS everything up to and including the
+    "<|im_start|>user\\n" prefix before the conditioning tensor is built.
+    We replicate both steps and tokenize/search only within the stripped
+    range, so returned positions align directly with the actual
+    (B, seq_after_strip, 12*2560) conditioning tensor - no separate offset
+    subtraction needed downstream.
+    """
+    if isinstance(prompts, str):
+        prompts = [prompts]
+
+    prompt_data_list = []
+    for prompt in prompts:
+        wrapped_text = KREA2_TEMPLATE.format(prompt)
+
+        try:
+            token_weight_pairs = clip.tokenize(wrapped_text)
+            token_ids = _flatten_chunked_token_ids(token_weight_pairs)
+            if not token_ids:
+                raise ValueError("clip.tokenize returned no token ids")
+        except Exception as e:
+            print(f"[FreeFuse] Warning: clip.tokenize failed for Krea2, using direct tokenization: {e}")
+            encoded = tokenizer(wrapped_text, add_special_tokens=True)
+            token_ids = encoded['input_ids'] if hasattr(encoded, 'keys') else encoded.input_ids
+            if hasattr(token_ids, 'tolist'):
+                token_ids = token_ids.tolist()
+
+        template_end = _find_krea2_template_end(token_ids)
+        stripped_ids = token_ids[template_end:]
+        token_texts = [tokenizer.decode([tid]) for tid in stripped_ids]
+
+        concat_text = ""
+        token_spans = []
+        for tt in token_texts:
+            start = len(concat_text)
+            concat_text += tt
+            token_spans.append((start, len(concat_text)))
+
+        prompt_data_list.append({
+            "raw": prompt,
+            "template_end": template_end,
+            "active_token_texts": token_texts,
+            "concat_text": concat_text,
+            "token_spans": token_spans,
+        })
+
+    concept_pos_map = {}
+    for concept_name, concept_text in concepts.items():
+        concept_pos_map[concept_name] = []
+
+        for pd in prompt_data_list:
+            positions = []
+            positions_with_text = []
+
+            search_start = 0
+            while True:
+                idx = pd["concat_text"].find(concept_text, search_start)
+                if idx == -1:
+                    break
+                c_start, c_end = idx, idx + len(concept_text)
+
+                for tok_i, (ts, te) in enumerate(pd["token_spans"]):
+                    if te > c_start and ts < c_end and tok_i not in positions:
+                        positions.append(tok_i)
+                        positions_with_text.append((tok_i, pd["active_token_texts"][tok_i]))
+                search_start = idx + 1
+
+            if filter_meaningless and positions_with_text:
+                filtered_positions = [
+                    pos for pos, text in positions_with_text
+                    if not is_meaningless_token(text, check_single_char=filter_single_char)
+                ]
+                if not filtered_positions:
+                    non_punct = [
+                        pos for pos, text in positions_with_text
+                        if clean_token_text(text) not in PUNCTUATION
+                    ]
+                    if non_punct:
+                        filtered_positions = non_punct[:1]
+                    elif positions_with_text:
+                        filtered_positions = [positions_with_text[0][0]]
+                positions = filtered_positions
+
+            positions.sort()
+            concept_pos_map[concept_name].append(positions)
+
+    return concept_pos_map
+
+
 def find_concept_positions(
     clip,
     prompts: Union[str, List[str]],
@@ -828,8 +1002,14 @@ def find_concept_positions(
         model_type = _normalize_model_type(model_type) or model_type
     
     tokenizer = get_tokenizer_for_model(clip, model_type)
-    
-    if model_type in ('z_image', 'flux2', 'qwen3'):
+
+    if model_type == 'krea2':
+        return find_concept_positions_krea2(
+            clip, tokenizer, prompts, concepts,
+            filter_meaningless=filter_meaningless,
+            filter_single_char=filter_single_char,
+        )
+    elif model_type in ('z_image', 'flux2', 'qwen3'):
         qwen_template = KLEIN_NO_THINK_TEMPLATE if model_type == "flux2" else None
         return find_concept_positions_qwen3(
             clip, tokenizer, prompts, concepts,
@@ -853,7 +1033,7 @@ def find_concept_positions(
     else:
         raise ValueError(
             f"Unsupported model type: {model_type}. "
-            "Use 'flux', 'flux2', 'sdxl', 'z_image', 'qwen3', or 'sd1'."
+            "Use 'flux', 'flux2', 'sdxl', 'z_image', 'qwen3', 'krea2', or 'sd1'."
         )
 
 

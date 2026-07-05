@@ -308,7 +308,38 @@ When enabled, constructs soft attention bias to guide cross-attention:
             print(f"[FreeFuse] Applied attention bias for Z-Image "
                   f"(bias_scale={bias_scale}, positive_scale={positive_bias_scale}, "
                   f"bidirectional={bidirectional}, img_seq={img_seq_len}, cap_seq={cap_seq_len})")
-        
+
+        elif model_type == "krea2":
+            # Krea2 is single-stream, [txt, img] sequence (text FIRST, same as Z-Image's
+            # captioning convention but opposite token order - see krea2_support.py).
+            # Uses model_options["model_function_wrapper"] internally, NOT the
+            # replace-patch dispatcher used by flux/flux2/z_image/sdxl above, because
+            # Krea2 has no per-clone patch hook in its forward loop (see krea2_support.py
+            # docstring for why raw hooks would otherwise leak into unrelated generations).
+            from ..freefuse_core.krea2_support import apply_krea2_bias_patches
+
+            lora_masks_flat = {}
+            for name, mask in mask_dict.items():
+                if name.startswith("_"):
+                    continue
+                if mask.dim() == 3:
+                    mask = mask[0]
+                mask_flat = mask.reshape(-1)
+                lora_masks_flat[name] = mask_flat.unsqueeze(0)
+
+            krea2_block_indices = self._resolve_krea2_bias_blocks(model_patcher, bias_blocks)
+
+            apply_krea2_bias_patches(
+                model_patcher,
+                lora_masks=lora_masks_flat,
+                token_pos_maps=token_pos_maps,
+                config=config,
+                block_indices=krea2_block_indices,
+            )
+            print(f"[FreeFuse] Applied attention bias for Krea2 "
+                  f"(bias_scale={bias_scale}, positive_scale={positive_bias_scale}, "
+                  f"blocks={bias_blocks} -> {krea2_block_indices})")
+
         else:  # SDXL
             # For SDXL, use the direct SDXL bias patches
             apply_attention_bias_patches(
@@ -324,13 +355,37 @@ When enabled, constructs soft attention bias to guide cross-attention:
             print(f"[FreeFuse] Applied attention bias for SDXL "
                   f"(bias_scale={bias_scale}, positive_scale={positive_bias_scale})")
     
+    def _resolve_krea2_bias_blocks(self, model_patcher, bias_blocks: str) -> List[int]:
+        """
+        Map the (Flux-oriented) bias_blocks dropdown to concrete Krea2 block
+        indices. Krea2 is single-stream (comfy.ldm.krea2.model.SingleStreamDiT),
+        so there is no double/single-stream distinction - those options fall
+        back to a sensible default. Kept identical to nodes/attention_bias.py's
+        version so both entry points behave the same way.
+        """
+        diffusion_model = self._get_diffusion_model(model_patcher)
+        blocks = getattr(diffusion_model, "blocks", None)
+        n = len(blocks) if blocks is not None else 28
+
+        if bias_blocks == "all":
+            return list(range(n))
+        if bias_blocks in ("last_half", "last_half_double"):
+            return list(range(n // 2, n))
+        if bias_blocks in ("double_stream_only", "single_stream_only"):
+            print(
+                f"[FreeFuse] Note: '{bias_blocks}' is Flux-specific and doesn't apply to "
+                f"Krea2 (single-stream architecture) - using 'last_half' instead."
+            )
+            return list(range(n // 2, n))
+        return list(range(n // 2, n))
+
     def _get_latent_size(
         self,
         mask_dict: Dict[str, torch.Tensor],
         latent: Optional[Dict],
     ) -> Optional[Tuple[int, int]]:
         """Determine latent size from masks or latent input.
-        
+
         IMPORTANT: For Flux models, the masks are in packed space (H/16 x W/16),
         not the original latent space (H/8 x W/8). We should prioritize the mask
         dimensions as they represent the actual spatial resolution of the masks.
