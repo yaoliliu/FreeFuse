@@ -1,3 +1,9 @@
+# 1.3.1
+
+- Fix Krea2 `mlp.gate/up/down` LoRA masks being stretched across text and image tokens after being misclassified as Anima layers. Krea2 MLPs now retain the same text/image alignment as their attention layers.
+- Preserve image-only routing for Anima/Cosmos `mlp.layer1/layer2` and add CPU regressions for sequence alignment and two-adapter spatial routing.
+- Thanks to @osuvense for the reproduction and diagnosis in [issue #33](https://github.com/yaoliliu/FreeFuse/issues/33).
+
 # 1.3.0
 
 - Add native MiniMax H3 text-to-audio-video composition through the existing FreeFuse nodes, with temporal mask volumes, packed video-only LoRA routing and memory-efficient video-to-text attention bias.

@@ -425,8 +425,12 @@ class MultiAdapterBypassForwardHook:
         is_moss_joint = "layers." in key and ".proj." in key and "text_embedder" not in key
         is_moss_global = any(part in key for part in (
             "text_embedder", "time_embedding", "shared_block_modulation", "video_head_modulation"))
-        is_anima_block = (".blocks." in key or key.startswith("blocks.")) and any(part in key for part in (
-            ".self_attn.", ".cross_attn.", ".mlp.", ".adaln_modulation_"))
+        # Cosmos/Anima MLPs use layer1/layer2. Krea2's gate/up/down MLPs
+        # process joint [text, image] tokens and must not take the img-only path.
+        is_anima_mlp = any(part in key + "." for part in (".mlp.layer1.", ".mlp.layer2."))
+        is_anima_block = (".blocks." in key or key.startswith("blocks.")) and (
+            is_anima_mlp or any(part in key for part in (
+                ".self_attn.", ".cross_attn.", ".adaln_modulation_")))
         if "llm_adapter." in key or "t_embedder." in key:
             result, mask_type = False, None
         elif is_anima_block:

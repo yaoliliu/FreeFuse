@@ -1,7 +1,7 @@
 [project]
 name = "freefuse"
 description = "FreeFuse: compose multi-subject LoRAs for FLUX, Z-Image, Klein, SDXL, Krea2, MOSS Image, Anima and native MiniMax H3 video. Upgrade to v1.0.14+ for GGUF tensor-format fixes."
-version = "1.3.0"
+version = "1.3.1"
 license = {file = "LICENSE"} 
 # classifiers = [
 #     # For OS-independent nodes (works on all operating systems)
