@@ -19,6 +19,8 @@ Future: This fix should be submitted as a PR to ComfyUI core.
 
 import logging
 import copy
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
@@ -39,6 +41,28 @@ from comfy.patcher_extension import PatcherInjection
 
 # Type alias
 BypassAdapter = Union[WeightAdapterBase, WeightAdapterTrainBase]
+
+
+_token_mask_context = ContextVar("freefuse_token_mask_context", default=None)
+
+
+@contextmanager
+def bypass_token_mask_context(params):
+    """Keep positive-prompt coordinates local to one ComfyUI model call."""
+    conditioning = params.get("c", {})
+    options = conditioning.get("transformer_options", {})
+    branches = params.get("cond_or_uncond", options.get("cond_or_uncond", [0]))
+    context = conditioning.get("c_crossattn")
+    state = {
+        "branches": branches,
+        "batch": params["input"].shape[0],
+        "text_length": context.shape[1] if isinstance(context, torch.Tensor) else None,
+    }
+    token = _token_mask_context.set(state)
+    try:
+        yield
+    finally:
+        _token_mask_context.reset(token)
 
 
 def _is_float8_dtype(dtype: Optional[torch.dtype]) -> bool:
@@ -265,6 +289,8 @@ class MultiAdapterBypassForwardHook:
         self.packed_mask_slice: Optional[Tuple[int, int]] = None
         self._force_forward_state = None
         self.txt_len: int = 256  # Default Flux txt length (CLIP + T5)
+        self.token_pos_maps = None
+        self.token_model_type = None
         
         # LoRA enable/disable support (for Phase 1 mask collection)
         self.lora_enabled: bool = True
@@ -296,6 +322,8 @@ class MultiAdapterBypassForwardHook:
         new_obj.packed_mask_slice = self.packed_mask_slice
         new_obj._force_forward_state = None
         new_obj.txt_len = self.txt_len
+        new_obj.token_pos_maps = copy.deepcopy(self.token_pos_maps, memo)
+        new_obj.token_model_type = self.token_model_type
         new_obj.lora_enabled = self.lora_enabled
         new_obj._should_apply_mask_cached = self._should_apply_mask_cached
         new_obj._mask_type_cached = self._mask_type_cached
@@ -341,6 +369,8 @@ class MultiAdapterBypassForwardHook:
         masks: Dict[str, torch.Tensor],
         latent_size: Tuple[int, int],
         txt_len: int = 256,
+        token_pos_maps: Optional[Dict] = None,
+        model_type: Optional[str] = None,
     ):
         """
         Set FreeFuse masks for spatial LoRA application.
@@ -354,11 +384,17 @@ class MultiAdapterBypassForwardHook:
         self.latent_size = latent_size
         self.mask_enabled = True
         self.txt_len = txt_len
+        self.token_pos_maps = token_pos_maps
+        if model_type != self.token_model_type:
+            self._should_apply_mask_cached = None
+            self._mask_type_cached = None
+        self.token_model_type = model_type
         logging.debug(f"[OffsetBypass] Set masks for {len(masks)} adapters, latent_size={latent_size}, txt_len={txt_len}")
     
     def clear_masks(self):
         """Disable mask application."""
         self.masks = None
+        self.token_pos_maps = None
         self.latent_size = None
         self.mask_enabled = False
     
@@ -406,12 +442,23 @@ class MultiAdapterBypassForwardHook:
             return True
         
         key = self.module_key.lower()
+
+        # Text paths never receive an image mask, even when token masking is off.
+        if self._text_layer_kind() in ("text", "krea_layerwise"):
+            self._should_apply_mask_cached = False
+            self._mask_type_cached = None
+            return False
+        if self.token_model_type == "z_image" and "noise_refiner." in key:
+            self._should_apply_mask_cached = True
+            self._mask_type_cached = "img_only"
+            return True
         
         # Detect model type from key structure
         # IMPORTANT: Check SDXL first because SDXL keys contain "transformer_blocks" 
         # which would also match Flux patterns. SDXL has down_blocks/mid_block/up_blocks
         # as the outermost structure, while Flux has double_blocks/single_blocks.
-        is_sdxl = 'down_blocks' in key or 'mid_block' in key or 'up_blocks' in key
+        is_sdxl = any(part in key for part in (
+            'down_blocks', 'mid_block', 'up_blocks', 'input_blocks', 'middle_block', 'output_blocks'))
         is_flux = ('single_blocks' in key or 'double_blocks' in key) and not is_sdxl
         # Also check for Flux-style transformer_blocks that are NOT inside SDXL structure
         if not is_sdxl and 'transformer_blocks' in key and 'attentions' not in key:
@@ -576,6 +623,111 @@ class MultiAdapterBypassForwardHook:
         if self._mask_type_cached is None:
             self._should_apply_spatial_mask()  # Populate cache
         return self._mask_type_cached
+
+    def _text_layer_kind(self):
+        """Identify text axes explicitly; a short image sequence is not text."""
+        key = (self.module_key or "").lower()
+        kind = self.token_model_type
+        if self.packed_mask_slice is not None or kind == "minimax_h3":
+            return None
+        if kind == "krea2":
+            if "txtfusion.layerwise_blocks." in key:
+                return "krea_layerwise"
+            if "txtfusion.refiner_blocks." in key:
+                return "text"
+            if ("blocks." in key and any(p in key for p in (".attn.", ".mlp."))):
+                return "joint"
+        elif kind in ("flux", "flux2"):
+            if any(p in key for p in ("txt_attn", "txt_mlp", "ff_context", "add_q", "add_k", "add_v", "to_add_out")):
+                return "text"
+            if "single_blocks." in key or "single_transformer_blocks." in key:
+                return "joint"
+        elif kind == "z_image":
+            if "context_refiner." in key:
+                return "text"
+            if "layers." in key and any(p in key for p in (".attention.", ".feed_forward.")):
+                return "joint"
+        elif kind == "moss_image":
+            if "text_embedder." in key:
+                return "text"
+            if "layers." in key and ".proj." in key:
+                return "moss_joint"
+        elif kind == "anima":
+            # Anima positions index adapted T5 rows, not the raw Qwen LLM adapter.
+            if any(p in key for p in (".cross_attn.k_proj", ".cross_attn.v_proj")):
+                return "text"
+        elif kind == "sdxl":
+            if ".attn2." in key and any(p in key for p in (".to_k", ".to_v")):
+                return "text"
+        return None
+
+    def _apply_token_mask(self, output, adapter_name):
+        """Suppress other subjects on positive text rows, preserving shared tokens."""
+        if (not self.mask_enabled or not self.token_pos_maps or output.ndim != 3
+                or not adapter_name or adapter_name.startswith("_")):
+            return output
+        kind = self._text_layer_kind()
+        if kind is None:
+            return output
+        state = _token_mask_context.get() or {}
+        branches = state.get("branches", [0])
+        batch = state.get("batch", output.shape[0])
+        if not branches or batch % len(branches):
+            raise ValueError("FreeFuse token masking received an invalid CFG batch layout.")
+        if kind == "krea_layerwise":
+            # Native Krea2 folds [batch,text,layers,dim] into [batch*text,layers,dim].
+            if output.shape[0] % batch:
+                raise ValueError("Krea2 text-fusion rows do not match the model batch.")
+            start, length = 0, output.shape[0] // batch
+            mask = output.new_ones(batch, length)
+        else:
+            if output.shape[0] != batch:
+                raise ValueError("FreeFuse token masking received an unexpected text batch.")
+            start, length = 0, output.shape[1]
+            if kind in ("joint", "moss_joint"):
+                spatial = self.masks.get(adapter_name) if self.masks else None
+                if spatial is None:
+                    return output
+                text_length = state.get("text_length")
+                if self.token_model_type == "z_image":
+                    # Native Z-Image pads caption rows before concatenation.
+                    text_length = output.shape[1] - spatial.numel()
+                if text_length is None:
+                    text_length = output.shape[1] - spatial.numel()
+                start = spatial.numel() if kind == "moss_joint" else 0
+                length = min(text_length, output.shape[1] - start)
+            if length <= 0:
+                return output
+            mask = output.new_ones(batch, output.shape[1])
+
+        per_branch = batch // len(branches)
+        for row in range(batch):
+            if branches[row // per_branch] != 0:
+                continue
+            sample = row % per_branch
+            positions = {}
+            for name, payload in self.token_pos_maps.items():
+                if not payload:
+                    positions[name] = set()
+                    continue
+                if isinstance(payload[0], (list, tuple)):
+                    if len(payload) not in (1, per_branch):
+                        raise ValueError("FreeFuse token positions do not match the prompt batch.")
+                    payload = payload[0 if len(payload) == 1 else sample]
+                positions[name] = {p for p in payload if isinstance(p, int) and 0 <= p < length}
+            protected = set(positions.get(adapter_name, ()))
+            others = set()
+            for name, indices in positions.items():
+                if name.startswith("_"):
+                    protected.update(indices)
+                elif name != adapter_name:
+                    others.update(indices)
+            indices = sorted(others - protected)
+            if indices:
+                mask[row, torch.tensor(indices, device=output.device) + start] = 0
+        if kind == "krea_layerwise":
+            return output * mask.reshape(output.shape[0], 1, 1)
+        return output * mask.unsqueeze(-1)
     
     def _get_mask_for_sequence(
         self,
@@ -849,6 +1001,8 @@ class MultiAdapterBypassForwardHook:
                         mask_2d = mask.view(1, 1, h_h, h_w)
                         h_out = h_out * mask_2d
             
+            h_out = self._apply_token_mask(h_out, adapter_name)
+
             if offset is not None:
                 # offset = (weight_dim, start, size)
                 # weight_dim=0 means output features dimension
@@ -1026,6 +1180,8 @@ class OffsetBypassInjectionManager:
         self._pending_masks: Optional[Dict[str, torch.Tensor]] = None
         self._pending_latent_size: Optional[Tuple[int, int]] = None
         self._pending_txt_len: int = 256
+        self._pending_token_pos_maps = None
+        self._pending_model_type = None
         self._lora_enabled: bool = True
 
         # Track which model instance the current `hooks` list was built for.
@@ -1186,7 +1342,9 @@ class OffsetBypassInjectionManager:
                     hook.set_masks(
                         current_manager._pending_masks,
                         current_manager._pending_latent_size,
-                        current_manager._pending_txt_len
+                        current_manager._pending_txt_len,
+                        current_manager._pending_token_pos_maps,
+                        current_manager._pending_model_type,
                     )
         
         def eject_all(model_patcher):
@@ -1236,6 +1394,8 @@ class OffsetBypassInjectionManager:
         masks: Dict[str, torch.Tensor],
         latent_size: Tuple[int, int],
         txt_len: int = 256,
+        token_pos_maps: Optional[Dict] = None,
+        model_type: Optional[str] = None,
     ):
         """
         Set FreeFuse masks on all hooks.
@@ -1252,6 +1412,8 @@ class OffsetBypassInjectionManager:
         self._pending_masks = masks
         self._pending_latent_size = latent_size
         self._pending_txt_len = txt_len
+        self._pending_token_pos_maps = token_pos_maps
+        self._pending_model_type = model_type
         
         # Apply to existing hooks immediately (if already injected)
         hooks_updated = 0
@@ -1263,7 +1425,7 @@ class OffsetBypassInjectionManager:
                 and current_forward.__self__ is hook
             )
             if is_injected:
-                hook.set_masks(masks, latent_size, txt_len)
+                hook.set_masks(masks, latent_size, txt_len, token_pos_maps, model_type)
                 hooks_updated += 1
         
         if hooks_updated > 0:
@@ -1275,6 +1437,8 @@ class OffsetBypassInjectionManager:
         """Clear masks from all hooks."""
         self._pending_masks = None
         self._pending_latent_size = None
+        self._pending_token_pos_maps = None
+        self._pending_model_type = None
         for hook in self.hooks:
             hook.clear_masks()
     
