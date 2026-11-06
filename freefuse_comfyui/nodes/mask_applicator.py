@@ -24,6 +24,7 @@ from comfy.weight_adapter.base import WeightAdapterBase, WeightAdapterTrainBase
 from ..freefuse_core.bypass_lora_loader import (
     OffsetBypassInjectionManager,
     MultiAdapterBypassForwardHook,
+    bypass_token_mask_context,
 )
 from ..freefuse_core.attention_bias import (
     construct_attention_bias,
@@ -65,7 +66,7 @@ class FreeFuseMaskApplicator:
             "optional": {
                 "enable_token_masking": ("BOOLEAN", {
                     "default": True,
-                    "tooltip": "Zero out LoRA at other concepts' token positions (H3 keeps text/audio contributions global)."
+                    "tooltip": "Suppress each character LoRA on other characters' positive-prompt tokens; preserve shared text and negative prompts. H3 keeps text/audio contributions global."
                 }),
                 "latent": ("LATENT", {
                     "tooltip": "Optional latent for size reference"
@@ -194,7 +195,10 @@ When enabled, constructs soft attention bias to guide cross-attention:
             adapter_mask_map,
             latent_size,
             token_pos_maps if enable_token_masking else None,
+            model_type,
         )
+        if enable_token_masking and token_pos_maps:
+            self._install_token_mask_wrapper(model_clone)
         
         print(f"[FreeFuse] Applied masks to {len(adapter_mask_map)} adapters")
         print(f"[FreeFuse] Latent size: {latent_size}")
@@ -441,6 +445,7 @@ When enabled, constructs soft attention bias to guide cross-attention:
         adapter_mask_map: Dict[str, Dict],
         latent_size: Tuple[int, int],
         token_pos_maps: Optional[Dict[str, List[int]]],
+        model_type: Optional[str] = None,
     ):
         """Apply masks to model's LoRA layers using FreeFuse bypass hooks.
         
@@ -471,7 +476,7 @@ When enabled, constructs soft attention bias to guide cross-attention:
             for manager_info in managers_list:
                 manager = manager_info.get("manager")
                 if manager is not None and isinstance(manager, OffsetBypassInjectionManager):
-                    manager.set_masks(masks, latent_size, txt_len)
+                    manager.set_masks(masks, latent_size, txt_len, token_pos_maps, model_type)
                     hooks_updated += manager.get_hook_count()
             
             if hooks_updated > 0:
@@ -481,12 +486,13 @@ When enabled, constructs soft attention bias to guide cross-attention:
         # Fallback: Single manager
         manager = transformer_options.get("freefuse_bypass_manager")
         if manager is not None and isinstance(manager, OffsetBypassInjectionManager):
-            manager.set_masks(masks, latent_size, txt_len)
+            manager.set_masks(masks, latent_size, txt_len, token_pos_maps, model_type)
             logging.info(f"[FreeFuse] Applied masks via single bypass manager ({manager.get_hook_count()} hooks), txt_len={txt_len}")
             return
         
         # Fallback: Look for hooks in model traversal
-        hooks_found = self._find_hooks_in_model(model_patcher, masks, latent_size, txt_len)
+        hooks_found = self._find_hooks_in_model(
+            model_patcher, masks, latent_size, txt_len, token_pos_maps, model_type)
         if hooks_found > 0:
             logging.info(f"[FreeFuse] Applied masks to {hooks_found} hooks via model traversal")
             return
@@ -501,6 +507,8 @@ When enabled, constructs soft attention bias to guide cross-attention:
         masks: Dict[str, torch.Tensor],
         latent_size: Tuple[int, int],
         txt_len: int = 512,
+        token_pos_maps: Optional[Dict] = None,
+        model_type: Optional[str] = None,
     ) -> int:
         """Find MultiAdapterBypassForwardHook instances in the model and set masks."""
         hooks_found = 0
@@ -519,10 +527,25 @@ When enabled, constructs soft attention bias to guide cross-attention:
                 if hasattr(forward, '__self__'):
                     hook_self = forward.__self__
                     if isinstance(hook_self, MultiAdapterBypassForwardHook):
-                        hook_self.set_masks(masks, latent_size, txt_len)
+                        hook_self.set_masks(masks, latent_size, txt_len, token_pos_maps, model_type)
                         hooks_found += 1
         
         return hooks_found
+
+    @staticmethod
+    def _install_token_mask_wrapper(model_patcher):
+        previous = model_patcher.model_options.get("model_function_wrapper")
+        if getattr(previous, "_freefuse_token_mask", False):
+            return
+
+        def token_mask_wrapper(model_function, params):
+            with bypass_token_mask_context(params):
+                if previous is not None:
+                    return previous(model_function, params)
+                return model_function(params["input"], params["timestep"], **params.get("c", {}))
+
+        token_mask_wrapper._freefuse_token_mask = True
+        model_patcher.set_model_unet_function_wrapper(token_mask_wrapper)
     
     def _get_diffusion_model(
         self,

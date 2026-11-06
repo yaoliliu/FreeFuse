@@ -1,3 +1,10 @@
+# 1.3.2
+
+- Fix `enable_token_masking` not reaching bypass LoRA hooks. Route other subjects' text positions for Krea2, Flux/Flux2, Z-Image, MOSS Image, Anima and SDXL using each model's native text layout.
+- Preserve shared and background text, negative CFG branches, per-prompt positions and option resets across model clones and reinjection. H3 retains its video-only routing and global text/audio behavior.
+- Correct native SDXL text-layer and Z-Image refiner classification; handle Krea2 text-fusion layers whose token axis is folded into the batch dimension.
+- Thanks to @mertkasar for reporting and investigating the missing token-mask plumbing in [issue #34](https://github.com/yaoliliu/FreeFuse/issues/34).
+
 # 1.3.1
 
 - Fix Krea2 `mlp.gate/up/down` LoRA masks being stretched across text and image tokens after being misclassified as Anima layers. Krea2 MLPs now retain the same text/image alignment as their attention layers.

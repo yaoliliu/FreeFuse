@@ -101,7 +101,7 @@ Example:
 
 ### Phase 2 (FreeFuse Mask Applicator)
 
-- `enable_token_masking`: Token-level masking (zero out other concept tokens)
+- `enable_token_masking`: Suppress each character LoRA on other characters' positive-prompt text tokens. Shared/overlapping concept positions, background text and negative CFG branches are preserved. Applies to bypass LoRAs on Krea2, Flux/Flux2, Z-Image, MOSS Image, Anima and SDXL; H3 keeps text/audio contributions global.
 - `enable_attention_bias`: Enable attention bias
 - `bias_scale`: Negative bias strength (suppresses wrong concepts)
 - `positive_bias_scale`: Positive bias strength (enhances correct concepts)
